@@ -1669,10 +1669,13 @@ app.post("/conversations/:phone/send", async (req, res) => {
 });
 
 app.get("/webhook", (req, res) => {
-  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
   const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
+  const token = String(req.query["hub.verify_token"] || "").trim();
   const challenge = req.query["hub.challenge"];
+  const verifyToken = String(process.env.WHATSAPP_VERIFY_TOKEN || "").trim();
+
+  console.log("ENV TOKEN:", verifyToken);
+  console.log("REQ TOKEN:", token);
 
   if (mode === "subscribe" && token === verifyToken) {
     return res.status(200).send(challenge);
