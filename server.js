@@ -1686,6 +1686,9 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
+    console.log("POST WEBHOOK RECEIVED");
+    console.dir(req.body, { depth: null });
+
     const entry = req.body.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
