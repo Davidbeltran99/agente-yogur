@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
-const { DatabaseSync } = require("node:sqlite");
+const Database = require("better-sqlite3");
 
 const ESTADOS_VALIDOS = new Set(["pendiente", "en proceso", "entregado", "cancelado"]);
 const DEFAULT_DB_PATH = path.join(__dirname, "data", "agente-yogur.sqlite");
@@ -63,7 +63,7 @@ function ensureDatabaseDirectory(dbPath) {
 const databasePath = getDatabasePath();
 ensureDatabaseDirectory(databasePath);
 
-const db = new DatabaseSync(databasePath);
+const db = new Database(databasePath);
 db.exec("PRAGMA foreign_keys = ON;");
 db.exec("PRAGMA journal_mode = WAL;");
 
