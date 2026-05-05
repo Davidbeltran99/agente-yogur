@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Panel de pedidos y CRM | Agente Yogur</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Panel operativo</p>
+        <h1>Pedidos y conversaciones de WhatsApp</h1>
+        <p class="subtitle">Panel unificado para revisar pedidos, conversaciones y enviar respuestas manuales sin tocar el webhook.</p>
+      </div>
+      <div class="topbar-actions">
+        <label class="filter">
+          <span>Estado</span>
+          <select id="statusFilter">
+            <option value="">Todos</option>
+            <option value="pendiente">Pendiente</option>
+            <option value="en proceso">En proceso</option>
+            <option value="entregado">Entregado</option>
+            <option value="cancelado">Cancelado</option>
+          </select>
+        </label>
+        <button id="refreshButton" class="secondary">Actualizar todo</button>
+      </div>
+    </header>
+
+    <section class="workspace-grid">
+      <div class="workspace-column">
+        <main class="layout">
+          <section class="panel table-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Listado de pedidos</h2>
+                <p id="tableMeta">Cargando pedidos...</p>
+              </div>
+            </div>
+
+            <div id="feedback" class="feedback" hidden></div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Cliente</th>
+                    <th>Detalle</th>
+                    <th>Dirección</th>
+                    <th>Pago</th>
+                    <th>Estado</th>
+                    <th>Acción</th>
+                  </tr>
+                </thead>
+                <tbody id="ordersTableBody">
+                  <tr>
+                    <td colspan="7" class="empty">Cargando...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="panel detail-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Detalle del pedido</h2>
+                <p>Selecciona una fila para ver más información.</p>
+              </div>
+            </div>
+
+            <div id="orderDetail" class="detail-empty">
+              <p>No hay ningún pedido seleccionado.</p>
+            </div>
+          </aside>
+        </main>
+      </div>
+
+      <section class="panel crm-panel">
+        <div class="panel-header crm-header">
+          <div>
+            <h2>Conversaciones / CRM</h2>
+            <p id="conversationMeta">Cargando conversaciones...</p>
+          </div>
+        </div>
+
+        <div id="chatFeedback" class="feedback" hidden></div>
+
+        <div class="crm-layout">
+          <aside class="conversation-sidebar">
+            <div id="conversationList" class="conversation-list">
+              <div class="conversation-empty">Cargando conversaciones...</div>
+            </div>
+          </aside>
+
+          <section class="chat-panel">
+            <div class="chat-header">
+              <div>
+                <h3 id="chatTitle">Selecciona una conversación</h3>
+                <p id="chatSubtitle" class="helper-text">Aquí verás el historial del cliente.</p>
+              </div>
+              <div id="chatOrderSummary" class="chat-order-summary"></div>
+            </div>
+
+            <div id="chatMessages" class="chat-messages empty-chat">
+              <p>No hay conversación seleccionada.</p>
+            </div>
+
+            <form id="chatComposer" class="chat-composer">
+              <textarea id="chatMessageInput" rows="3" placeholder="Escribe una respuesta manual..."></textarea>
+              <div class="chat-composer-actions">
+                <p class="helper-text">Si WhatsApp está desactivado, el envío queda simulado y se guarda igual en DB.</p>
+                <button type="submit" id="sendMessageButton" class="primary">Enviar mensaje</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

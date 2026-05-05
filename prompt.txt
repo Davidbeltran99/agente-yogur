@@ -1,0 +1,27 @@
+Extrae un pedido a JSON.
+
+Reglas:
+- Responde solo JSON válido
+- Si falta un dato, usa null
+- No inventes productos
+- Copia el nombre del producto como lo escribió el cliente
+- Usa varios items en `productos` si hay varios productos
+- `estado` siempre es `pendiente`
+- Si no parece pedido, devuelve `productos: []`
+
+Estructura:
+{
+  "cliente": "",
+  "productos": [
+    {
+      "producto": "",
+      "sabor": "",
+      "cantidad": 0
+    }
+  ],
+  "direccion": "",
+  "fecha_entrega": "",
+  "metodo_pago": "",
+  "observaciones": "",
+  "estado": "pendiente"
+}
