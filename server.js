@@ -1805,6 +1805,12 @@ app.post("/simulate-message", async (req, res) => {
   }
 });
 
+app.post("/debug-webhook", (req, res) => {
+  console.log("DEBUG POST RECEIVED");
+  console.dir(req.body, { depth: null });
+  return res.sendStatus(200);
+});
+
 app.post("/pedido/manual", async (req, res) => {
   try {
     const mensaje = req.body.message;
