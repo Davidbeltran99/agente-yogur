@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tellolac | Acceso admin</title>
+  <link rel="icon" type="image/jpeg" href="/assets/logo-tellolac.jpg" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="auth-card">
+      <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="auth-logo" />
+      <p class="eyebrow">Acceso privado</p>
+      <h1>Panel admin Tellolac</h1>
+      <p class="subtitle">Ingresa con tu usuario y contraseña de administrador.</p>
+
+      <form id="loginForm">
+        <label>
+          <span>Usuario</span>
+          <input id="username" name="username" type="text" autocomplete="username" required />
+        </label>
+        <label>
+          <span>Contraseña</span>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <p id="loginError" class="auth-error"></p>
+        <button type="submit" class="primary">Ingresar</button>
+      </form>
+
+      <p class="auth-note">No hay registro público habilitado.</p>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const errorNode = document.getElementById('loginError');
+    const params = new URLSearchParams(window.location.search);
+    const next = params.get('next') || '/';
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      errorNode.textContent = '';
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      try {
+        const response = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'No se pudo iniciar sesión');
+        }
+
+        window.location.href = next.startsWith('/') ? next : '/';
+      } catch (error) {
+        errorNode.textContent = error.message;
+      }
+    });
+  </script>
+</body>
+</html>

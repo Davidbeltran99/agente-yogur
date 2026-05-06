@@ -35,18 +35,18 @@ textarea {
 }
 
 .app-shell {
-  max-width: 1500px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 18px 20px;
 }
 
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 20px;
-  padding: 24px;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 18px 20px;
   border: 1px solid var(--line);
   border-radius: 24px;
   background: linear-gradient(135deg, rgba(22, 33, 43, 0.96), rgba(29, 44, 56, 0.92));
@@ -102,8 +102,12 @@ h1 {
 .topbar-actions {
   display: flex;
   align-items: end;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
+}
+
+.compact-filter select {
+  min-width: 140px;
 }
 
 .filter {
@@ -114,12 +118,13 @@ h1 {
 
 select,
 button,
-textarea {
+textarea,
+input {
   border-radius: 10px;
   border: 1px solid var(--line);
   background: #0f1a23;
   color: var(--text);
-  padding: 10px 12px;
+  padding: 9px 11px;
 }
 
 button {
@@ -143,6 +148,10 @@ button.secondary {
   background: rgba(255, 255, 255, 0.04);
 }
 
+button.ghost {
+  background: transparent;
+}
+
 button:disabled {
   opacity: 0.6;
   cursor: wait;
@@ -152,7 +161,7 @@ button:disabled {
 
 .workspace-grid {
   display: grid;
-  gap: 20px;
+  gap: 14px;
 }
 
 .workspace-column {
@@ -161,8 +170,8 @@ button:disabled {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(0, 2.8fr) minmax(300px, 0.92fr);
+  gap: 14px;
 }
 
 .panel {
@@ -176,7 +185,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 20px 0;
+  padding: 14px 16px 0;
 }
 
 .table-panel {
@@ -185,18 +194,18 @@ button:disabled {
 
 .table-wrap {
   overflow: auto;
-  padding: 16px 20px 20px;
+  padding: 12px 16px 16px;
 }
 
 .table-wrap table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 940px;
+  min-width: 980px;
 }
 
 th,
 td {
-  padding: 14px 12px;
+  padding: 10px 10px;
   text-align: left;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
@@ -269,11 +278,11 @@ tbody tr.active {
 }
 
 .row-actions select {
-  min-width: 140px;
+  min-width: 120px;
 }
 
 .feedback {
-  margin: 16px 20px 0;
+  margin: 12px 16px 0;
   padding: 12px 14px;
   border-radius: 12px;
   font-size: 0.95rem;
@@ -292,7 +301,7 @@ tbody tr.active {
 }
 
 .detail-panel {
-  padding: 20px;
+  padding: 14px;
 }
 
 .detail-empty {
@@ -305,14 +314,14 @@ tbody tr.active {
 
 .detail-grid {
   display: grid;
-  gap: 14px;
-  margin-top: 18px;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .detail-card {
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 14px;
+  padding: 10px 12px;
   background: rgba(255, 255, 255, 0.02);
 }
 
@@ -356,8 +365,8 @@ tbody tr.active {
 
 .crm-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  min-height: 640px;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 500px;
 }
 
 .conversation-sidebar {
@@ -375,7 +384,7 @@ tbody tr.active {
 }
 
 .conversation-item {
-  padding: 16px 18px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line);
   display: grid;
   gap: 8px;
@@ -416,11 +425,11 @@ tbody tr.active {
 .chat-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: 640px;
+  min-height: 500px;
 }
 
 .chat-header {
-  padding: 20px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
@@ -436,7 +445,7 @@ tbody tr.active {
 }
 
 .chat-messages {
-  padding: 20px;
+  padding: 12px 14px;
   overflow: auto;
   background: linear-gradient(180deg, #101922 0%, #16212b 100%);
   display: flex;
@@ -451,8 +460,8 @@ tbody tr.active {
 }
 
 .message-bubble {
-  max-width: min(75%, 560px);
-  padding: 12px 14px;
+  max-width: min(72%, 520px);
+  padding: 10px 12px;
   border-radius: 18px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -492,13 +501,13 @@ tbody tr.active {
 
 .chat-composer {
   border-top: 1px solid var(--line);
-  padding: 16px 20px 20px;
+  padding: 12px 14px 14px;
   display: grid;
   gap: 12px;
 }
 
 .chat-composer textarea {
-  min-height: 90px;
+  min-height: 72px;
 }
 
 .chat-composer-actions {
@@ -509,8 +518,12 @@ tbody tr.active {
 }
 
 @media (max-width: 1200px) {
+  .layout {
+    grid-template-columns: minmax(0, 2.2fr) minmax(280px, 0.9fr);
+  }
+
   .crm-layout {
-    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
   }
 }
 
@@ -524,6 +537,52 @@ tbody tr.active {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
+}
+
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.auth-card {
+  width: min(100%, 420px);
+  background: linear-gradient(180deg, rgba(22, 33, 43, 0.98), rgba(18, 28, 37, 0.96));
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+  padding: 24px;
+}
+
+.auth-card form {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.auth-card label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.auth-logo {
+  width: 120px;
+  height: auto;
+  margin-bottom: 12px;
+}
+
+.auth-error {
+  color: var(--danger);
+  min-height: 20px;
+  font-size: 0.9rem;
+}
+
+.auth-note {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 @media (max-width: 720px) {

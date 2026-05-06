@@ -1,6 +1,6 @@
 require("dotenv").config();
 
-const { createHash } = require("crypto");
+const { createHash, createHmac, timingSafeEqual } = require("crypto");
 const path = require("path");
 const express = require("express");
 const { procesarMensaje, OPENAI_MODEL } = require("./ollama");
@@ -53,9 +53,18 @@ const {
 const app = express();
 const port = process.env.PORT || 3000;
 const APP_VERSION = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.APP_VERSION || "local").trim();
+const publicDir = path.join(__dirname, "public");
+const PANEL_AUTH_COOKIE = "tellolac_admin_session";
+const PANEL_AUTH_USERNAME = String(process.env.PANEL_AUTH_USERNAME || "admin").trim() || "admin";
+const PANEL_AUTH_PASSWORD = String(process.env.PANEL_AUTH_PASSWORD || "").trim();
+const PANEL_AUTH_SECRET = String(process.env.PANEL_AUTH_SECRET || process.env.WEBHOOK_VERIFY_TOKEN || "dev-panel-secret").trim();
+const PANEL_AUTH_ENABLED = Boolean(PANEL_AUTH_PASSWORD);
+const PANEL_AUTH_TTL_MS = Number(process.env.PANEL_AUTH_TTL_MS || 1000 * 60 * 60 * 12);
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use("/assets", express.static(path.join(publicDir, "assets")));
+app.get("/styles.css", (_req, res) => res.sendFile(path.join(publicDir, "styles.css")));
+app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
 
 const GENERIC_PRODUCT_ALIASES = new Map([
   ["yogur", "yogur"],
@@ -1422,6 +1431,81 @@ function logRuntimeConfigSnapshot(context = "runtime") {
   }
 }
 
+function parseCookies(req) {
+  const header = String(req.headers.cookie || "");
+  return header.split(";").reduce((acc, chunk) => {
+    const [rawKey, ...rest] = chunk.split("=");
+    const key = String(rawKey || "").trim();
+    if (!key) {
+      return acc;
+    }
+
+    acc[key] = decodeURIComponent(rest.join("=").trim());
+    return acc;
+  }, {});
+}
+
+function createPanelSessionToken(username) {
+  const expiresAt = Date.now() + PANEL_AUTH_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({ username, expiresAt })).toString("base64url");
+  const signature = createHmac("sha256", PANEL_AUTH_SECRET).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifyPanelSessionToken(token) {
+  if (!token || !token.includes(".")) {
+    return null;
+  }
+
+  const [payload, signature] = token.split(".");
+  const expected = createHmac("sha256", PANEL_AUTH_SECRET).update(payload).digest("base64url");
+
+  try {
+    if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+      return null;
+    }
+
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!decoded?.username || !decoded?.expiresAt || decoded.expiresAt < Date.now()) {
+      return null;
+    }
+
+    return decoded;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function setPanelSessionCookie(res, username) {
+  const token = createPanelSessionToken(username);
+  const maxAge = Math.floor(PANEL_AUTH_TTL_MS / 1000);
+  res.setHeader("Set-Cookie", `${PANEL_AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
+}
+
+function clearPanelSessionCookie(res) {
+  res.setHeader("Set-Cookie", `${PANEL_AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+
+function requirePanelAuth(req, res, next) {
+  if (!PANEL_AUTH_ENABLED) {
+    return next();
+  }
+
+  const cookies = parseCookies(req);
+  const session = verifyPanelSessionToken(cookies[PANEL_AUTH_COOKIE]);
+  if (session) {
+    req.panelSession = session;
+    return next();
+  }
+
+  const wantsHtml = String(req.headers.accept || "").includes("text/html");
+  if (wantsHtml && req.method === "GET") {
+    return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl || "/")}`);
+  }
+
+  return res.status(401).json({ ok: false, error: "No autorizado" });
+}
+
 function sendError(res, statusCode, errorMessage) {
   return res.status(statusCode).json({ ok: false, error: errorMessage });
 }
@@ -2103,6 +2187,48 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   };
 }
 
+app.get("/login", (req, res) => {
+  if (!PANEL_AUTH_ENABLED) {
+    return res.redirect("/");
+  }
+
+  return res.sendFile(path.join(publicDir, "login.html"));
+});
+
+app.get("/auth/session", (req, res) => {
+  const session = verifyPanelSessionToken(parseCookies(req)[PANEL_AUTH_COOKIE]);
+  return res.json({
+    ok: true,
+    authEnabled: PANEL_AUTH_ENABLED,
+    authenticated: Boolean(session) || !PANEL_AUTH_ENABLED,
+    username: session?.username || (PANEL_AUTH_ENABLED ? null : PANEL_AUTH_USERNAME)
+  });
+});
+
+app.post("/auth/login", (req, res) => {
+  if (!PANEL_AUTH_ENABLED) {
+    return res.json({ ok: true, authEnabled: false, authenticated: true });
+  }
+
+  const username = limpiarTexto(req.body?.username);
+  const password = String(req.body?.password || "");
+  if (username !== PANEL_AUTH_USERNAME || password !== PANEL_AUTH_PASSWORD) {
+    return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
+  }
+
+  setPanelSessionCookie(res, username);
+  return res.json({ ok: true, authenticated: true, username });
+});
+
+app.post("/auth/logout", (_req, res) => {
+  clearPanelSessionCookie(res);
+  return res.json({ ok: true });
+});
+
+app.get("/", requirePanelAuth, (_req, res) => {
+  return res.sendFile(path.join(publicDir, "index.html"));
+});
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -2112,12 +2238,13 @@ app.get("/health", (_req, res) => {
     dbPath: databasePath,
     catalogProducts: countCatalogProducts(),
     whatsappEnabled: WHATSAPP_ENABLED,
+    panelAuthEnabled: PANEL_AUTH_ENABLED,
     sourceOfTruth: "sqlite",
     sheetsRole: SHEETS_BACKUP_ENABLED ? "reporting_backup" : "disabled"
   });
 });
 
-app.get("/orders", (req, res) => {
+app.get("/orders", requirePanelAuth, (req, res) => {
   try {
     const status = normalizarEstadoPanel(req.query.status);
     const orders = listOrders({ status });
@@ -2137,7 +2264,7 @@ app.get("/orders", (req, res) => {
   }
 });
 
-app.patch("/orders/:id/status", async (req, res) => {
+app.patch("/orders/:id/status", requirePanelAuth, async (req, res) => {
   try {
     const status = normalizarEstadoPanel(req.body?.status);
 
@@ -2167,7 +2294,7 @@ app.patch("/orders/:id/status", async (req, res) => {
   }
 });
 
-app.post("/admin/rebuild-sheets", async (_req, res) => {
+app.post("/admin/rebuild-sheets", requirePanelAuth, async (_req, res) => {
   try {
     const orders = listOrders();
     const result = await reconstruirSheetsDesdeOrders(orders);
@@ -2179,7 +2306,7 @@ app.post("/admin/rebuild-sheets", async (_req, res) => {
   }
 });
 
-app.post("/admin/catalog/sync", async (_req, res) => {
+app.post("/admin/catalog/sync", requirePanelAuth, async (_req, res) => {
   try {
     const result = await sincronizarCatalogoDesdeTreinta();
     logEvent("catalogo_sincronizado_manual", {
@@ -2202,7 +2329,7 @@ app.post("/admin/catalog/sync", async (_req, res) => {
   }
 });
 
-app.get("/conversations", (_req, res) => {
+app.get("/conversations", requirePanelAuth, (_req, res) => {
   try {
     const limit = parseNonNegativeInteger(_req.query.limit, {
       defaultValue: CONVERSATIONS_DEFAULT_LIMIT,
@@ -2264,10 +2391,10 @@ function responderMensajesConversacion(req, res) {
   }
 }
 
-app.get("/conversations/:phone", responderMensajesConversacion);
-app.get("/conversations/:phone/messages", responderMensajesConversacion);
+app.get("/conversations/:phone", requirePanelAuth, responderMensajesConversacion);
+app.get("/conversations/:phone/messages", requirePanelAuth, responderMensajesConversacion);
 
-app.post("/conversations/:phone/send", async (req, res) => {
+app.post("/conversations/:phone/send", requirePanelAuth, async (req, res) => {
   try {
     const phone = limpiarTexto(req.params.phone);
     const messageText = limpiarTexto(req.body?.message || req.body?.mensaje);
@@ -2504,7 +2631,7 @@ app.post("/debug-webhook", (req, res) => {
   return res.sendStatus(200);
 });
 
-app.post("/debug-send-whatsapp", async (req, res) => {
+app.post("/debug-send-whatsapp", requirePanelAuth, async (req, res) => {
   try {
     const to = limpiarTexto(req.body?.to);
     const message = limpiarTexto(req.body?.message);
@@ -2542,7 +2669,7 @@ app.post("/debug-send-whatsapp", async (req, res) => {
   }
 });
 
-app.post("/pedido/manual", async (req, res) => {
+app.post("/pedido/manual", requirePanelAuth, async (req, res) => {
   try {
     const mensaje = req.body.message;
 

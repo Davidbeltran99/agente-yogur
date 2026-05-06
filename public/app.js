@@ -1,5 +1,6 @@
 const statusFilter = document.getElementById("statusFilter");
 const refreshButton = document.getElementById("refreshButton");
+const logoutButton = document.getElementById("logoutButton");
 const ordersTableBody = document.getElementById("ordersTableBody");
 const orderDetail = document.getElementById("orderDetail");
 const tableMeta = document.getElementById("tableMeta");
@@ -74,6 +75,11 @@ function formatOrderItemsSummary(order) {
     .join(", ");
 }
 
+function redirectToLogin() {
+  const next = encodeURIComponent(window.location.pathname + window.location.search);
+  window.location.href = `/login?next=${next}`;
+}
+
 function showFeedback(message, type = "success") {
   feedback.hidden = false;
   feedback.className = `feedback ${type}`;
@@ -116,6 +122,11 @@ async function loadOrders() {
     const response = await fetch(`/orders${query}`);
     const payload = await response.json();
 
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
     if (!response.ok || !payload.ok) {
       throw new Error(payload.detalle || payload.error || "No se pudieron cargar los pedidos");
     }
@@ -147,6 +158,11 @@ async function loadConversations() {
   try {
     const response = await fetch("/conversations");
     const payload = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
 
     if (!response.ok || !payload.ok) {
       throw new Error(payload.detalle || payload.error || "No se pudieron cargar las conversaciones");
@@ -184,6 +200,11 @@ async function loadMessages(phone) {
   try {
     const response = await fetch(`/conversations/${encodeURIComponent(phone)}/messages`);
     const payload = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
 
     if (!response.ok || !payload.ok) {
       throw new Error(payload.detalle || payload.error || "No se pudieron cargar los mensajes");
@@ -388,6 +409,11 @@ async function updateOrderStatus(orderId, nextStatus, button) {
     });
     const payload = await response.json();
 
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
     if (!response.ok || !payload.ok) {
       throw new Error(payload.detalle || payload.error || "No se pudo actualizar el estado");
     }
@@ -427,6 +453,11 @@ async function sendChatMessage(event) {
       body: JSON.stringify({ message })
     });
     const payload = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
 
     if (!response.ok || !payload.ok) {
       throw new Error(payload.detalle || payload.error || "No se pudo enviar el mensaje");
@@ -498,6 +529,14 @@ statusFilter.addEventListener("change", () => {
 
 refreshButton.addEventListener("click", () => {
   loadDashboard();
+});
+
+logoutButton?.addEventListener("click", async () => {
+  try {
+    await fetch("/auth/logout", { method: "POST" });
+  } finally {
+    redirectToLogin();
+  }
 });
 
 chatComposer.addEventListener("submit", sendChatMessage);
