@@ -544,10 +544,13 @@ tbody tr.active {
   display: grid;
   place-items: center;
   padding: 24px;
+  background:
+    radial-gradient(circle at top, rgba(243, 201, 105, 0.16), transparent 28%),
+    linear-gradient(180deg, #0b131a 0%, #101922 100%);
 }
 
 .auth-card {
-  width: min(100%, 420px);
+  width: min(100%, 400px);
   background: linear-gradient(180deg, rgba(22, 33, 43, 0.98), rgba(18, 28, 37, 0.96));
   border: 1px solid var(--line);
   border-radius: 22px;

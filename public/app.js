@@ -18,11 +18,13 @@ const sendMessageButton = document.getElementById("sendMessageButton");
 const chatFeedback = document.getElementById("chatFeedback");
 
 const STATUS_OPTIONS = ["pendiente", "en proceso", "entregado", "cancelado"];
+const PANEL_LOGIN_PATH = window.__PANEL_LOGIN_PATH__ || "/portal";
 let orders = [];
 let selectedOrderId = null;
 let conversations = [];
 let selectedPhone = null;
 let activeMessages = [];
+let sessionTimeoutHandle = null;
 
 function formatDate(value) {
   if (!value) return "-";
@@ -77,7 +79,45 @@ function formatOrderItemsSummary(order) {
 
 function redirectToLogin() {
   const next = encodeURIComponent(window.location.pathname + window.location.search);
-  window.location.href = `/login?next=${next}`;
+  window.location.href = `${PANEL_LOGIN_PATH}?next=${next}`;
+}
+
+function scheduleSessionTimeout(expiresAt) {
+  if (sessionTimeoutHandle) {
+    window.clearTimeout(sessionTimeoutHandle);
+    sessionTimeoutHandle = null;
+  }
+
+  if (!expiresAt) {
+    return;
+  }
+
+  const remainingMs = Math.max(Number(expiresAt) - Date.now(), 0);
+  sessionTimeoutHandle = window.setTimeout(async () => {
+    try {
+      await fetch("/auth/logout", { method: "POST" });
+    } finally {
+      redirectToLogin();
+    }
+  }, remainingMs);
+}
+
+async function initSessionGuard() {
+  try {
+    const response = await fetch("/auth/session", { cache: "no-store" });
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok || payload.authenticated === false) {
+      redirectToLogin();
+      return false;
+    }
+
+    scheduleSessionTimeout(payload.expiresAt);
+    return true;
+  } catch (_error) {
+    redirectToLogin();
+    return false;
+  }
 }
 
 function showFeedback(message, type = "success") {
@@ -541,4 +581,9 @@ logoutButton?.addEventListener("click", async () => {
 
 chatComposer.addEventListener("submit", sendChatMessage);
 
-loadDashboard();
+(async () => {
+  const authenticated = await initSessionGuard();
+  if (authenticated) {
+    loadDashboard();
+  }
+})();

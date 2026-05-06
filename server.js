@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const { createHash, createHmac, timingSafeEqual } = require("crypto");
+const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { procesarMensaje, OPENAI_MODEL } = require("./ollama");
@@ -60,11 +61,24 @@ const PANEL_AUTH_PASSWORD = String(process.env.PANEL_AUTH_PASSWORD || "").trim()
 const PANEL_AUTH_SECRET = String(process.env.PANEL_AUTH_SECRET || process.env.WEBHOOK_VERIFY_TOKEN || "dev-panel-secret").trim();
 const PANEL_AUTH_ENABLED = Boolean(PANEL_AUTH_PASSWORD);
 const PANEL_AUTH_TTL_MS = Number(process.env.PANEL_AUTH_TTL_MS || 1000 * 60 * 60 * 12);
+const PANEL_LOGIN_PATH = normalizePanelLoginPath(process.env.PANEL_LOGIN_PATH || "/portal");
+const PANEL_LOGIN_RATE_LIMIT_WINDOW_MS = Number(process.env.PANEL_LOGIN_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+const PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS || 5);
+const PANEL_AUTH_COOKIE_SECURE = parseBooleanEnv(process.env.PANEL_AUTH_COOKIE_SECURE, String(process.env.NODE_ENV || "").trim().toLowerCase() === "production");
+const panelLoginAttemptState = new Map();
 
+app.set("trust proxy", 1);
 app.use(express.json());
 app.use("/assets", express.static(path.join(publicDir, "assets")));
 app.get("/styles.css", (_req, res) => res.sendFile(path.join(publicDir, "styles.css")));
-app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
+app.get("/app.js", (_req, res) => {
+  const runtimeConfig = [
+    `window.__PANEL_LOGIN_PATH__ = ${JSON.stringify(PANEL_LOGIN_PATH)};`,
+    `window.__PANEL_AUTH_TTL_MS__ = ${JSON.stringify(PANEL_AUTH_TTL_MS)};`
+  ].join("\n");
+  const script = fs.readFileSync(path.join(publicDir, "app.js"), "utf8");
+  res.type("application/javascript").send(`${runtimeConfig}\n${script}`);
+});
 
 const GENERIC_PRODUCT_ALIASES = new Map([
   ["yogur", "yogur"],
@@ -1431,6 +1445,23 @@ function logRuntimeConfigSnapshot(context = "runtime") {
   }
 }
 
+function parseBooleanEnv(value, defaultValue = false) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  return String(value).trim().toLowerCase() === "true";
+}
+
+function normalizePanelLoginPath(value) {
+  const normalized = String(value || "portal")
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+
+  return normalized ? `/${normalized}` : "/portal";
+}
+
 function parseCookies(req) {
   const header = String(req.headers.cookie || "");
   return header.split(";").reduce((acc, chunk) => {
@@ -1443,6 +1474,56 @@ function parseCookies(req) {
     acc[key] = decodeURIComponent(rest.join("=").trim());
     return acc;
   }, {});
+}
+
+function getRequestIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+function pruneLoginAttempts(state, now = Date.now()) {
+  const cutoff = now - PANEL_LOGIN_RATE_LIMIT_WINDOW_MS;
+
+  for (const [ip, attempts] of state.entries()) {
+    const recent = attempts.filter((timestamp) => timestamp > cutoff);
+    if (recent.length) {
+      state.set(ip, recent);
+    } else {
+      state.delete(ip);
+    }
+  }
+}
+
+function getLoginAttempts(ip, now = Date.now()) {
+  pruneLoginAttempts(panelLoginAttemptState, now);
+  return panelLoginAttemptState.get(ip) || [];
+}
+
+function registerFailedLoginAttempt(ip, now = Date.now()) {
+  const attempts = getLoginAttempts(ip, now);
+  const nextAttempts = [...attempts, now];
+  panelLoginAttemptState.set(ip, nextAttempts);
+  return nextAttempts;
+}
+
+function clearFailedLoginAttempts(ip) {
+  panelLoginAttemptState.delete(ip);
+}
+
+function getLoginRateLimitStatus(ip, now = Date.now()) {
+  const attempts = getLoginAttempts(ip, now);
+  const remaining = Math.max(PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS - attempts.length, 0);
+  const oldest = attempts[0] || now;
+  const retryAfterMs = attempts.length >= PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+    ? Math.max(PANEL_LOGIN_RATE_LIMIT_WINDOW_MS - (now - oldest), 0)
+    : 0;
+
+  return {
+    attempts,
+    remaining,
+    retryAfterMs,
+    limited: attempts.length >= PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+  };
 }
 
 function createPanelSessionToken(username) {
@@ -1476,14 +1557,30 @@ function verifyPanelSessionToken(token) {
   }
 }
 
+function buildPanelSessionCookie(token, maxAgeSeconds) {
+  const parts = [
+    `${PANEL_AUTH_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${maxAgeSeconds}`
+  ];
+
+  if (PANEL_AUTH_COOKIE_SECURE) {
+    parts.push("Secure");
+  }
+
+  return parts.join("; ");
+}
+
 function setPanelSessionCookie(res, username) {
   const token = createPanelSessionToken(username);
   const maxAge = Math.floor(PANEL_AUTH_TTL_MS / 1000);
-  res.setHeader("Set-Cookie", `${PANEL_AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
+  res.setHeader("Set-Cookie", buildPanelSessionCookie(token, maxAge));
 }
 
 function clearPanelSessionCookie(res) {
-  res.setHeader("Set-Cookie", `${PANEL_AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.setHeader("Set-Cookie", buildPanelSessionCookie("", 0));
 }
 
 function requirePanelAuth(req, res, next) {
@@ -1500,7 +1597,7 @@ function requirePanelAuth(req, res, next) {
 
   const wantsHtml = String(req.headers.accept || "").includes("text/html");
   if (wantsHtml && req.method === "GET") {
-    return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl || "/")}`);
+    return res.redirect(`${PANEL_LOGIN_PATH}?next=${encodeURIComponent(req.originalUrl || "/")}`);
   }
 
   return res.status(401).json({ ok: false, error: "No autorizado" });
@@ -2187,8 +2284,13 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   };
 }
 
-app.get("/login", (req, res) => {
+app.get(PANEL_LOGIN_PATH, (req, res) => {
   if (!PANEL_AUTH_ENABLED) {
+    return res.redirect("/");
+  }
+
+  const session = verifyPanelSessionToken(parseCookies(req)[PANEL_AUTH_COOKIE]);
+  if (session) {
     return res.redirect("/");
   }
 
@@ -2201,23 +2303,40 @@ app.get("/auth/session", (req, res) => {
     ok: true,
     authEnabled: PANEL_AUTH_ENABLED,
     authenticated: Boolean(session) || !PANEL_AUTH_ENABLED,
-    username: session?.username || (PANEL_AUTH_ENABLED ? null : PANEL_AUTH_USERNAME)
+    username: session?.username || (PANEL_AUTH_ENABLED ? null : PANEL_AUTH_USERNAME),
+    expiresAt: session?.expiresAt || null,
+    ttlMs: PANEL_AUTH_TTL_MS
   });
 });
 
 app.post("/auth/login", (req, res) => {
   if (!PANEL_AUTH_ENABLED) {
-    return res.json({ ok: true, authEnabled: false, authenticated: true });
+    return res.json({ ok: true, authEnabled: false, authenticated: true, ttlMs: PANEL_AUTH_TTL_MS });
+  }
+
+  const ip = getRequestIp(req);
+  const rateLimit = getLoginRateLimitStatus(ip);
+  if (rateLimit.limited) {
+    const retryAfterSeconds = Math.ceil(rateLimit.retryAfterMs / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    return res.status(429).json({
+      ok: false,
+      error: "Demasiados intentos. Intenta más tarde.",
+      retryAfterSeconds
+    });
   }
 
   const username = limpiarTexto(req.body?.username);
   const password = String(req.body?.password || "");
   if (username !== PANEL_AUTH_USERNAME || password !== PANEL_AUTH_PASSWORD) {
-    return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
+    const attempts = registerFailedLoginAttempt(ip);
+    const remaining = Math.max(PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS - attempts.length, 0);
+    return res.status(401).json({ ok: false, error: "Credenciales inválidas", remainingAttempts: remaining });
   }
 
+  clearFailedLoginAttempts(ip);
   setPanelSessionCookie(res, username);
-  return res.json({ ok: true, authenticated: true, username });
+  return res.json({ ok: true, authenticated: true, username, ttlMs: PANEL_AUTH_TTL_MS });
 });
 
 app.post("/auth/logout", (_req, res) => {

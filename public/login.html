@@ -12,8 +12,8 @@
     <section class="auth-card">
       <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="auth-logo" />
       <p class="eyebrow">Acceso privado</p>
-      <h1>Panel admin Tellolac</h1>
-      <p class="subtitle">Ingresa con tu usuario y contraseña de administrador.</p>
+      <h1>Tellolac</h1>
+      <p class="subtitle">Ingreso interno al panel operativo.</p>
 
       <form id="loginForm">
         <label>
@@ -28,7 +28,7 @@
         <button type="submit" class="primary">Ingresar</button>
       </form>
 
-      <p class="auth-note">No hay registro público habilitado.</p>
+      <p class="auth-note">Solo personal autorizado.</p>
     </section>
   </main>
 
@@ -52,7 +52,13 @@
         });
         const payload = await response.json();
         if (!response.ok || !payload.ok) {
-          throw new Error(payload.error || 'No se pudo iniciar sesión');
+          const remaining = Number.isInteger(payload.remainingAttempts)
+            ? ` Intentos restantes: ${payload.remainingAttempts}.`
+            : '';
+          const retry = payload.retryAfterSeconds
+            ? ` Intenta de nuevo en ${payload.retryAfterSeconds}s.`
+            : '';
+          throw new Error((payload.error || 'No se pudo iniciar sesión') + remaining + retry);
         }
 
         window.location.href = next.startsWith('/') ? next : '/';
