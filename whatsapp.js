@@ -133,29 +133,55 @@ function construirLineaOpcionAmbigua(option, index) {
   return `${index + 1}. ${nombre}${precio ? ` — ${precio}` : ""}`;
 }
 
+function construirDetalleProductosAmable(productos = []) {
+  if (!productos.length) {
+    return null;
+  }
+
+  return productos.map((p) => {
+    const cantidad = p.cantidad || "?";
+    const nombre = [p.producto || "producto", p.sabor || null].filter(Boolean).join(" ");
+    const subtotal = formatearMoneda(p.subtotal);
+    return `• ${cantidad} ${nombre}${subtotal ? ` — ${subtotal}` : ""}`;
+  }).join("\n");
+}
+
+function construirTituloAmbiguo(input) {
+  const texto = String(input || "").trim();
+  const limpio = texto
+    .replace(/^quiero\s+/i, "")
+    .replace(/^(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+/i, "")
+    .replace(/\s+para\s+.+$/i, "")
+    .replace(/\s+pago\s+.+$/i, "")
+    .trim();
+
+  return limpio || "ese producto";
+}
+
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
-  const detalle = construirDetalleProductos(productos);
+  const detalle = construirDetalleProductosAmable(productos);
   const listaProductosDisponibles = construirListaProductosDisponibles(options.availableProducts);
 
   if (evaluacion.modelError) {
-    return "Hubo un problema procesando tu pedido. ¿Puedes repetirlo por favor?";
+    return "Tuve un problema al procesar el mensaje 😕 ¿me lo puedes reenviar?";
   }
 
   if (evaluacion.priceValidation === "missing_price") {
-    return "No pude validar el precio del producto, ¿puedes confirmarlo?";
+    return "No pude confirmar el precio del producto. ¿Me ayudas enviándome el nombre exacto del catálogo?";
   }
 
   if (evaluacion.catalogStatus === "not_found") {
     return [
-      "No encontré ese producto en el catálogo. ¿Quieres que te comparta los productos disponibles?",
+      "No encontré ese producto en el catálogo 😕",
       listaProductosDisponibles,
-      `También puedes revisar el catálogo aquí: ${CATALOG_URL}`
-    ].filter(Boolean).join("\n");
+      `Si quieres, aquí puedes verlo completo: ${CATALOG_URL}`
+    ].filter(Boolean).join("\n\n");
   }
 
   if (evaluacion.catalogStatus === "ambiguous") {
     const firstAmbiguity = (evaluacion.ambiguousProducts || [])[0] || null;
+    const titulo = construirTituloAmbiguo(firstAmbiguity?.input);
     const ambiguityLines = (firstAmbiguity?.options || [])
       .slice(0, 4)
       .map((option, index) => construirLineaOpcionAmbigua(option, index))
@@ -163,52 +189,43 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
       .join("\n");
 
     return [
-      "Tenemos varias opciones:",
+      `Encontré varias opciones para “${titulo}” 😊`,
       ambiguityLines || null,
-      "¿Cuál deseas?"
+      "¿Cuál prefieres?"
     ].filter(Boolean).join("\n\n");
   }
 
   if (!evaluacion.esValido) {
     if (evaluacion.faltantes?.includes("direccion") && productos.length) {
       return [
-        "Ya identifiqué los productos de tu pedido 👍",
-        "🧾 Lo que capté:",
-        detalle,
-        pedido.metodo_pago ? `💳 Pago: ${pedido.metodo_pago}` : null,
-        "Me falta la dirección de entrega para registrarlo.",
-        "Envíamela y te lo dejo listo."
-      ].filter(Boolean).join("\n");
+        "¡Casi listo 😊!",
+        "Solo me falta tu dirección de entrega para completar el pedido."
+      ].join("\n");
     }
 
     const faltantes = evaluacion.faltantes.map(formatearFaltante).join(", ");
 
     return [
-      "👋 Ya entendí una parte de tu pedido.",
-      "🧾 Lo que capté:",
+      "Voy bien con tu pedido 😊",
       detalle,
-      pedido.direccion ? `📍 Dirección: ${pedido.direccion}` : null,
       pedido.metodo_pago ? `💳 Pago: ${pedido.metodo_pago}` : null,
-      `Me falta confirmar: ${faltantes}.`,
-      "Respóndeme con esos datos y te lo dejo listo.",
-      construirLineaCatalogoSugerido()
-    ]
-      .filter(Boolean)
-      .join("\n");
+      pedido.direccion ? `📍 Dirección: ${pedido.direccion}` : null,
+      `Solo me falta confirmar: ${faltantes}.`
+    ].filter(Boolean).join("\n");
   }
 
   return [
-    "✅ Pedido recibido",
-    "Productos:",
+    "Perfecto 😊 Ya registré tu pedido:",
+    null,
     detalle,
-    pedido.total ? `Total: ${formatearMoneda(pedido.total)}` : null,
+    null,
     `📍 Dirección: ${pedido.direccion || "pendiente por confirmar"}`,
-    pedido.fecha_entrega ? `🕒 Entrega: ${pedido.fecha_entrega}` : null,
     `💳 Pago: ${pedido.metodo_pago || "pendiente por confirmar"}`,
-    construirLineaCatalogoSugerido()
-  ]
-    .filter(Boolean)
-    .join("\n");
+    null,
+    pedido.total ? `Total: ${formatearMoneda(pedido.total)}` : null,
+    null,
+    "En un momento te confirmamos el despacho 🚚"
+  ].filter((line) => line !== null).join("\n");
 }
 
 module.exports = {
