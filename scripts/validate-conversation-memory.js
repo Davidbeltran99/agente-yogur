@@ -34,12 +34,12 @@ async function main() {
   await sleep(2200);
   assert(saludo.order === null, "saludo no debía crear order");
   assert(saludo.intent === "saludo", "hola debía detectarse como saludo");
-  assert(saludo.respuesta.includes("Mi nombre es Abby"), "saludo debía presentar a Abby");
+  assert(saludo.respuesta.includes("Mi nombre es Abi"), "saludo debía presentar a Abi");
   assert(saludo.respuesta.includes("tu nombre"), "saludo debía pedir nombre");
 
   const identidad = await send(identityPhone, "Quién eres", "1b");
   assert(identidad.intent === "identidad", "quién eres debía detectar identidad");
-  assert(identidad.respuesta.includes("Soy Abby"), "identidad debía responder con Abby");
+  assert(identidad.respuesta.includes("Soy Abi"), "identidad debía responder con Abi");
 
   const nombre = await send(flowPhone, "Mi nombre es Sandra", 2);
   await sleep(2200);
