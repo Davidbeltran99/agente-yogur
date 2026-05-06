@@ -82,8 +82,8 @@ function construirLineaCatalogoSugerido() {
 
 function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
   return customerName
-    ? `¡Hola ${customerName}! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\nCuéntame qué producto deseas pedir.`
-    : "¡Hola! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
+    ? `¡Hola ${customerName}! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nCuéntame en qué te puedo ayudar hoy.`
+    : "¡Hola! 😊\nMi nombre es Abby, soy tu asistente virtual de Tellolac Productos Lácteos.\n\nEstoy aquí para ayudarte con información de productos, precios y pedidos 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
 }
 
 function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [] } = {}) {
@@ -182,6 +182,24 @@ function construirTituloAmbiguo(input) {
   return limpio || "ese producto";
 }
 
+function construirRespuestaIdentidad() {
+  return "Soy Abby 😊, tu asistente virtual de Tellolac. Te puedo ayudar con productos, precios y pedidos.";
+}
+
+function construirRespuestaDespedida() {
+  return "Con mucho gusto 😊\nQuedamos atentos a tu pedido.\n¡Que tengas un excelente día! ✨";
+}
+
+function construirRespuestaConfirmacion({ hasDraftContext = false } = {}) {
+  return hasDraftContext
+    ? "Perfecto 😊 Cuando quieras seguimos con tu pedido."
+    : "Perfecto 😊 Cuando quieras te ayudo con productos, precios o pedidos.";
+}
+
+function construirRespuestaCasual() {
+  return "Claro 😊 Estoy aquí para ayudarte con productos, precios o pedidos.";
+}
+
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductosAmable(productos);
@@ -259,5 +277,9 @@ module.exports = {
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
+  construirRespuestaIdentidad,
+  construirRespuestaDespedida,
+  construirRespuestaConfirmacion,
+  construirRespuestaCasual,
   construirLineaCatalogoSugerido
 };

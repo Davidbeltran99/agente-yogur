@@ -41,6 +41,10 @@ const {
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
+  construirRespuestaIdentidad,
+  construirRespuestaDespedida,
+  construirRespuestaConfirmacion,
+  construirRespuestaCasual,
   construirLineaCatalogoSugerido,
   CATALOG_URL
 } = require("./whatsapp");
@@ -147,6 +151,11 @@ const PRODUCT_ALIAS_INDEX = (() => {
 
   return index;
 })();
+const NON_NAME_TERMS = new Set([
+  "listo", "ok", "okei", "oki", "dale", "perfecto", "gracias", "hola", "buenas", "menu", "catalogo",
+  "informacion", "info", "yo", "si", "no", "bye", "adios", "chao", "hasta", "luego", "hablamos",
+  "quien", "eres", "abby", "abi", "precios", "precio"
+]);
 
 function limpiarTexto(valor) {
   if (typeof valor !== "string") {
@@ -166,6 +175,24 @@ function capitalizarNombre(valor) {
     .join(" ");
 }
 
+function esNombreHumanoValido(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  const tokens = normalized.split(" ").filter(Boolean);
+  if (!tokens.length || tokens.length > 2) {
+    return false;
+  }
+
+  if (tokens.some((token) => NON_NAME_TERMS.has(token) || !/^[a-z]{2,20}$/i.test(token))) {
+    return false;
+  }
+
+  return true;
+}
+
 function extraerNombreConversacional(texto) {
   const raw = String(texto || "").trim();
   if (!raw) {
@@ -173,16 +200,20 @@ function extraerNombreConversacional(texto) {
   }
 
   const explicitMatch = raw.match(/(?:soy|me llamo|mi nombre es)\s+([a-zA-ZÁÉÍÓÚáéíóúñÑ ]{2,40})/i);
-  if (explicitMatch?.[1]) {
+  if (explicitMatch?.[1] && esNombreHumanoValido(explicitMatch[1])) {
     return capitalizarNombre(explicitMatch[1]);
   }
 
   const normalized = normalizarTextoAnalisis(raw);
-  if (/^(nombre|soy yo|info|menu|menú|precios|precio|catalogo|catálogo|que venden|que productos tienen|gracias|ok|dale|listo)$/i.test(normalized)) {
+  if (esIntencionInfoCatalogo(raw) || esDespedida(raw) || esConfirmacionCasual(raw) || esPreguntaIdentidad(raw)) {
     return null;
   }
 
-  if (!normalized.includes(" ") && /^[a-záéíóúñ]{2,20}$/i.test(raw) && !detectarIntencionPedido(raw) && !esIntencionInfoCatalogo(raw)) {
+  if (!normalized.includes(" ") && esNombreHumanoValido(raw) && !detectarIntencionPedido(raw)) {
+    return capitalizarNombre(raw);
+  }
+
+  if (normalized.includes(" ") && esNombreHumanoValido(raw)) {
     return capitalizarNombre(raw);
   }
 
@@ -208,9 +239,36 @@ function esIntencionInfoCatalogo(texto) {
     || /\b(que venden|que productos tienen|que manejan|catalogo|catálogo|menu|menú|precios|informacion|información)\b/.test(normalized);
 }
 
+function esPreguntaIdentidad(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /^(quien eres|quien me atiende|como te llamas|como se llama la asesora|quien atiende)$/.test(normalized);
+}
+
+function esDespedida(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(gracias|muchas gracias|mil gracias|listo gracias|ok gracias|perfecto gracias|bye|chao|adios|hasta luego|hablamos|gracias bye)$/.test(normalized);
+}
+
+function esConfirmacionCasual(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
+}
+
 function detectarIntencionConversacional(texto, { hasDraftContext = false } = {}) {
-  if (hasDraftContext) {
-    return "faltan_datos";
+  if (esPreguntaIdentidad(texto)) {
+    return "identidad";
+  }
+
+  if (esDespedida(texto)) {
+    return "despedida";
   }
 
   if (detectarIntencionPedido(texto)) {
@@ -225,7 +283,15 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false } = {}
     return "saludo";
   }
 
-  return null;
+  if (esConfirmacionCasual(texto)) {
+    return "confirmacion";
+  }
+
+  if (hasDraftContext) {
+    return "faltan_datos";
+  }
+
+  return "conversacion_casual";
 }
 
 function normalizarTextoAnalisis(valor) {
@@ -1909,6 +1975,19 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
+  if (intent === "identidad") {
+    const respuesta = construirRespuestaIdentidad();
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+  }
+
+  if (intent === "despedida") {
+    state.pendingPedido = null;
+    const respuesta = construirRespuestaDespedida();
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+  }
+
   if (!hasOrderIntent && !hasDraftContext && detectedName) {
     state.customerName = detectedName;
     const respuesta = `Mucho gusto, ${detectedName} 😊\nCuéntame qué producto deseas pedir.`;
@@ -1921,6 +2000,18 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       customerName: state.customerName || null,
       featuredProducts: buildCatalogFeaturedProducts()
     });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+  }
+
+  if (intent === "confirmacion") {
+    const respuesta = construirRespuestaConfirmacion({ hasDraftContext });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+  }
+
+  if (intent === "conversacion_casual") {
+    const respuesta = construirRespuestaCasual();
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }

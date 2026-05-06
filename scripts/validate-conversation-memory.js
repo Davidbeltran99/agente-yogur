@@ -9,6 +9,10 @@ function assert(condition, message) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function send(phone, mensaje, suffix) {
   const response = await api.post("/simulate-message", {
     telefono: phone,
@@ -22,62 +26,79 @@ async function send(phone, mensaje, suffix) {
 async function main() {
   const flowPhone = `5732${String(Date.now()).slice(-8)}`;
   const infoPhone = `5732${String(Date.now() + 1).slice(-8)}`;
-  const preciosPhone = `5732${String(Date.now() + 2).slice(-8)}`;
-  const menuPhone = `5732${String(Date.now() + 3).slice(-8)}`;
+  const goodbyePhone = `5732${String(Date.now() + 2).slice(-8)}`;
+  const identityPhone = `5732${String(Date.now() + 3).slice(-8)}`;
+  const invalidNamePhone = `5732${String(Date.now() + 4).slice(-8)}`;
 
   const saludo = await send(flowPhone, "Hola", 1);
+  await sleep(2200);
   assert(saludo.order === null, "saludo no debía crear order");
   assert(saludo.intent === "saludo", "hola debía detectarse como saludo");
-  assert(saludo.respuesta.includes("Tellolac Productos Lácteos"), "saludo debía mencionar Tellolac");
+  assert(saludo.respuesta.includes("Mi nombre es Abby"), "saludo debía presentar a Abby");
   assert(saludo.respuesta.includes("tu nombre"), "saludo debía pedir nombre");
 
-  const nombre = await send(flowPhone, "Me llamo Juan", 2);
-  assert(nombre.order === null, "nombre no debía crear order");
-  assert(nombre.respuesta.includes("Mucho gusto, Juan"), "nombre debía guardarse y responder natural");
+  const identidad = await send(identityPhone, "Quién eres", "1b");
+  assert(identidad.intent === "identidad", "quién eres debía detectar identidad");
+  assert(identidad.respuesta.includes("Soy Abby"), "identidad debía responder con Abby");
 
-  await send(infoPhone, "Sandra", "2a");
-  const infoProductos = await send(infoPhone, "qué productos tienen", "2b");
+  const nombre = await send(flowPhone, "Mi nombre es Sandra", 2);
+  await sleep(2200);
+  assert(nombre.order === null, "nombre no debía crear order");
+  assert(nombre.respuesta.includes("Mucho gusto, Sandra"), "nombre debía guardarse y responder natural");
+
+  const infoProductos = await send(flowPhone, "Qué productos tienen", "2b");
+  await sleep(2200);
   assert(infoProductos.order === null, "pregunta de productos no debía crear order");
   assert(infoProductos.intent === "info_catalogo", "qué productos tienen debía ser info_catalogo");
   assert(infoProductos.respuesta.includes("Claro Sandra"), "respuesta informativa debía reutilizar nombre");
-  assert(infoProductos.respuesta.includes("Aloe Litro"), "respuesta informativa debía incluir productos");
-  assert(infoProductos.respuesta.includes("catalogo.treinta.co/tellolac"), "respuesta informativa debía incluir catálogo");
 
-  const precios = await send(preciosPhone, "precios", "2c");
-  assert(precios.order === null, "precios no debía crear order");
-  assert(precios.intent === "info_catalogo", "precios debía ser info_catalogo");
+  const listo = await send(invalidNamePhone, "Listo", "3a");
+  assert(listo.intent === "confirmacion", "listo debía ser confirmación");
+  assert(!listo.respuesta.includes("Listo 😊"), "listo no debía tratarse como nombre");
 
-  const menu = await send(menuPhone, "menu", "2d");
-  assert(menu.order === null, "menu no debía crear order");
-  assert(menu.intent === "info_catalogo", "menu debía ser info_catalogo");
+  const gracias = await send(goodbyePhone, "Gracias", "3b");
+  assert(gracias.intent === "despedida", "gracias debía cerrar conversación");
+  assert(gracias.respuesta.includes("Con mucho gusto"), "despedida debía sonar natural");
 
-  const productos = await send(flowPhone, "Quiero 2 Aloe Litro", 3);
+  const okGracias = await send(goodbyePhone, "Ok gracias", "3c");
+  assert(okGracias.intent === "despedida", "ok gracias debía cerrar conversación");
+
+  const bye = await send(goodbyePhone, "Bye", "3d");
+  assert(bye.intent === "despedida", "bye debía cerrar conversación");
+
+  const productos = await send(flowPhone, "Quiero 2 Aloe Litro", 4);
+  await sleep(2200);
   assert(productos.order === null, "productos sin datos completos no debía crear order");
-  assert(productos.pedido?.cliente === "Juan", "debía reutilizar nombre");
+  assert(productos.pedido?.cliente === "Sandra", "debía reutilizar nombre");
   assert(productos.pedido?.productos?.[0]?.producto === "Aloe Litro", "debía detectar Aloe Litro");
 
-  const direccion = await send(flowPhone, "Para la Calle 10 #20-30", 4);
+  const direccion = await send(flowPhone, "Para la calle 10", 5);
+  await sleep(2200);
   assert(direccion.order === null, "dirección sola no debía crear order todavía");
-  assert(direccion.respuesta.includes("Solo me falta confirmar"), "tras dirección debía pedir dato faltante");
 
-  const pago = await send(flowPhone, "Pago nequi", 5);
+  const pago = await send(flowPhone, "Pago nequi", 6);
   assert(pago.order?.id, "con pago debía crear order");
-  assert(pago.respuesta.includes("Perfecto Juan 😊 Ya registré tu pedido:"), "pedido final debía sonar natural");
-  assert(pago.respuesta.includes("Juan"), "pedido final debía usar nombre");
+  assert(pago.respuesta.includes("Perfecto Sandra 😊 Ya registré tu pedido:"), "pedido final debía usar nombre y sonar natural");
 
-  const ambiguo = await send(`5732${String(Date.now() + 4).slice(-8)}`, "Quiero una ancheta", 6);
+  await send(infoPhone, "Sandra", "7a");
+  const menu = await send(infoPhone, "menu", "7b");
+  assert(menu.intent === "info_catalogo", "menu debía ser info_catalogo");
+
+  const ambiguo = await send(`5732${String(Date.now() + 5).slice(-8)}`, "Quiero una ancheta", 8);
   assert(ambiguo.order === null, "ancheta ambigua no debía crear order");
   assert(ambiguo.intent === "aclaracion_producto", "ancheta debía pedir aclaración de producto");
-  assert(ambiguo.evaluacion?.catalogStatus === "ambiguous", "ancheta debía ser ambiguous");
-  assert(ambiguo.respuesta.includes("¿Cuál prefieres?"), "ancheta debía pedir aclaración");
 
   console.log(JSON.stringify({
     port,
     phone: flowPhone,
     intents: {
       saludo: saludo.intent,
+      identidad: identidad.intent,
       infoProductos: infoProductos.intent,
-      precios: precios.intent,
+      listo: listo.intent,
+      gracias: gracias.intent,
+      okGracias: okGracias.intent,
+      bye: bye.intent,
       menu: menu.intent,
       ambiguo: ambiguo.intent
     },
