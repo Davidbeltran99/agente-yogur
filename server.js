@@ -1993,6 +1993,7 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
+    console.log("WEBHOOK_ROUTE_ENTERED");
     logEvent("post_webhook_route_entered", { appVersion: APP_VERSION });
     console.log("POST WEBHOOK RECEIVED");
     console.dir(req.body, { depth: null });
@@ -2056,6 +2057,7 @@ app.post("/webhook", async (req, res) => {
       handler: "ejecutarFlujoMensaje"
     });
 
+    console.log("BEFORE_MAIN_FLOW");
     logEvent("before_ejecutar_flujo", {
       appVersion: APP_VERSION,
       sourceMessageId: mensaje.id,
@@ -2070,6 +2072,7 @@ app.post("/webhook", async (req, res) => {
       simulated: false
     });
 
+    console.log("AFTER_MAIN_FLOW");
     logEvent("after_ejecutar_flujo", {
       appVersion: APP_VERSION,
       sourceMessageId: mensaje.id,
@@ -2090,6 +2093,7 @@ app.post("/webhook", async (req, res) => {
 
     return res.sendStatus(200);
   } catch (error) {
+    console.error("WEBHOOK_FATAL_ERROR", error);
     logEvent("webhook_process_error", { error: error.response?.data || error.message }, "error");
     return res.sendStatus(500);
   }
@@ -2185,6 +2189,7 @@ async function startServer() {
   await bootstrapCatalogoDesdeTreinta();
 
   app.listen(port, () => {
+    console.log("APP_VERSION", process.env.RAILWAY_GIT_COMMIT_SHA);
     logEvent("app_version_started", { commit: APP_VERSION });
     logRuntimeConfigSnapshot("startup");
     logEvent("server_started", { port, databasePath, appVersion: APP_VERSION });
