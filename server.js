@@ -82,6 +82,7 @@ const processedMessageIds = new Map();
 const processedMessageContentHashes = new Map();
 const userRateLimitState = new Map();
 const rateLimitNoticeState = new Map();
+const conversationMemoryState = new Map();
 const MESSAGE_ID_TTL_MS = 6 * 60 * 60 * 1000;
 const CONTENT_DEDUPE_WINDOW_MS = Number(process.env.CONTENT_DEDUPE_WINDOW_MS || 45000);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 10000);
@@ -153,6 +154,43 @@ function limpiarTexto(valor) {
 
   const limpio = valor.trim();
   return limpio ? limpio : null;
+}
+
+function capitalizarNombre(valor) {
+  return String(valor || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((parte) => parte.charAt(0).toUpperCase() + parte.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function extraerNombreConversacional(texto) {
+  const raw = String(texto || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const explicitMatch = raw.match(/(?:soy|me llamo|mi nombre es)\s+([a-zA-ZÁÉÍÓÚáéíóúñÑ ]{2,40})/i);
+  if (explicitMatch?.[1]) {
+    return capitalizarNombre(explicitMatch[1]);
+  }
+
+  const normalized = normalizarTextoAnalisis(raw);
+  if (!normalizarTextoAnalisis(raw).includes(" ") && /^[a-záéíóúñ]{2,20}$/i.test(raw) && !detectarIntencionPedido(raw)) {
+    return capitalizarNombre(raw);
+  }
+
+  if (/^(nombre|soy yo|info|menu|menú)$/i.test(normalized)) {
+    return null;
+  }
+
+  return null;
+}
+
+function esMensajeBienvenida(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /^(hola|buenas|buenos dias|buenas tardes|buenas noches|info|menu|menú|que venden|qué venden|catalogo|catálogo)$/.test(normalized);
 }
 
 function normalizarTextoAnalisis(valor) {
@@ -1421,44 +1459,12 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
 
   if (evaluacion.esValido && opciones.guardar !== false) {
     try {
-      logEvent("db_save_started", {
-        telefono: opciones.telefono || null,
-        sourceMessageId: opciones.sourceMessageId || null,
-        total: pedido.total,
-        items: Array.isArray(pedido.productos) ? pedido.productos.length : 0
-      });
-
-      order = saveOrder({
+      ({ order, sheets } = await persistirPedidoFinal({
         pedido,
         telefono: opciones.telefono,
         mensajeOriginal: opciones.mensajeOriginal || textoCliente,
         sourceMessageId: opciones.sourceMessageId
-      });
-
-      logEvent("db_save_completed", {
-        id: order.id,
-        telefono: order.telefono,
-        estado: order.estado,
-        total: order.total,
-        items: order.itemCount,
-        createdAt: order.fechaRegistro
-      });
-
-      logEvent("sheets_sync_started", {
-        orderId: order.id,
-        telefono: order.telefono
-      });
-      sheets = await respaldarPedidoEnSheets(order);
-      logEvent("sheets_sync_completed", {
-        orderId: order.id,
-        telefono: order.telefono,
-        saved: sheets.saved,
-        skipped: sheets.skipped,
-        mode: sheets.mode || null,
-        rowsWritten: sheets.rowsWritten || 0,
-        reason: sheets.reason || null,
-        error: sheets.error || null
-      });
+      }));
     } catch (error) {
       if (error.code === "INVALID_ORDER_PERSISTENCE") {
         evaluacion.esValido = false;
@@ -1555,6 +1561,107 @@ function persistirMensaje({ phone, direction, messageText, whatsappMessageId = n
   });
 
   return message;
+}
+
+function inferirNombreDesdeConversacion(phone) {
+  const messages = listMessagesByPhone(phone)
+    .filter((message) => message.direction === "in")
+    .slice()
+    .reverse();
+
+  for (const message of messages) {
+    const detectedName = extraerNombreConversacional(message.messageText);
+    if (detectedName) {
+      return detectedName;
+    }
+  }
+
+  return null;
+}
+
+function obtenerEstadoConversacion(phone) {
+  const key = limpiarTexto(phone);
+  if (!key) {
+    return { customerName: null, pendingPedido: null };
+  }
+
+  if (!conversationMemoryState.has(key)) {
+    conversationMemoryState.set(key, {
+      customerName: inferirNombreDesdeConversacion(key),
+      pendingPedido: null
+    });
+  }
+
+  return conversationMemoryState.get(key);
+}
+
+function tieneBorradorPedido(state) {
+  return Boolean(state?.pendingPedido && (
+    (Array.isArray(state.pendingPedido.productos) && state.pendingPedido.productos.length)
+    || state.pendingPedido.direccion
+    || state.pendingPedido.metodo_pago
+    || state.pendingPedido.fecha_entrega
+  ));
+}
+
+function combinarPedidoParcial(base = {}, incoming = {}) {
+  const incomingProducts = Array.isArray(incoming.productos) ? incoming.productos.filter((item) => item?.producto || item?.cantidad) : [];
+  const baseProducts = Array.isArray(base.productos) ? base.productos.filter((item) => item?.producto || item?.cantidad) : [];
+
+  return calcularTotalesPedido({
+    cliente: incoming.cliente || base.cliente || null,
+    productos: incomingProducts.length ? incomingProducts : baseProducts,
+    direccion: incoming.direccion || base.direccion || null,
+    fecha_entrega: incoming.fecha_entrega || base.fecha_entrega || null,
+    metodo_pago: incoming.metodo_pago || base.metodo_pago || null,
+    observaciones: incoming.observaciones || base.observaciones || null,
+    estado: incoming.estado || base.estado || "pendiente",
+    total: null
+  });
+}
+
+async function persistirPedidoFinal({ pedido, telefono, mensajeOriginal, sourceMessageId }) {
+  logEvent("db_save_started", {
+    telefono: telefono || null,
+    sourceMessageId: sourceMessageId || null,
+    total: pedido.total,
+    items: Array.isArray(pedido.productos) ? pedido.productos.length : 0
+  });
+
+  const order = saveOrder({
+    pedido,
+    telefono,
+    mensajeOriginal,
+    sourceMessageId
+  });
+
+  logEvent("db_save_completed", {
+    id: order.id,
+    telefono: order.telefono,
+    estado: order.estado,
+    total: order.total,
+    items: order.itemCount,
+    createdAt: order.fechaRegistro
+  });
+
+  logEvent("sheets_sync_started", {
+    orderId: order.id,
+    telefono: order.telefono
+  });
+
+  const sheets = await respaldarPedidoEnSheets(order);
+  logEvent("sheets_sync_completed", {
+    orderId: order.id,
+    telefono: order.telefono,
+    saved: sheets.saved,
+    skipped: sheets.skipped,
+    mode: sheets.mode || null,
+    rowsWritten: sheets.rowsWritten || 0,
+    reason: sheets.reason || null,
+    error: sheets.error || null
+  });
+
+  return { order, sheets };
 }
 
 async function responderAlCliente({ telefono, respuesta, simulated = false, orderId = null }) {
@@ -1704,7 +1811,10 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   const previousMessageCount = countMessagesByPhone(telefono);
   const activeOrderBefore = getActiveOrderByPhone(telefono);
+  const state = obtenerEstadoConversacion(telefono);
   const hasOrderIntent = detectarIntencionPedido(mensaje);
+  const hasDraftContext = tieneBorradorPedido(state);
+  const detectedName = extraerNombreConversacional(mensaje);
 
   const inboundMessage = persistirMensaje({
     phone: telefono,
@@ -1721,39 +1831,66 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     preview: String(mensaje || "").slice(0, 120)
   });
 
-  if (!activeOrderBefore && !hasOrderIntent) {
-    const respuesta = construirRespuestaCatalogoInicial();
-    const delivery = await responderAlCliente({
-      telefono,
-      respuesta,
-      simulated,
-      orderId: null
-    });
+  if (!hasOrderIntent && !hasDraftContext && esMensajeBienvenida(mensaje)) {
+    const respuesta = state.customerName
+      ? `¡Hola ${state.customerName}! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\nCuéntame qué producto deseas pedir.`
+      : "¡Hola! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
 
-    logEvent("catalogo_compartido", {
-      telefono,
-      firstContact: previousMessageCount === 0,
-      catalogUrl: CATALOG_URL
-    });
-
-    return {
-      pedido: null,
-      evaluacion: null,
-      order: null,
-      inboundMessage,
-      respuesta,
-      delivery,
-      firstContact: previousMessageCount === 0,
-      activeOrderBefore: null
-    };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null };
   }
 
-  const resultado = await procesarPedidoDesdeTexto(mensaje, {
+  if (!hasOrderIntent && !hasDraftContext && detectedName) {
+    state.customerName = detectedName;
+    const respuesta = `Mucho gusto, ${detectedName} 😊\nCuéntame qué producto deseas pedir.`;
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null };
+  }
+
+  const resultadoActual = await procesarPedidoDesdeTexto(mensaje, {
     telefono,
     mensajeOriginal: mensaje,
     sourceMessageId,
-    guardar: true
+    guardar: false
   });
+
+  const pedidoCombinado = combinarPedidoParcial(state.pendingPedido || { cliente: state.customerName || null }, resultadoActual.pedido || {});
+  if (!pedidoCombinado.cliente && state.customerName) {
+    pedidoCombinado.cliente = state.customerName;
+  }
+  if (!state.customerName && pedidoCombinado.cliente) {
+    state.customerName = pedidoCombinado.cliente;
+  }
+
+  const evaluacionCombinada = evaluarPedido(pedidoCombinado, {
+    ambiguities: resultadoActual.evaluacion?.catalogStatus === "ambiguous" ? (resultadoActual.evaluacion?.ambiguousProducts || []) : [],
+    unmatched: resultadoActual.evaluacion?.catalogStatus === "not_found" ? (resultadoActual.evaluacion?.unmatchedProducts || ["catalogo"]) : []
+  });
+
+  let resultado = {
+    pedido: pedidoCombinado,
+    evaluacion: evaluacionCombinada,
+    order: null,
+    sheets: { saved: false, skipped: true, reason: "order_not_persisted" }
+  };
+
+  if (evaluacionCombinada.esValido) {
+    try {
+      const persisted = await persistirPedidoFinal({
+        pedido: pedidoCombinado,
+        telefono,
+        mensajeOriginal: mensaje,
+        sourceMessageId
+      });
+      resultado.order = persisted.order;
+      resultado.sheets = persisted.sheets;
+      state.pendingPedido = null;
+    } catch (error) {
+      throw error;
+    }
+  } else {
+    state.pendingPedido = pedidoCombinado;
+  }
 
   logEvent("resultado_procesamiento", {
     origen,

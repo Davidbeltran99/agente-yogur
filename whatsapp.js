@@ -162,6 +162,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductosAmable(productos);
   const listaProductosDisponibles = construirListaProductosDisponibles(options.availableProducts);
+  const nombreCliente = String(pedido?.cliente || "").trim();
 
   if (evaluacion.modelError) {
     return "Tuve un problema al procesar el mensaje 😕 ¿me lo puedes reenviar?";
@@ -198,7 +199,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   if (!evaluacion.esValido) {
     if (evaluacion.faltantes?.includes("direccion") && productos.length) {
       return [
-        "¡Casi listo 😊!",
+        `¡Casi listo${nombreCliente ? `, ${nombreCliente}` : ""} 😊!`,
         "Solo me falta tu dirección de entrega para completar el pedido."
       ].join("\n");
     }
@@ -215,7 +216,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   }
 
   return [
-    "Perfecto 😊 Ya registré tu pedido:",
+    `Perfecto${nombreCliente ? ` ${nombreCliente}` : ""} 😊 Ya registré tu pedido:`,
     null,
     detalle,
     null,
