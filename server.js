@@ -154,7 +154,8 @@ const PRODUCT_ALIAS_INDEX = (() => {
 const NON_NAME_TERMS = new Set([
   "listo", "ok", "okei", "oki", "dale", "perfecto", "gracias", "hola", "buenas", "menu", "catalogo",
   "informacion", "info", "yo", "si", "no", "bye", "adios", "chao", "hasta", "luego", "hablamos",
-  "quien", "eres", "abby", "abi", "precios", "precio"
+  "quien", "eres", "abby", "abi", "precios", "precio", "portafolio", "productos", "producto",
+  "venden", "catalogo", "menu", "pedido", "pedidos"
 ]);
 
 function limpiarTexto(valor) {
@@ -193,31 +194,22 @@ function esNombreHumanoValido(texto) {
   return true;
 }
 
-function extraerNombreConversacional(texto) {
+function extraerNombreExplícito(texto) {
   const raw = String(texto || "").trim();
   if (!raw) {
     return null;
   }
 
-  const explicitMatch = raw.match(/(?:soy|me llamo|mi nombre es)\s+([a-zA-ZÁÉÍÓÚáéíóúñÑ ]{2,40})/i);
-  if (explicitMatch?.[1] && esNombreHumanoValido(explicitMatch[1])) {
-    return capitalizarNombre(explicitMatch[1]);
-  }
-
-  const normalized = normalizarTextoAnalisis(raw);
-  if (esIntencionInfoCatalogo(raw) || esDespedida(raw) || esConfirmacionCasual(raw) || esPreguntaIdentidad(raw)) {
+  const explicitMatch = raw.match(/(?:me llamo|mi nombre es|soy|puedes llamarme)\s+([a-zA-ZÁÉÍÓÚáéíóúñÑ ]{2,40})$/i);
+  if (!explicitMatch?.[1]) {
     return null;
   }
 
-  if (!normalized.includes(" ") && esNombreHumanoValido(raw) && !detectarIntencionPedido(raw)) {
-    return capitalizarNombre(raw);
-  }
+  return esNombreHumanoValido(explicitMatch[1]) ? capitalizarNombre(explicitMatch[1]) : null;
+}
 
-  if (normalized.includes(" ") && esNombreHumanoValido(raw)) {
-    return capitalizarNombre(raw);
-  }
-
-  return null;
+function esIntencionNombre(texto) {
+  return Boolean(extraerNombreExplícito(texto));
 }
 
 function esMensajeBienvenida(texto) {
@@ -235,8 +227,8 @@ function esIntencionInfoCatalogo(texto) {
     return false;
   }
 
-  return /^(info|informacion|información|menu|menú|catalogo|catálogo|precios)$/.test(normalized)
-    || /\b(que venden|que productos tienen|que manejan|catalogo|catálogo|menu|menú|precios|informacion|información)\b/.test(normalized);
+  return /^(info|informacion|información|menu|menú|catalogo|catálogo|precios|portafolio)$/.test(normalized)
+    || /\b(que venden|que productos tienen|que manejan|catalogo|catálogo|menu|menú|precios|informacion|información|portafolio)\b/.test(normalized);
 }
 
 function esPreguntaIdentidad(texto) {
@@ -267,6 +259,10 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false } = {}
     return "identidad";
   }
 
+  if (esIntencionNombre(texto)) {
+    return "nombre";
+  }
+
   if (esDespedida(texto)) {
     return "despedida";
   }
@@ -291,7 +287,7 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false } = {}
     return "faltan_datos";
   }
 
-  return "conversacion_casual";
+  return "conversacion_general";
 }
 
 function normalizarTextoAnalisis(valor) {
@@ -1945,7 +1941,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const hasDraftContext = tieneBorradorPedido(state);
   const intent = detectarIntencionConversacional(mensaje, { hasDraftContext });
   const hasOrderIntent = intent === "pedido" || intent === "faltan_datos";
-  const detectedName = extraerNombreConversacional(mensaje);
+  const explicitName = intent === "nombre" ? extraerNombreExplícito(mensaje) : null;
 
   const inboundMessage = persistirMensaje({
     phone: telefono,
@@ -1965,7 +1961,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   logEvent("intencion_detectada", {
     telefono,
     sourceMessageId,
-    intent: intent || (detectedName ? "saludo" : "aclaracion_producto")
+    intent,
+    explicitName: explicitName || null,
+    customerNameBefore: state.customerName || null
   });
 
   if (intent === "saludo") {
@@ -1988,11 +1986,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
-  if (!hasOrderIntent && !hasDraftContext && detectedName) {
-    state.customerName = detectedName;
-    const respuesta = `Mucho gusto, ${detectedName} 😊\nCuéntame qué producto deseas pedir.`;
+  if (intent === "nombre" && explicitName) {
+    state.customerName = explicitName;
+    const respuesta = `Mucho gusto, ${explicitName} 😊\nCuéntame qué producto deseas pedir.`;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "saludo" };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
   if (intent === "info_catalogo") {
@@ -2010,7 +2008,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
-  if (intent === "conversacion_casual") {
+  if (intent === "conversacion_general") {
     const respuesta = construirRespuestaCasual();
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };

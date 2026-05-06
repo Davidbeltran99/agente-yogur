@@ -44,6 +44,7 @@ async function main() {
   const nombre = await send(flowPhone, "Mi nombre es Sandra", 2);
   await sleep(2200);
   assert(nombre.order === null, "nombre no debía crear order");
+  assert(nombre.intent === "nombre", "mi nombre es Sandra debía detectarse como nombre");
   assert(nombre.respuesta.includes("Mucho gusto, Sandra"), "nombre debía guardarse y responder natural");
 
   const infoProductos = await send(flowPhone, "Qué productos tienen", "2b");
@@ -55,6 +56,15 @@ async function main() {
   const listo = await send(invalidNamePhone, "Listo", "3a");
   assert(listo.intent === "confirmacion", "listo debía ser confirmación");
   assert(!listo.respuesta.includes("Listo 😊"), "listo no debía tratarse como nombre");
+
+  const jhoanPhone = `5732${String(Date.now() + 6).slice(-8)}`;
+  const nombreJhoan = await send(jhoanPhone, "Mi nombre es Jhoan", "3aa");
+  await sleep(2200);
+  assert(nombreJhoan.intent === "nombre", "Mi nombre es Jhoan debía detectarse como nombre");
+  const portafolio = await send(jhoanPhone, "Portafolio?", "3ab");
+  assert(portafolio.intent === "info_catalogo", "Portafolio debía ir a info_catalogo");
+  assert(portafolio.respuesta.includes("Claro Jhoan"), "Portafolio debía reutilizar Jhoan");
+  assert(!portafolio.respuesta.includes("Mucho gusto, Portafolio"), "Portafolio no debía sobrescribir el nombre");
 
   const gracias = await send(goodbyePhone, "Gracias", "3b");
   assert(gracias.intent === "despedida", "gracias debía cerrar conversación");
@@ -94,7 +104,9 @@ async function main() {
     intents: {
       saludo: saludo.intent,
       identidad: identidad.intent,
+      nombre: nombre.intent,
       infoProductos: infoProductos.intent,
+      portafolio: portafolio.intent,
       listo: listo.intent,
       gracias: gracias.intent,
       okGracias: okGracias.intent,
