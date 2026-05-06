@@ -100,9 +100,44 @@ async function main() {
   const menu = await send(infoPhone, "menu", "7b");
   assert(menu.intent === "info_catalogo", "menu debía ser info_catalogo");
 
-  const ambiguo = await send(`5732${String(Date.now() + 5).slice(-8)}`, "Quiero una ancheta", 8);
+  const ambiguousPhone = `5732${String(Date.now() + 5).slice(-8)}`;
+  const ambiguo = await send(ambiguousPhone, "quiero 1 ancheta", 8);
   assert(ambiguo.order === null, "ancheta ambigua no debía crear order");
   assert(ambiguo.intent === "aclaracion_producto", "ancheta debía pedir aclaración de producto");
+  assert(ambiguo.respuesta.includes("Responde con el número de la opción"), "aclaración debía pedir número");
+
+  const opcionUno = await send(ambiguousPhone, "1", "8a");
+  assert(opcionUno.order === null, "selección 1 sin datos completos no debía crear order todavía");
+  assert(opcionUno.pedido?.productos?.[0]?.producto === "Ancheta", "selección 1 debía guardar Ancheta en borrador");
+  const opcionUnoDireccion = await send(ambiguousPhone, "Calle 10 #20-30", "8aa");
+  const opcionUnoPago = await send(ambiguousPhone, "Pago nequi", "8ab");
+  assert(opcionUnoPago.order?.id, "selección 1 + datos faltantes debía crear order");
+  assert(opcionUnoPago.order?.resumenItems?.includes("Ancheta"), "selección 1 debía guardar Ancheta");
+  assert(opcionUnoPago.order?.total === 45000, "selección 1 debía usar precio de Ancheta");
+
+  const ambiguousPhoneTwo = `5732${String(Date.now() + 7).slice(-8)}`;
+  await send(ambiguousPhoneTwo, "quiero 1 ancheta", "8b");
+  const opcionDos = await send(ambiguousPhoneTwo, "opción 2", "8c");
+  assert(opcionDos.order === null, "selección 2 sin datos completos no debía crear order todavía");
+  assert(opcionDos.pedido?.productos?.[0]?.producto === "Ancheta 1", "selección 2 debía guardar Ancheta 1 en borrador");
+  await send(ambiguousPhoneTwo, "Calle 10 #20-30", "8ca");
+  const opcionDosPago = await send(ambiguousPhoneTwo, "Pago nequi", "8cb");
+  assert(opcionDosPago.order?.id, "selección opción 2 + datos faltantes debía crear order");
+  assert(opcionDosPago.order?.resumenItems?.includes("Ancheta 1"), "selección 2 debía guardar Ancheta 1");
+  assert(opcionDosPago.order?.total === 38000, "selección 2 debía usar precio de Ancheta 1");
+
+  const ambiguousPhoneThree = `5732${String(Date.now() + 8).slice(-8)}`;
+  await send(ambiguousPhoneThree, "quiero 1 ancheta", "8d");
+  const primera = await send(ambiguousPhoneThree, "la primera", "8e");
+  assert(primera.order === null, "la primera sin datos completos no debía crear order todavía");
+  assert(primera.pedido?.productos?.[0]?.producto === "Ancheta", "la primera debía resolver la opción 1");
+
+  const ambiguousPhoneInvalid = `5732${String(Date.now() + 9).slice(-8)}`;
+  await send(ambiguousPhoneInvalid, "quiero 1 ancheta", "8f");
+  const invalida = await send(ambiguousPhoneInvalid, "quiero esa", "8g");
+  assert(invalida.order === null, "respuesta inválida no debía crear order");
+  assert(invalida.intent === "aclaracion_producto", "respuesta inválida debía mantener aclaración");
+  assert(invalida.respuesta.includes("Por favor responde con el número de la opción"), "respuesta inválida debía pedir número válido");
 
   console.log(JSON.stringify({
     port,
@@ -125,6 +160,12 @@ async function main() {
       orderId: pago.order.id,
       cliente: pago.order.cliente,
       total: pago.order.total
+    },
+    aclaracion: {
+      opcionUno: opcionUnoPago.order?.total,
+      opcionDos: opcionDosPago.order?.total,
+      primera: primera.pedido?.productos?.[0]?.producto,
+      invalida: invalida.intent
     }
   }, null, 2));
 }

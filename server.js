@@ -65,6 +65,7 @@ const PANEL_LOGIN_PATH = normalizePanelLoginPath(process.env.PANEL_LOGIN_PATH ||
 const PANEL_LOGIN_RATE_LIMIT_WINDOW_MS = Number(process.env.PANEL_LOGIN_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
 const PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS || 5);
 const PANEL_AUTH_COOKIE_SECURE = parseBooleanEnv(process.env.PANEL_AUTH_COOKIE_SECURE, String(process.env.NODE_ENV || "").trim().toLowerCase() === "production");
+const PRODUCT_DISAMBIGUATION_TTL_MS = Number(process.env.PRODUCT_DISAMBIGUATION_TTL_MS || 15 * 60 * 1000);
 const panelLoginAttemptState = new Map();
 
 app.set("trust proxy", 1);
@@ -1890,17 +1891,181 @@ function inferirNombreDesdeConversacion(phone) {
 function obtenerEstadoConversacion(phone) {
   const key = limpiarTexto(phone);
   if (!key) {
-    return { customerName: null, pendingPedido: null };
+    return { customerName: null, pendingPedido: null, pendingClarification: null };
   }
 
   if (!conversationMemoryState.has(key)) {
     conversationMemoryState.set(key, {
       customerName: inferirNombreDesdeConversacion(key),
-      pendingPedido: null
+      pendingPedido: null,
+      pendingClarification: null
     });
   }
 
   return conversationMemoryState.get(key);
+}
+
+function limpiarAclaracionPendiente(state) {
+  if (state) {
+    state.pendingClarification = null;
+  }
+}
+
+function obtenerAclaracionPendienteActiva(state, now = Date.now()) {
+  if (!state?.pendingClarification) {
+    return null;
+  }
+
+  if (Number(state.pendingClarification.expires_at) <= now) {
+    limpiarAclaracionPendiente(state);
+    return null;
+  }
+
+  return state.pendingClarification;
+}
+
+function construirEstadoAclaracionProducto({ ambiguity, pedidoParcial }) {
+  const createdAt = Date.now();
+
+  return {
+    phone: null,
+    tipo: "product_disambiguation",
+    opciones: (ambiguity?.options || []).map((option, index) => ({
+      indice: index + 1,
+      id: option.id,
+      nombre: option.nombre,
+      precio: parseOptionalNumber(option.precio),
+      productoOriginal: option.productoOriginal || option.nombre,
+      nombreCanonico: option.nombreCanonico || normalizeCanonicalCatalogName(option.nombre),
+      aliases: option.aliases || []
+    })),
+    pedido_parcial: normalizarPedido(pedidoParcial || {}),
+    cantidad: encontrarCantidadEnSegmento(normalizarTextoAnalisis(ambiguity?.input || "")) || 1,
+    created_at: createdAt,
+    expires_at: createdAt + PRODUCT_DISAMBIGUATION_TTL_MS
+  };
+}
+
+function extraerIndiceOpcionAclaracion(texto, totalOpciones = 0) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized || totalOpciones <= 0) {
+    return null;
+  }
+
+  const numericMatch = normalized.match(/(?:^|\b)(\d+)(?:$|\b)/);
+  if (numericMatch) {
+    const index = Number.parseInt(numericMatch[1], 10);
+    return index >= 1 && index <= totalOpciones ? index - 1 : -1;
+  }
+
+  const ordinalMap = new Map([
+    ["primera", 0], ["primero", 0],
+    ["segunda", 1], ["segundo", 1],
+    ["tercera", 2], ["tercero", 2],
+    ["cuarta", 3], ["cuarto", 3]
+  ]);
+
+  for (const [token, index] of ordinalMap.entries()) {
+    if (normalized.includes(token)) {
+      return index < totalOpciones ? index : -1;
+    }
+  }
+
+  return null;
+}
+
+function agregarProductoAPedido(pedidoBase = {}, item = {}) {
+  const productosBase = Array.isArray(pedidoBase.productos) ? pedidoBase.productos : [];
+  return calcularTotalesPedido({
+    ...pedidoBase,
+    productos: [...productosBase, item]
+  });
+}
+
+async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, sourceMessageId, simulated, inboundMessage }) {
+  const clarification = obtenerAclaracionPendienteActiva(state);
+  if (!clarification || clarification.tipo !== "product_disambiguation") {
+    return null;
+  }
+
+  const selectedIndex = extraerIndiceOpcionAclaracion(mensaje, clarification.opciones.length);
+  if (selectedIndex === null || selectedIndex < 0) {
+    const respuesta = `Por favor responde con el número de la opción: ${clarification.opciones.map((option) => option.indice).join(" o ")}.`;
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return {
+      pedido: clarification.pedido_parcial,
+      evaluacion: null,
+      order: null,
+      inboundMessage,
+      respuesta,
+      delivery,
+      sheets: { saved: false, skipped: true, reason: "awaiting_valid_disambiguation_choice" },
+      intent: "aclaracion_producto"
+    };
+  }
+
+  const selectedOption = clarification.opciones[selectedIndex];
+  if (!selectedOption) {
+    return null;
+  }
+
+  const pedidoResuelto = agregarProductoAPedido(clarification.pedido_parcial || {}, {
+    producto: selectedOption.nombre,
+    cantidad: clarification.cantidad || 1,
+    precio_unitario: parseOptionalNumber(selectedOption.precio)
+  });
+  if (!pedidoResuelto.cliente && state.customerName) {
+    pedidoResuelto.cliente = state.customerName;
+  }
+
+  const evaluacion = evaluarPedido(pedidoResuelto, { ambiguities: [], unmatched: [] });
+  let order = null;
+  let sheets = { saved: false, skipped: true, reason: "order_not_persisted" };
+  const intent = evaluacion.esValido ? "pedido" : "faltan_datos";
+
+  logEvent("product_disambiguation_resolved", {
+    telefono,
+    sourceMessageId,
+    selectedIndex: selectedIndex + 1,
+    selectedProduct: selectedOption.nombre
+  });
+
+  if (evaluacion.esValido) {
+    const persisted = await persistirPedidoFinal({
+      pedido: pedidoResuelto,
+      telefono,
+      mensajeOriginal: mensaje,
+      sourceMessageId
+    });
+    order = persisted.order;
+    sheets = persisted.sheets;
+    state.pendingPedido = null;
+  } else {
+    state.pendingPedido = pedidoResuelto;
+  }
+
+  limpiarAclaracionPendiente(state);
+
+  if (order?.id && inboundMessage?.id) {
+    updateMessageOrder(inboundMessage.id, order.id);
+    inboundMessage.orderId = order.id;
+  }
+
+  const respuesta = construirRespuestaPedido(pedidoResuelto, evaluacion, {
+    availableProducts: buildCatalogShortList(5)
+  });
+  const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: order?.id || null });
+
+  return {
+    pedido: pedidoResuelto,
+    evaluacion,
+    order,
+    inboundMessage,
+    respuesta,
+    delivery,
+    sheets,
+    intent
+  };
 }
 
 function tieneBorradorPedido(state) {
@@ -2148,6 +2313,18 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     customerNameBefore: state.customerName || null
   });
 
+  const aclaracionResuelta = await intentarResolverAclaracionPendiente({
+    state,
+    mensaje,
+    telefono,
+    sourceMessageId,
+    simulated,
+    inboundMessage
+  });
+  if (aclaracionResuelta) {
+    return aclaracionResuelta;
+  }
+
   if (intent === "saludo") {
     const respuesta = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
@@ -2163,6 +2340,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (intent === "despedida") {
     state.pendingPedido = null;
+    limpiarAclaracionPendiente(state);
     const respuesta = construirRespuestaDespedida();
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
@@ -2238,11 +2416,20 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       resultado.order = persisted.order;
       resultado.sheets = persisted.sheets;
       state.pendingPedido = null;
+      limpiarAclaracionPendiente(state);
     } catch (error) {
       throw error;
     }
   } else {
     state.pendingPedido = pedidoCombinado;
+    if (evaluacionCombinada.catalogStatus === "ambiguous" && evaluacionCombinada.ambiguousProducts?.length) {
+      state.pendingClarification = construirEstadoAclaracionProducto({
+        ambiguity: evaluacionCombinada.ambiguousProducts[0],
+        pedidoParcial: pedidoCombinado
+      });
+    } else {
+      limpiarAclaracionPendiente(state);
+    }
   }
 
   logEvent("resultado_procesamiento", {

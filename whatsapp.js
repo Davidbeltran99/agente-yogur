@@ -240,16 +240,17 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   if (evaluacion.catalogStatus === "ambiguous") {
     const firstAmbiguity = (evaluacion.ambiguousProducts || [])[0] || null;
     const titulo = construirTituloAmbiguo(firstAmbiguity?.input);
-    const ambiguityLines = (firstAmbiguity?.options || [])
-      .slice(0, 4)
+    const options = (firstAmbiguity?.options || []).slice(0, 4);
+    const ambiguityLines = options
       .map((option, index) => construirLineaOpcionAmbigua(option, index))
       .filter(Boolean)
       .join("\n");
+    const optionNumbers = options.map((_, index) => index + 1).join(" o ");
 
     return [
       `Encontré varias opciones para “${titulo}” 😊`,
       ambiguityLines || null,
-      "¿Cuál prefieres?"
+      `Responde con el número de la opción: ${optionNumbers}.`
     ].filter(Boolean).join("\n\n");
   }
 
