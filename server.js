@@ -41,6 +41,7 @@ const {
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
+  construirRespuestaNombreRegistrado,
   construirRespuestaIdentidad,
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,
@@ -1988,7 +1989,10 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (intent === "nombre" && explicitName) {
     state.customerName = explicitName;
-    const respuesta = `Mucho gusto, ${explicitName} 😊\nCuéntame qué producto deseas pedir.`;
+    const respuesta = construirRespuestaNombreRegistrado({
+      customerName: explicitName,
+      featuredProducts: buildCatalogFeaturedProducts()
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }

@@ -46,6 +46,7 @@ async function main() {
   assert(nombre.order === null, "nombre no debía crear order");
   assert(nombre.intent === "nombre", "mi nombre es Sandra debía detectarse como nombre");
   assert(nombre.respuesta.includes("Mucho gusto, Sandra"), "nombre debía guardarse y responder natural");
+  assert(nombre.respuesta.includes("Catálogo completo:"), "tras guardar nombre debía compartir catálogo");
 
   const infoProductos = await send(flowPhone, "Qué productos tienen", "2b");
   await sleep(2200);
@@ -66,6 +67,10 @@ async function main() {
   assert(portafolio.respuesta.includes("Claro Jhoan"), "Portafolio debía reutilizar Jhoan");
   assert(!portafolio.respuesta.includes("Mucho gusto, Portafolio"), "Portafolio no debía sobrescribir el nombre");
 
+  const dimePortafolio = await send(jhoanPhone, "Dime portafolio", "3ac");
+  assert(dimePortafolio.intent === "info_catalogo", "Dime portafolio debía ir a info_catalogo");
+  assert(dimePortafolio.respuesta.includes("Claro Jhoan"), "Dime portafolio debía reutilizar Jhoan");
+
   const gracias = await send(goodbyePhone, "Gracias", "3b");
   assert(gracias.intent === "despedida", "gracias debía cerrar conversación");
   assert(gracias.respuesta.includes("Con mucho gusto"), "despedida debía sonar natural");
@@ -81,6 +86,7 @@ async function main() {
   assert(productos.order === null, "productos sin datos completos no debía crear order");
   assert(productos.pedido?.cliente === "Sandra", "debía reutilizar nombre");
   assert(productos.pedido?.productos?.[0]?.producto === "Aloe Litro", "debía detectar Aloe Litro");
+  assert(productos.respuesta.includes("Escríbela así:"), "cuando falta dirección debía dar ejemplo");
 
   const direccion = await send(flowPhone, "Para la calle 10", 5);
   await sleep(2200);
@@ -107,6 +113,7 @@ async function main() {
       nombre: nombre.intent,
       infoProductos: infoProductos.intent,
       portafolio: portafolio.intent,
+      dimePortafolio: dimePortafolio.intent,
       listo: listo.intent,
       gracias: gracias.intent,
       okGracias: okGracias.intent,

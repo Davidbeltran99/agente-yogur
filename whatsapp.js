@@ -86,9 +86,8 @@ function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
     : "¡Hola! 😊\nMi nombre es Abi, soy tu asistente virtual de Tellolac Productos Lácteos.\n\nEstoy aquí para ayudarte con información de productos, precios y pedidos 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
 }
 
-function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [] } = {}) {
-  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
-  const lines = Array.isArray(featuredProducts)
+function construirLineasCatalogo(featuredProducts = []) {
+  return Array.isArray(featuredProducts)
     ? featuredProducts.map((product) => {
         if (!product?.label) {
           return null;
@@ -102,6 +101,11 @@ function construirRespuestaCatalogoInformativo({ customerName = null, featuredPr
         return `${product.emoji || "•"} ${product.label}${priceText}`;
       }).filter(Boolean)
     : [];
+}
+
+function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [] } = {}) {
+  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+  const lines = construirLineasCatalogo(featuredProducts);
 
   return [
     saludo,
@@ -109,6 +113,17 @@ function construirRespuestaCatalogoInformativo({ customerName = null, featuredPr
     lines.join("\n") || null,
     `También puedes ver el catálogo completo aquí:\n${CATALOG_URL}`,
     "¿Te gustaría pedir alguno? ✨"
+  ].filter(Boolean).join("\n\n");
+}
+
+function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [] } = {}) {
+  const lines = construirLineasCatalogo(featuredProducts);
+  return [
+    `Mucho gusto, ${customerName} 😊`,
+    "Te comparto nuestro portafolio para que conozcas los productos:",
+    lines.join("\n") || null,
+    `Catálogo completo:\n${CATALOG_URL}`,
+    "Si quieres pedir, me escribes producto, dirección y método de pago ✨"
   ].filter(Boolean).join("\n\n");
 }
 
@@ -242,7 +257,9 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     if (evaluacion.faltantes?.includes("direccion") && productos.length) {
       return [
         `¡Casi listo${nombreCliente ? `, ${nombreCliente}` : ""} 😊!`,
-        "Solo me falta tu dirección de entrega para completar el pedido."
+        "Solo me falta tu dirección de entrega para completar el pedido.",
+        "Escríbela así:",
+        "Dirección: Calle 10 #20-30, Barrio Centro"
       ].join("\n");
     }
 
@@ -277,6 +294,7 @@ module.exports = {
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
+  construirRespuestaNombreRegistrado,
   construirRespuestaIdentidad,
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,
