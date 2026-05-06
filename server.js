@@ -1558,6 +1558,14 @@ function persistirMensaje({ phone, direction, messageText, whatsappMessageId = n
 }
 
 async function responderAlCliente({ telefono, respuesta, simulated = false, orderId = null }) {
+  logEvent("responder_al_cliente_called", {
+    telefono,
+    orderId,
+    simulated,
+    whatsappEnabled: WHATSAPP_ENABLED,
+    textLength: String(respuesta || "").length
+  });
+
   if (simulated || !WHATSAPP_ENABLED) {
     const simulatedMessageId = buildSimulatedSourceMessageId("simulate_out");
     const savedMessage = persistirMensaje({
@@ -2184,6 +2192,44 @@ app.post("/debug-webhook", (req, res) => {
   console.log("DEBUG POST RECEIVED");
   console.dir(req.body, { depth: null });
   return res.sendStatus(200);
+});
+
+app.post("/debug-send-whatsapp", async (req, res) => {
+  try {
+    const to = limpiarTexto(req.body?.to);
+    const message = limpiarTexto(req.body?.message);
+
+    if (!to || !message) {
+      return res.status(400).json({ ok: false, error: "to y message son obligatorios" });
+    }
+
+    logEvent("debug_send_whatsapp_started", {
+      to,
+      textLength: message.length,
+      whatsappEnabled: WHATSAPP_ENABLED,
+      phoneNumberId: process.env.PHONE_NUMBER_ID || null
+    });
+
+    const delivery = await enviarMensajeWhatsApp(to, message);
+
+    logEvent("debug_send_whatsapp_completed", {
+      to,
+      whatsappMessageId: delivery?.messages?.[0]?.id || null
+    });
+
+    return res.json({ ok: true, delivery });
+  } catch (error) {
+    logEvent("debug_send_whatsapp_error", {
+      status: error.response?.status || null,
+      error: error.response?.data || error.message
+    }, "error");
+
+    return res.status(500).json({
+      ok: false,
+      status: error.response?.status || null,
+      error: error.response?.data || error.message
+    });
+  }
 });
 
 app.post("/pedido/manual", async (req, res) => {

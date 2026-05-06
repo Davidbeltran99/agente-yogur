@@ -33,7 +33,7 @@ async function enviarMensajeWhatsApp(para, texto) {
     throw new Error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en .env");
   }
 
-  logWhatsAppEvent("whatsapp_request_prepared", {
+  logWhatsAppEvent("whatsapp_send_payload_ready", {
     url,
     phoneNumberId,
     to: destino,
