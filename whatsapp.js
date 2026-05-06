@@ -82,9 +82,21 @@ function construirDetalleProductos(productos = []) {
   }).join("\n");
 }
 
-function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }) {
+function construirListaProductosDisponibles(availableProducts = []) {
+  if (!Array.isArray(availableProducts) || !availableProducts.length) {
+    return null;
+  }
+
+  return [
+    "Productos disponibles ahora:",
+    ...availableProducts.map((product) => `- ${product}`)
+  ].join("\n");
+}
+
+function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductos(productos);
+  const listaProductosDisponibles = construirListaProductosDisponibles(options.availableProducts);
 
   if (evaluacion.modelError) {
     return "Hubo un problema procesando tu pedido. ¿Puedes repetirlo por favor?";
@@ -95,7 +107,11 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   }
 
   if (evaluacion.catalogStatus === "not_found") {
-    return `No encontré ese producto exacto en el catálogo. Puedes revisarlo aquí: ${CATALOG_URL} y enviarme el nombre como aparece.`;
+    return [
+      "No encontré ese producto en el catálogo. ¿Quieres que te comparta los productos disponibles?",
+      listaProductosDisponibles,
+      `También puedes revisar el catálogo aquí: ${CATALOG_URL}`
+    ].filter(Boolean).join("\n");
   }
 
   if (evaluacion.catalogStatus === "ambiguous") {
@@ -113,6 +129,17 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   }
 
   if (!evaluacion.esValido) {
+    if (evaluacion.faltantes?.includes("direccion") && productos.length) {
+      return [
+        "Ya identifiqué los productos de tu pedido 👍",
+        "🧾 Lo que capté:",
+        detalle,
+        pedido.metodo_pago ? `💳 Pago: ${pedido.metodo_pago}` : null,
+        "Me falta la dirección de entrega para registrarlo.",
+        "Envíamela y te lo dejo listo."
+      ].filter(Boolean).join("\n");
+    }
+
     const faltantes = evaluacion.faltantes.map(formatearFaltante).join(", ");
 
     return [

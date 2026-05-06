@@ -618,6 +618,13 @@ function esSegmentoNoProducto(segmento) {
     return true;
   }
 
+  const hasPurchaseIntent = /\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme)\b/i.test(normalized);
+  const hasQuantity = /\b(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i.test(normalized);
+
+  if (hasPurchaseIntent || hasQuantity) {
+    return false;
+  }
+
   return /\b(direccion|dirección|pago|nequi|daviplata|efectivo|transferencia|calle|carrera|cra|barrio|entrega|hoy|manana|mañana|pm|am)\b/i.test(normalized);
 }
 
@@ -631,7 +638,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
     const quickMatches = encontrarCoincidenciasCatalogo(segment, { minScore: 70, limit: 2 });
     const hasQuantity = encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment));
 
-    if (esSegmentoNoProducto(segment) && !quickMatches.length) {
+    if (esSegmentoNoProducto(segment) && !quickMatches.length && !hasQuantity) {
       continue;
     }
 
@@ -666,11 +673,17 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
     if (localAliasResolution.status === "matched") {
       const cantidad = encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
       const catalogProduct = findCatalogProductForCanonicalAlias(localAliasResolution.canonical);
+
+      if (!catalogProduct) {
+        unmatched.push(segment);
+        continue;
+      }
+
       const precioUnitario = parseOptionalNumber(catalogProduct?.precio);
 
       items.push({
-        producto: localAliasResolution.details.producto,
-        sabor: localAliasResolution.details.sabor,
+        producto: catalogProduct.nombre,
+        sabor: null,
         cantidad,
         precio_unitario: precioUnitario,
         subtotal: precioUnitario !== null ? precioUnitario * cantidad : null
@@ -754,6 +767,14 @@ function detectarIntencionPedido(texto) {
   return (hasProductCue && (hasPurchaseVerb || hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference))
     || (hasPurchaseVerb && (hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference))
     || hasImplicitOrderReference;
+}
+
+function buildCatalogShortList(limit = 5) {
+  return getCatalogProductsCache()
+    .map((product) => limpiarTexto(product?.nombre))
+    .filter(Boolean)
+    .filter((name, index, list) => list.indexOf(name) === index)
+    .slice(0, limit);
 }
 
 function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { items: [] }) {
@@ -1019,6 +1040,28 @@ function logEvent(event, details = {}, level = "info") {
   }));
 }
 
+function logRuntimeConfigSnapshot(context = "runtime") {
+  const rawApiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  const apiKeyPresent = Boolean(rawApiKey && rawApiKey !== "tu_api_key");
+  const aiProvider = limpiarTexto(process.env.AI_PROVIDER) || null;
+
+  logEvent("runtime_config_snapshot", {
+    context,
+    whatsappEnabled: WHATSAPP_ENABLED,
+    openaiApiKeyPresent: apiKeyPresent,
+    aiProvider,
+    openaiModel: process.env.OPENAI_MODEL || OPENAI_MODEL
+  });
+
+  if (aiProvider && aiProvider.toLowerCase() !== "openai") {
+    logEvent("runtime_config_warning", {
+      context,
+      message: "AI_PROVIDER distinto de openai; el servicio solo usa OpenAI en esta versión.",
+      aiProvider
+    }, "warn");
+  }
+}
+
 function sendError(res, statusCode, errorMessage) {
   return res.status(statusCode).json({ ok: false, error: errorMessage });
 }
@@ -1110,9 +1153,29 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
   let pedidoIA = fallbackPedidoIA;
   let catalogAnalysis = initialCatalogAnalysis;
 
+  logEvent("parser_iniciado", {
+    telefono: opciones.telefono || null,
+    sourceMessageId: opciones.sourceMessageId || null,
+    textLength: String(textoCliente || "").length,
+    willUseOpenAI: shouldUseOpenAIForPedido(textoCliente, initialCatalogAnalysis),
+    catalogItemsDetected: initialCatalogAnalysis.items?.length || 0,
+    catalogAmbiguities: initialCatalogAnalysis.ambiguities?.length || 0,
+    catalogUnmatched: initialCatalogAnalysis.unmatched?.length || 0
+  });
+
   if (shouldUseOpenAIForPedido(textoCliente, initialCatalogAnalysis)) {
     try {
       pedidoIA = await procesarMensaje(textoCliente);
+      logEvent("respuesta_ia_recibida", {
+        telefono: opciones.telefono || null,
+        sourceMessageId: opciones.sourceMessageId || null,
+        model: OPENAI_MODEL,
+        hasCliente: Boolean(pedidoIA?.cliente),
+        productos: Array.isArray(pedidoIA?.productos) ? pedidoIA.productos.length : 0,
+        hasDireccion: Boolean(pedidoIA?.direccion),
+        hasMetodoPago: Boolean(pedidoIA?.metodo_pago),
+        hasTotal: parseOptionalNumber(pedidoIA?.total) !== null
+      });
     } catch (error) {
       logEvent("MODEL_ERROR", {
         model: OPENAI_MODEL,
@@ -1144,6 +1207,17 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
   let order = null;
   let sheets = { saved: false, skipped: true, reason: "order_not_persisted" };
 
+  logEvent("pedido_validado", {
+    telefono: opciones.telefono || null,
+    sourceMessageId: opciones.sourceMessageId || null,
+    esValido: evaluacion.esValido,
+    faltantes: evaluacion.faltantes,
+    catalogStatus: evaluacion.catalogStatus,
+    priceValidation: evaluacion.priceValidation,
+    total: pedido.total,
+    items: Array.isArray(pedido.productos) ? pedido.productos.length : 0
+  });
+
   logEvent("total_calculado", {
     telefono: opciones.telefono || null,
     total: pedido.total,
@@ -1152,6 +1226,13 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
 
   if (evaluacion.esValido && opciones.guardar !== false) {
     try {
+      logEvent("db_save_started", {
+        telefono: opciones.telefono || null,
+        sourceMessageId: opciones.sourceMessageId || null,
+        total: pedido.total,
+        items: Array.isArray(pedido.productos) ? pedido.productos.length : 0
+      });
+
       order = saveOrder({
         pedido,
         telefono: opciones.telefono,
@@ -1159,7 +1240,7 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
         sourceMessageId: opciones.sourceMessageId
       });
 
-      logEvent("pedido_guardado", {
+      logEvent("db_save_completed", {
         id: order.id,
         telefono: order.telefono,
         estado: order.estado,
@@ -1168,7 +1249,21 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
         createdAt: order.fechaRegistro
       });
 
+      logEvent("sheets_sync_started", {
+        orderId: order.id,
+        telefono: order.telefono
+      });
       sheets = await respaldarPedidoEnSheets(order);
+      logEvent("sheets_sync_completed", {
+        orderId: order.id,
+        telefono: order.telefono,
+        saved: sheets.saved,
+        skipped: sheets.skipped,
+        mode: sheets.mode || null,
+        rowsWritten: sheets.rowsWritten || 0,
+        reason: sheets.reason || null,
+        error: sheets.error || null
+      });
     } catch (error) {
       if (error.code === "INVALID_ORDER_PERSISTENCE") {
         evaluacion.esValido = false;
@@ -1304,6 +1399,12 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     };
   }
 
+  logEvent("whatsapp_send_started", {
+    telefono,
+    orderId,
+    textLength: String(respuesta || "").length
+  });
+
   const delivery = await enviarMensajeWhatsApp(telefono, respuesta);
   const whatsappMessageId = delivery?.messages?.[0]?.id || null;
   const savedMessage = persistirMensaje({
@@ -1314,7 +1415,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     orderId
   });
 
-  logEvent("real_send", {
+  logEvent("whatsapp_send_completed", {
     telefono,
     messageId: savedMessage?.id || null,
     whatsappMessageId,
@@ -1391,6 +1492,14 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     whatsappMessageId: sourceMessageId
   });
 
+  logEvent("mensaje_extraido", {
+    origen,
+    telefono,
+    sourceMessageId,
+    textLength: String(mensaje || "").length,
+    preview: String(mensaje || "").slice(0, 120)
+  });
+
   if (!activeOrderBefore && !hasOrderIntent) {
     const respuesta = construirRespuestaCatalogoInicial();
     const delivery = await responderAlCliente({
@@ -1446,7 +1555,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     inboundMessage.orderId = resultado.order.id;
   }
 
-  const respuesta = construirRespuestaPedido(resultado.pedido, resultado.evaluacion);
+  const respuesta = construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
+    availableProducts: buildCatalogShortList(5)
+  });
   const delivery = await responderAlCliente({
     telefono,
     respuesta,
@@ -1688,18 +1799,42 @@ app.post("/webhook", async (req, res) => {
   try {
     console.log("POST WEBHOOK RECEIVED");
     console.dir(req.body, { depth: null });
+    logRuntimeConfigSnapshot("webhook");
 
     const entry = req.body.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
     const mensaje = value?.messages?.[0];
 
+    logEvent("webhook_payload_inspected", {
+      hasEntry: Boolean(entry),
+      hasChange: Boolean(change),
+      hasValue: Boolean(value),
+      messageType: mensaje?.type || null,
+      sourceMessageId: mensaje?.id || null,
+      hasTextBody: Boolean(mensaje?.text?.body),
+      extractedTextPath: "req.body.entry[0].changes[0].value.messages[0].text.body"
+    });
+
     if (!mensaje?.text?.body) {
+      logEvent("webhook_early_return", {
+        reason: "missing_text_body",
+        messageType: mensaje?.type || null,
+        sourceMessageId: mensaje?.id || null
+      }, "warn");
       return res.sendStatus(200);
     }
 
     const textoCliente = mensaje.text.body;
     const numeroCliente = mensaje.from || value?.contacts?.[0]?.wa_id;
+
+    logEvent("webhook_text_extracted", {
+      sourceMessageId: mensaje.id || null,
+      telefono: numeroCliente || null,
+      textLength: textoCliente.length,
+      preview: textoCliente.slice(0, 120),
+      extractedFrom: "req.body.entry[0].changes[0].value.messages[0].text.body"
+    });
 
     const dedupe = registrarMensajeProcesado({
       messageId: mensaje.id,
@@ -1717,6 +1852,12 @@ app.post("/webhook", async (req, res) => {
       logEvent("webhook_missing_phone", { sourceMessageId: mensaje.id }, "warn");
       return res.sendStatus(200);
     }
+
+    logEvent("webhook_handler_dispatch", {
+      sourceMessageId: mensaje.id,
+      telefono: numeroCliente,
+      handler: "ejecutarFlujoMensaje"
+    });
 
     const resultado = await ejecutarFlujoMensaje({
       mensaje: textoCliente,
@@ -1832,6 +1973,7 @@ async function startServer() {
   await bootstrapCatalogoDesdeTreinta();
 
   app.listen(port, () => {
+    logRuntimeConfigSnapshot("startup");
     logEvent("server_started", { port, databasePath });
   });
 }
