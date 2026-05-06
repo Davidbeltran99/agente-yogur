@@ -40,6 +40,7 @@ const {
   enviarMensajeWhatsApp,
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
+  construirRespuestaCatalogoInformativo,
   construirLineaCatalogoSugerido,
   CATALOG_URL
 } = require("./whatsapp");
@@ -177,12 +178,12 @@ function extraerNombreConversacional(texto) {
   }
 
   const normalized = normalizarTextoAnalisis(raw);
-  if (!normalizarTextoAnalisis(raw).includes(" ") && /^[a-záéíóúñ]{2,20}$/i.test(raw) && !detectarIntencionPedido(raw)) {
-    return capitalizarNombre(raw);
+  if (/^(nombre|soy yo|info|menu|menú|precios|precio|catalogo|catálogo|que venden|que productos tienen|gracias|ok|dale|listo)$/i.test(normalized)) {
+    return null;
   }
 
-  if (/^(nombre|soy yo|info|menu|menú)$/i.test(normalized)) {
-    return null;
+  if (!normalized.includes(" ") && /^[a-záéíóúñ]{2,20}$/i.test(raw) && !detectarIntencionPedido(raw) && !esIntencionInfoCatalogo(raw)) {
+    return capitalizarNombre(raw);
   }
 
   return null;
@@ -190,7 +191,41 @@ function extraerNombreConversacional(texto) {
 
 function esMensajeBienvenida(texto) {
   const normalized = normalizarTextoAnalisis(texto);
-  return /^(hola|buenas|buenos dias|buenas tardes|buenas noches|info|menu|menú|que venden|qué venden|catalogo|catálogo)$/.test(normalized);
+  return /^(hola|buenas|buenos dias|buenas tardes|buenas noches)$/.test(normalized);
+}
+
+function esIntencionInfoCatalogo(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  if (/\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme)\b/i.test(normalized)) {
+    return false;
+  }
+
+  return /^(info|informacion|información|menu|menú|catalogo|catálogo|precios)$/.test(normalized)
+    || /\b(que venden|que productos tienen|que manejan|catalogo|catálogo|menu|menú|precios|informacion|información)\b/.test(normalized);
+}
+
+function detectarIntencionConversacional(texto, { hasDraftContext = false } = {}) {
+  if (hasDraftContext) {
+    return "faltan_datos";
+  }
+
+  if (detectarIntencionPedido(texto)) {
+    return "pedido";
+  }
+
+  if (esIntencionInfoCatalogo(texto)) {
+    return "info_catalogo";
+  }
+
+  if (esMensajeBienvenida(texto)) {
+    return "saludo";
+  }
+
+  return null;
 }
 
 function normalizarTextoAnalisis(valor) {
@@ -1010,6 +1045,35 @@ function buildCatalogShortList(limit = 5) {
     .slice(0, limit);
 }
 
+function buildCatalogFeaturedProducts() {
+  const catalog = getCatalogProductsCache();
+  const specs = [
+    { key: "aloe", emoji: "🥛", label: "Aloe Litro", matcher: (product) => product.nombre_canonico?.includes("aloe litro") || product.nombre_familia?.includes("aloe") },
+    { key: "cafe", emoji: "☕", label: "Café Litro", matcher: (product) => product.nombre_canonico?.includes("cafe litro") || product.nombre_familia?.includes("cafe") },
+    { key: "ancheta", emoji: "🎁", label: "Anchetas", matcher: (product) => product.nombre_familia?.includes("ancheta"), pricePrefix: "desde" },
+    { key: "bandeja", emoji: "🧀", label: "Bandejas con queso y arequipe", matcher: (product) => product.nombre_familia?.includes("bandeja") }
+  ];
+
+  return specs.map((spec) => {
+    const matches = catalog.filter((product) => spec.matcher(product));
+    if (!matches.length) {
+      return null;
+    }
+
+    const prices = matches
+      .map((product) => parseOptionalNumber(product.precio))
+      .filter((price) => price !== null)
+      .sort((a, b) => a - b);
+
+    return {
+      emoji: spec.emoji,
+      label: spec.label,
+      price: prices.length ? prices[0] : null,
+      pricePrefix: spec.pricePrefix || null
+    };
+  }).filter(Boolean);
+}
+
 function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { items: [] }) {
   const fechaEntregaDetectada = extraerFechaEntregaDesdeTexto(textoCliente);
   const fechaEntregaIA = sanitizeFechaEntregaIA(pedido?.fecha_entrega, textoCliente);
@@ -1812,8 +1876,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const previousMessageCount = countMessagesByPhone(telefono);
   const activeOrderBefore = getActiveOrderByPhone(telefono);
   const state = obtenerEstadoConversacion(telefono);
-  const hasOrderIntent = detectarIntencionPedido(mensaje);
   const hasDraftContext = tieneBorradorPedido(state);
+  const intent = detectarIntencionConversacional(mensaje, { hasDraftContext });
+  const hasOrderIntent = intent === "pedido" || intent === "faltan_datos";
   const detectedName = extraerNombreConversacional(mensaje);
 
   const inboundMessage = persistirMensaje({
@@ -1831,20 +1896,33 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     preview: String(mensaje || "").slice(0, 120)
   });
 
-  if (!hasOrderIntent && !hasDraftContext && esMensajeBienvenida(mensaje)) {
-    const respuesta = state.customerName
-      ? `¡Hola ${state.customerName}! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\nCuéntame qué producto deseas pedir.`
-      : "¡Hola! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
+  logEvent("intencion_detectada", {
+    telefono,
+    sourceMessageId,
+    intent: intent || (detectedName ? "saludo" : "aclaracion_producto")
+  });
+
+  if (intent === "saludo") {
+    const respuesta = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
 
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
   if (!hasOrderIntent && !hasDraftContext && detectedName) {
     state.customerName = detectedName;
     const respuesta = `Mucho gusto, ${detectedName} 😊\nCuéntame qué producto deseas pedir.`;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "saludo" };
+  }
+
+  if (intent === "info_catalogo") {
+    const respuesta = construirRespuestaCatalogoInformativo({
+      customerName: state.customerName || null,
+      featuredProducts: buildCatalogFeaturedProducts()
+    });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
   const resultadoActual = await procesarPedidoDesdeTexto(mensaje, {
@@ -1871,7 +1949,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     pedido: pedidoCombinado,
     evaluacion: evaluacionCombinada,
     order: null,
-    sheets: { saved: false, skipped: true, reason: "order_not_persisted" }
+    sheets: { saved: false, skipped: true, reason: "order_not_persisted" },
+    intent: evaluacionCombinada.catalogStatus === "ambiguous" ? "aclaracion_producto" : (evaluacionCombinada.esValido ? "pedido" : "faltan_datos")
   };
 
   if (evaluacionCombinada.esValido) {
@@ -2311,6 +2390,7 @@ app.post("/simulate-message", async (req, res) => {
       simulated: true,
       ignored: resultado.ignored || false,
       ignoredReason: resultado.ignoredReason || null,
+      intent: resultado.intent || null,
       order: resultado.order,
       inboundMessage: resultado.inboundMessage,
       pedido: resultado.pedido,

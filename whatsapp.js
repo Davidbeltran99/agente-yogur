@@ -80,12 +80,36 @@ function construirLineaCatalogoSugerido() {
   return `También puedes ver todo el catálogo aquí:\n${CATALOG_URL}`;
 }
 
-function construirRespuestaCatalogoInicial() {
+function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
+  return customerName
+    ? `¡Hola ${customerName}! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\nCuéntame qué producto deseas pedir.`
+    : "¡Hola! 😊\nBienvenido a Tellolac Productos Lácteos.\n\nTenemos bebidas lácteas, aloe, café, anchetas y más 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
+}
+
+function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [] } = {}) {
+  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+  const lines = Array.isArray(featuredProducts)
+    ? featuredProducts.map((product) => {
+        if (!product?.label) {
+          return null;
+        }
+
+        const price = formatearMoneda(product.price);
+        const priceText = price
+          ? (product.pricePrefix === "desde" ? ` desde ${price}` : ` — ${price}`)
+          : "";
+
+        return `${product.emoji || "•"} ${product.label}${priceText}`;
+      }).filter(Boolean)
+    : [];
+
   return [
-    "Hola 👋 puedes ver nuestros productos aquí:",
-    CATALOG_URL,
-    "Envíame el producto, cantidad, dirección y forma de pago."
-  ].join("\n");
+    saludo,
+    "Estos son algunos de nuestros productos más pedidos:",
+    lines.join("\n") || null,
+    `También puedes ver el catálogo completo aquí:\n${CATALOG_URL}`,
+    "¿Te gustaría pedir alguno? ✨"
+  ].filter(Boolean).join("\n\n");
 }
 
 function formatearMoneda(valor) {
@@ -234,5 +258,6 @@ module.exports = {
   enviarMensajeWhatsApp,
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
+  construirRespuestaCatalogoInformativo,
   construirLineaCatalogoSugerido
 };
