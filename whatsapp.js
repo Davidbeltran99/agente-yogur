@@ -1,34 +1,64 @@
 const axios = require("axios");
 
 const CATALOG_URL = "https://catalogo.treinta.co/tellolac";
+const WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || "v20.0";
+
+function logWhatsAppEvent(event, details = {}, level = "info") {
+  const logger = level === "error"
+    ? console.error
+    : (level === "warn" ? console.warn : console.log);
+
+  logger(JSON.stringify({ level, event, ...details }));
+}
+
+function normalizarDestinoWhatsApp(valor) {
+  return String(valor || "").replace(/\D/g, "");
+}
 
 async function enviarMensajeWhatsApp(para, texto) {
   const token = process.env.WHATSAPP_TOKEN;
-  const phoneNumberId = process.env.PHONE_NUMBER_ID;
+  const phoneNumberId = (process.env.PHONE_NUMBER_ID || "").trim();
+  const destino = normalizarDestinoWhatsApp(para);
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to: destino,
+    type: "text",
+    text: {
+      body: texto
+    }
+  };
 
   if (!token || !phoneNumberId) {
     throw new Error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en .env");
   }
 
-  const response = await axios.post(
-    `https://graph.facebook.com/v22.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to: para,
-      type: "text",
-      text: {
-        body: texto
-      }
-    },
-    {
+  logWhatsAppEvent("whatsapp_request_prepared", {
+    url,
+    phoneNumberId,
+    to: destino,
+    textLength: String(texto || "").length
+  });
+
+  try {
+    const response = await axios.post(url, payload, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       }
-    }
-  );
+    });
 
-  return response.data;
+    return response.data;
+  } catch (error) {
+    logWhatsAppEvent("whatsapp_request_failed", {
+      status: error.response?.status || null,
+      data: error.response?.data || null,
+      phoneNumberId,
+      to: destino,
+      url
+    }, "error");
+    throw error;
+  }
 }
 
 function formatearFaltante(campo) {

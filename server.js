@@ -1600,39 +1600,57 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     textLength: String(respuesta || "").length
   });
 
-  const delivery = await enviarMensajeWhatsApp(telefono, respuesta);
-  const whatsappMessageId = delivery?.messages?.[0]?.id || null;
-  const savedMessage = persistirMensaje({
-    phone: telefono,
-    direction: "out",
-    messageText: respuesta,
-    whatsappMessageId,
-    orderId
-  });
+  try {
+    const delivery = await enviarMensajeWhatsApp(telefono, respuesta);
+    const whatsappMessageId = delivery?.messages?.[0]?.id || null;
+    const savedMessage = persistirMensaje({
+      phone: telefono,
+      direction: "out",
+      messageText: respuesta,
+      whatsappMessageId,
+      orderId
+    });
 
-  logEvent("whatsapp_send_completed", {
-    telefono,
-    messageId: savedMessage?.id || null,
-    whatsappMessageId,
-    orderId
-  });
+    logEvent("whatsapp_send_completed", {
+      telefono,
+      messageId: savedMessage?.id || null,
+      whatsappMessageId,
+      orderId
+    });
 
-  runDeliveryHook({
-    mode: "real",
-    telefono,
-    orderId,
-    messageId: savedMessage?.id || null,
-    whatsappMessageId,
-    delivery
-  });
+    runDeliveryHook({
+      mode: "real",
+      telefono,
+      orderId,
+      messageId: savedMessage?.id || null,
+      whatsappMessageId,
+      delivery
+    });
 
-  return {
-    sent: true,
-    simulated: false,
-    respuesta,
-    message: savedMessage,
-    whatsappMessageId
-  };
+    return {
+      sent: true,
+      simulated: false,
+      respuesta,
+      message: savedMessage,
+      whatsappMessageId
+    };
+  } catch (error) {
+    logEvent("whatsapp_send_error", {
+      telefono,
+      orderId,
+      status: error.response?.status || null,
+      error: error.response?.data || error.message
+    }, "error");
+
+    return {
+      sent: false,
+      simulated: false,
+      respuesta,
+      message: null,
+      whatsappMessageId: null,
+      error: error.response?.data || error.message
+    };
+  }
 }
 
 async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false }) {
