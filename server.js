@@ -46,6 +46,7 @@ const {
 
 const app = express();
 const port = process.env.PORT || 3000;
+const APP_VERSION = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.APP_VERSION || "local").trim();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -1771,6 +1772,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "agente-yogur",
+    appVersion: APP_VERSION,
     storage: "sqlite",
     dbPath: databasePath,
     catalogProducts: countCatalogProducts(),
@@ -1991,6 +1993,7 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
+    logEvent("post_webhook_route_entered", { appVersion: APP_VERSION });
     console.log("POST WEBHOOK RECEIVED");
     console.dir(req.body, { depth: null });
     logRuntimeConfigSnapshot("webhook");
@@ -2053,12 +2056,27 @@ app.post("/webhook", async (req, res) => {
       handler: "ejecutarFlujoMensaje"
     });
 
+    logEvent("before_ejecutar_flujo", {
+      appVersion: APP_VERSION,
+      sourceMessageId: mensaje.id,
+      telefono: numeroCliente
+    });
+
     const resultado = await ejecutarFlujoMensaje({
       mensaje: textoCliente,
       telefono: numeroCliente,
       sourceMessageId: mensaje.id,
       origen: "webhook",
       simulated: false
+    });
+
+    logEvent("after_ejecutar_flujo", {
+      appVersion: APP_VERSION,
+      sourceMessageId: mensaje.id,
+      telefono: numeroCliente,
+      orderId: resultado.order?.id || null,
+      ignored: resultado.ignored || false,
+      ignoredReason: resultado.ignoredReason || null
     });
 
     logEvent("pedido_procesado", {
@@ -2167,8 +2185,9 @@ async function startServer() {
   await bootstrapCatalogoDesdeTreinta();
 
   app.listen(port, () => {
+    logEvent("app_version_started", { commit: APP_VERSION });
     logRuntimeConfigSnapshot("startup");
-    logEvent("server_started", { port, databasePath });
+    logEvent("server_started", { port, databasePath, appVersion: APP_VERSION });
   });
 }
 
