@@ -191,15 +191,54 @@ function parseOptionalNumber(value) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+function normalizeCanonicalCatalogName(value) {
+  return normalizeCatalogText(value)
+    .replace(/\b1\s*[.,]\s*8\s*ml\b/g, "1800 ml")
+    .replace(/\b1800ml\b/g, "1800 ml")
+    .replace(/\b1000ml\b/g, "1000 ml")
+    .replace(/\./g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCatalogFamilyName(value) {
+  return normalizeCanonicalCatalogName(value)
+    .replace(/\b(1800 ml|1000 ml)\b/g, " ")
+    .replace(/\b\d+\b$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractRequestedPrice(texto) {
+  const raw = String(texto || "");
+  const match = raw.match(/\$?\s*(\d{2,3}(?:\.\d{3})+|\d{4,6})\b(?!\s*ml\b)/i);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const price = Number(String(match[1]).replace(/\./g, ""));
+  return Number.isFinite(price) && price >= 5000 ? price : null;
+}
+
 function setCatalogProductsCache(products = []) {
   catalogProductsCache = Array.isArray(products)
-    ? products.map((product) => ({
-        ...product,
-        aliases: [...new Set([
-          normalizeCatalogText(product?.nombre),
-          ...(Array.isArray(product?.aliases) ? product.aliases.map((alias) => normalizeCatalogText(alias)) : [])
-        ].filter(Boolean))]
-      }))
+    ? products.map((product) => {
+        const productoOriginal = limpiarTexto(product?.nombre);
+        const nombreCanonico = normalizeCanonicalCatalogName(productoOriginal);
+        const nombreFamilia = normalizeCatalogFamilyName(productoOriginal);
+
+        return {
+          ...product,
+          producto_original: productoOriginal,
+          nombre_canonico: nombreCanonico,
+          nombre_familia: nombreFamilia,
+          aliases: [...new Set([
+            normalizeCatalogText(product?.nombre),
+            nombreCanonico,
+            ...(Array.isArray(product?.aliases) ? product.aliases.map((alias) => normalizeCatalogText(alias)) : [])
+          ].filter(Boolean))]
+        };
+      })
     : [];
 }
 
@@ -215,6 +254,9 @@ function limpiarTextoProductoSolicitado(valor) {
   return normalizeCatalogText(valor)
     .replace(/\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme|por favor|para|llevo|agrégame|agregame)\b/g, " ")
     .replace(/\b(de|del|la|el|los|las)\b/g, " ")
+    .replace(/^\s*(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b\s*/g, "")
+    .replace(/\b\d{2,3}\.\d{3}\b(?!\s*ml\b)/g, " ")
+    .replace(/\b\d{4,6}\b(?!\s*ml\b)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -285,7 +327,156 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
   return matches.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
+function buildCanonicalCatalogEntries() {
+  const groups = new Map();
+
+  for (const product of getCatalogProductsCache()) {
+    const key = product.nombre_canonico || normalizeCanonicalCatalogName(product.nombre);
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(product);
+  }
+
+  return Array.from(groups.entries()).map(([nombreCanonico, products]) => ({
+    nombre_canonico: nombreCanonico,
+    productos: products.map((product) => ({
+      producto_original: product.producto_original || product.nombre,
+      precio: parseOptionalNumber(product.precio),
+      aliases: product.aliases || []
+    }))
+  }));
+}
+
+function buildCatalogAmbiguityOptions(products = []) {
+  return products
+    .filter(Boolean)
+    .filter((product, index, list) => list.findIndex((entry) => entry.id === product.id) === index)
+    .map((product) => ({
+      id: product.id,
+      nombre: product.nombre,
+      precio: parseOptionalNumber(product.precio),
+      nombreCanonico: product.nombre_canonico || normalizeCanonicalCatalogName(product.nombre),
+      productoOriginal: product.producto_original || product.nombre,
+      aliases: product.aliases || []
+    }));
+}
+
+function resolveCatalogProductByPrice(products = [], requestedPrice = null) {
+  if (requestedPrice === null) {
+    return null;
+  }
+
+  const matches = products.filter((product) => parseOptionalNumber(product?.precio) === requestedPrice);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function shouldAskFamilyClarificationForRootQuery(product, familyMatches, normalizedCandidate) {
+  if (!product || !familyMatches.length || normalizedCandidate !== product.nombre_familia) {
+    return false;
+  }
+
+  return familyMatches.some((entry) => entry.id !== product.id && new RegExp(`^${escapeRegex(product.nombre_familia)}\\s+\\d+$`).test(entry.nombre_canonico || ""));
+}
+
 function resolverProductoCatalogo(texto) {
+  const candidate = limpiarTextoProductoSolicitado(texto);
+  const requestedPrice = extractRequestedPrice(texto);
+  const candidateCanonical = normalizeCanonicalCatalogName(candidate);
+  const candidateFamily = normalizeCatalogFamilyName(candidate);
+  const catalog = getCatalogProductsCache();
+
+  if (!candidate) {
+    return {
+      status: "not_found",
+      candidate: limpiarTexto(texto)
+    };
+  }
+
+  const exactMatches = catalog.filter((product) => {
+    const originalName = normalizeCatalogText(product.producto_original || product.nombre);
+    return originalName === candidate || product.nombre_canonico === candidateCanonical || (product.aliases || []).includes(candidate);
+  });
+
+  if (exactMatches.length > 1) {
+    const pricedMatch = resolveCatalogProductByPrice(exactMatches, requestedPrice);
+    if (pricedMatch) {
+      return {
+        status: "matched",
+        candidate: limpiarTexto(texto),
+        product: pricedMatch
+      };
+    }
+
+    return {
+      status: "ambiguous",
+      candidate: limpiarTexto(texto),
+      matches: buildCatalogAmbiguityOptions(exactMatches)
+    };
+  }
+
+  if (exactMatches.length === 1) {
+    const exactMatch = exactMatches[0];
+    const canonicalMatches = catalog.filter((product) => product.nombre_canonico === exactMatch.nombre_canonico);
+    if (canonicalMatches.length > 1) {
+      const pricedMatch = resolveCatalogProductByPrice(canonicalMatches, requestedPrice);
+      if (pricedMatch) {
+        return {
+          status: "matched",
+          candidate: limpiarTexto(texto),
+          product: pricedMatch
+        };
+      }
+
+      return {
+        status: "ambiguous",
+        candidate: limpiarTexto(texto),
+        matches: buildCatalogAmbiguityOptions(canonicalMatches)
+      };
+    }
+
+    const familyMatches = catalog.filter((product) => product.nombre_familia === exactMatch.nombre_familia);
+    if (shouldAskFamilyClarificationForRootQuery(exactMatch, familyMatches, candidate)) {
+      return {
+        status: "ambiguous",
+        candidate: limpiarTexto(texto),
+        matches: buildCatalogAmbiguityOptions(familyMatches)
+      };
+    }
+
+    return {
+      status: "matched",
+      candidate: limpiarTexto(texto),
+      product: exactMatch
+    };
+  }
+
+  const familyMatches = catalog.filter((product) => product.nombre_familia === candidateFamily);
+  if (familyMatches.length > 1) {
+    const pricedMatch = resolveCatalogProductByPrice(familyMatches, requestedPrice);
+    if (pricedMatch) {
+      return {
+        status: "matched",
+        candidate: limpiarTexto(texto),
+        product: pricedMatch
+      };
+    }
+
+    return {
+      status: "ambiguous",
+      candidate: limpiarTexto(texto),
+      matches: buildCatalogAmbiguityOptions(familyMatches)
+    };
+  }
+
+  if (familyMatches.length === 1) {
+    return {
+      status: "matched",
+      candidate: limpiarTexto(texto),
+      product: familyMatches[0]
+    };
+  }
+
   const matches = encontrarCoincidenciasCatalogo(texto, { minScore: 70, limit: 3 });
 
   if (!matches.length) {
@@ -297,10 +488,13 @@ function resolverProductoCatalogo(texto) {
 
   const [best, second] = matches;
   if (second && Math.abs(best.score - second.score) <= 6) {
+    const sameFamilyMatches = matches.filter((entry) => entry.product?.nombre_familia === best.product?.nombre_familia);
+    const ambiguityPool = sameFamilyMatches.length >= 2 ? sameFamilyMatches : matches;
+
     return {
       status: "ambiguous",
       candidate: limpiarTexto(texto),
-      matches: matches.map((entry) => entry.product)
+      matches: buildCatalogAmbiguityOptions(ambiguityPool.map((entry) => entry.product))
     };
   }
 
@@ -591,7 +785,7 @@ function extraerFechaEntregaDesdeTexto(texto) {
 }
 
 function encontrarCantidadEnSegmento(segmentoNormalizado) {
-  const match = segmentoNormalizado.match(/\b(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i);
+  const match = String(segmentoNormalizado || "").match(/(?:^|\b(?:quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|llevo|dame|enviame|enviarme)\s+)(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i);
   return obtenerNumeroDesdeToken(match?.[1] || null);
 }
 
@@ -664,7 +858,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
     if (resolution.status === "ambiguous") {
       ambiguities.push({
         input: segment,
-        options: resolution.matches.slice(0, 3).map((product) => product.nombre)
+        options: resolution.matches.slice(0, 3)
       });
       continue;
     }
@@ -722,7 +916,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
         if (resolution.status === "ambiguous") {
           ambiguities.push({
             input: candidate,
-            options: resolution.matches.slice(0, 3).map((product) => product.nombre)
+            options: resolution.matches.slice(0, 3)
           });
           resolved = true;
           break;

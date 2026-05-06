@@ -93,6 +93,16 @@ function construirListaProductosDisponibles(availableProducts = []) {
   ].join("\n");
 }
 
+function construirLineaOpcionAmbigua(option, index) {
+  if (!option) {
+    return null;
+  }
+
+  const nombre = option.nombre || option.productoOriginal || `Opción ${index + 1}`;
+  const precio = formatearMoneda(option.precio);
+  return `${index + 1}. ${nombre}${precio ? ` — ${precio}` : ""}`;
+}
+
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductos(productos);
@@ -115,17 +125,18 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   }
 
   if (evaluacion.catalogStatus === "ambiguous") {
-    const ambiguityLines = (evaluacion.ambiguousProducts || [])
-      .slice(0, 2)
-      .map((entry) => `• ${entry.input}: ${entry.options.join(" / ")}`)
+    const firstAmbiguity = (evaluacion.ambiguousProducts || [])[0] || null;
+    const ambiguityLines = (firstAmbiguity?.options || [])
+      .slice(0, 4)
+      .map((option, index) => construirLineaOpcionAmbigua(option, index))
+      .filter(Boolean)
       .join("\n");
 
     return [
-      "Encontré varias opciones parecidas en el catálogo y prefiero confirmarlo antes de registrar el pedido.",
+      "Tenemos varias opciones:",
       ambiguityLines || null,
-      `Revisa el catálogo aquí: ${CATALOG_URL}`,
-      "Envíame el nombre exacto como aparece y te lo dejo listo."
-    ].filter(Boolean).join("\n");
+      "¿Cuál deseas?"
+    ].filter(Boolean).join("\n\n");
   }
 
   if (!evaluacion.esValido) {

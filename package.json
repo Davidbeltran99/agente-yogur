@@ -14,7 +14,8 @@
     "validate:catalog-real": "node scripts/validate-catalog-real.js",
     "validate:catalog-sync": "node scripts/validate-catalog-sync.js",
     "validate:delivery-dates": "node scripts/validate-delivery-dates.js",
-    "validate:hardening": "node scripts/validate-hardening.js"
+    "validate:hardening": "node scripts/validate-hardening.js",
+    "validate:catalog-canonical": "node scripts/validate-catalog-canonicalization.js"
   },
   "engines": {
     "node": ">=20"
