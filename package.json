@@ -18,7 +18,8 @@
     "validate:catalog-canonical": "node scripts/validate-catalog-canonicalization.js",
     "validate:conversation-memory": "node scripts/validate-conversation-memory.js",
     "validate:panel": "node scripts/validate-panel.js",
-    "validate:responsive": "node scripts/validate-responsive.js"
+    "validate:responsive": "node scripts/validate-responsive.js",
+    "validate:finalize-modal": "node scripts/validate-finalize-modal.js"
   },
   "engines": {
     "node": ">=20"

@@ -52,6 +52,7 @@ let historyClosures = [];
 let selectedClosureId = null;
 let healthState = null;
 let sessionTimeoutHandle = null;
+let finalizeModalOpen = false;
 
 function formatDate(value) {
   if (!value) return "-";
@@ -519,7 +520,19 @@ function renderHistoryDetail() {
   `;
 }
 
-function renderCloseDaySummary() {
+function getFinalizeDaySnapshot() {
+  if (dashboardSummary?.stats) {
+    return {
+      stats: {
+        totalOrders: Number(dashboardSummary.stats.totalOrders || 0),
+        totalSales: Number(dashboardSummary.stats.totalSales || 0),
+        pending: Number(dashboardSummary.stats.pending || 0),
+        delivered: Number(dashboardSummary.stats.delivered || 0)
+      },
+      paymentBreakdown: Array.isArray(dashboardSummary.paymentBreakdown) ? dashboardSummary.paymentBreakdown : []
+    };
+  }
+
   const paymentMap = new Map();
   for (const order of orders) {
     const key = String(order.metodoPago || "Sin definir").trim() || "Sin definir";
@@ -529,22 +542,41 @@ function renderCloseDaySummary() {
     paymentMap.set(key, current);
   }
 
-  const stats = {
-    totalOrders: orders.length,
-    totalSales: orders.reduce((sum, order) => sum + Number(order.total || 0), 0),
-    pending: orders.filter((order) => order.estado === "pendiente").length,
-    delivered: orders.filter((order) => order.estado === "entregado").length
+  return {
+    stats: {
+      totalOrders: orders.length,
+      totalSales: orders.reduce((sum, order) => sum + Number(order.total || 0), 0),
+      pending: orders.filter((order) => order.estado === "pendiente").length,
+      delivered: orders.filter((order) => order.estado === "entregado").length
+    },
+    paymentBreakdown: Array.from(paymentMap.values()).sort((a, b) => b.total - a.total)
   };
-  const paymentBreakdown = Array.from(paymentMap.values()).sort((a, b) => b.total - a.total);
+}
+
+function renderCloseDaySummary() {
+  const { stats, paymentBreakdown } = getFinalizeDaySnapshot();
+  const hasOrders = Number(stats.totalOrders || 0) > 0;
+
+  confirmCloseDayButton.disabled = !hasOrders;
+
+  if (!hasOrders) {
+    closeDaySummary.innerHTML = `
+      <div class="modal-empty-state">
+        <p class="modal-empty-title">No hay pedidos activos para cerrar hoy.</p>
+        <p class="helper-text">Cuando existan pedidos del día, aquí verás el resumen antes de confirmar el cierre.</p>
+      </div>
+    `;
+    return;
+  }
 
   closeDaySummary.innerHTML = `
     <div class="modal-summary">
-      <div class="modal-summary-card"><span class="helper-text">Pedidos</span><strong>${escapeHtml(String(stats.totalOrders || 0))}</strong></div>
-      <div class="modal-summary-card"><span class="helper-text">Ventas</span><strong>${escapeHtml(formatCurrency(stats.totalSales || 0))}</strong></div>
+      <div class="modal-summary-card"><span class="helper-text">Pedidos del día</span><strong>${escapeHtml(String(stats.totalOrders || 0))}</strong></div>
+      <div class="modal-summary-card"><span class="helper-text">Total vendido</span><strong>${escapeHtml(formatCurrency(stats.totalSales || 0))}</strong></div>
       <div class="modal-summary-card"><span class="helper-text">Pendientes</span><strong>${escapeHtml(String(stats.pending || 0))}</strong></div>
       <div class="modal-summary-card"><span class="helper-text">Entregados</span><strong>${escapeHtml(String(stats.delivered || 0))}</strong></div>
     </div>
-    <div class="detail-card">
+    <div class="detail-card compact-card">
       <h3>Métodos de pago del día</h3>
       <div class="meta-list">
         ${paymentBreakdown.length
@@ -552,17 +584,33 @@ function renderCloseDaySummary() {
           : '<p class="helper-text">No hay pagos registrados todavía.</p>'}
       </div>
     </div>
-    <p class="helper-text">Se generará un PDF del día, se archivarán los pedidos visibles y el panel operativo quedará limpio.</p>
+    <p class="helper-text modal-note">Se generará un PDF del día, se archivarán los pedidos visibles y el panel operativo quedará limpio.</p>
   `;
 }
 
-function openCloseDayModal() {
-  renderCloseDaySummary();
-  closeDayModal.hidden = false;
+function resetFinalizeModalState() {
+  closeDaySummary.innerHTML = "";
+  closeDayModal.hidden = true;
+  closeDayModal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  finalizeModalOpen = false;
+  confirmCloseDayButton.disabled = false;
 }
 
-function closeCloseDayModal() {
-  closeDayModal.hidden = true;
+function openFinalizeModal() {
+  renderCloseDaySummary();
+  closeDayModal.hidden = false;
+  closeDayModal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  finalizeModalOpen = true;
+  closeDayModal.scrollTop = 0;
+  window.requestAnimationFrame(() => {
+    (confirmCloseDayButton.disabled ? closeModalButton : confirmCloseDayButton)?.focus();
+  });
+}
+
+function closeFinalizeModal() {
+  resetFinalizeModalState();
 }
 
 async function loadOrders() {
@@ -794,6 +842,12 @@ async function sendChatMessage(event) {
 }
 
 async function confirmCloseDay() {
+  const { stats } = getFinalizeDaySnapshot();
+  if (!Number(stats.totalOrders || 0)) {
+    showToast("No hay pedidos activos para cerrar hoy.", "info");
+    return;
+  }
+
   confirmCloseDayButton.disabled = true;
 
   try {
@@ -809,7 +863,7 @@ async function confirmCloseDay() {
       throw new Error(payload.detalle || payload.error || "No se pudo finalizar el día");
     }
 
-    closeCloseDayModal();
+    closeFinalizeModal();
     showToast(`Día finalizado. ${payload.archivedOrders || 0} pedido(s) archivados.`, "success");
 
     if (payload.closure?.downloadUrl) {
@@ -900,13 +954,18 @@ refreshButton.addEventListener("click", () => {
   loadDashboard();
 });
 
-closeDayButton?.addEventListener("click", () => openCloseDayModal());
-closeModalButton?.addEventListener("click", closeCloseDayModal);
-cancelCloseDayButton?.addEventListener("click", closeCloseDayModal);
+closeDayButton?.addEventListener("click", openFinalizeModal);
+closeModalButton?.addEventListener("click", closeFinalizeModal);
+cancelCloseDayButton?.addEventListener("click", closeFinalizeModal);
 confirmCloseDayButton?.addEventListener("click", confirmCloseDay);
 closeDayModal?.addEventListener("click", (event) => {
   if (event.target === closeDayModal) {
-    closeCloseDayModal();
+    closeFinalizeModal();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && finalizeModalOpen) {
+    closeFinalizeModal();
   }
 });
 
