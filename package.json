@@ -17,7 +17,8 @@
     "validate:hardening": "node scripts/validate-hardening.js",
     "validate:catalog-canonical": "node scripts/validate-catalog-canonicalization.js",
     "validate:conversation-memory": "node scripts/validate-conversation-memory.js",
-    "validate:panel": "node scripts/validate-panel.js"
+    "validate:panel": "node scripts/validate-panel.js",
+    "validate:responsive": "node scripts/validate-responsive.js"
   },
   "engines": {
     "node": ">=20"
@@ -27,6 +28,7 @@
     "better-sqlite3": "^12.9.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
-    "googleapis": "^144.0.0"
+    "googleapis": "^144.0.0",
+    "pdfkit": "^0.18.0"
   }
 }

@@ -26,6 +26,10 @@ function normalizeStatus(value) {
     return "en proceso";
   }
 
+  if (normalized === "en camino") {
+    return "en proceso";
+  }
+
   return ESTADOS_VALIDOS.has(normalized) ? normalized : "pendiente";
 }
 
@@ -33,7 +37,7 @@ function humanizeStatus(value) {
   const status = normalizeStatus(value);
   const labels = {
     pendiente: "Pendiente",
-    "en proceso": "En proceso",
+    "en proceso": "En camino",
     entregado: "Entregado",
     cancelado: "Cancelado"
   };
@@ -128,6 +132,17 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS daily_closures (
+    id TEXT PRIMARY KEY,
+    date_key TEXT NOT NULL,
+    title TEXT,
+    summary_json TEXT NOT NULL,
+    pdf_path TEXT,
+    archived_orders_count INTEGER NOT NULL DEFAULT 0,
+    total_sales REAL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_orders_estado ON orders(estado);
   CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_orders_telefono ON orders(telefono);
@@ -139,11 +154,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_order_id ON messages(order_id);
   CREATE INDEX IF NOT EXISTS idx_catalog_products_activo ON catalog_products(activo);
   CREATE INDEX IF NOT EXISTS idx_catalog_products_nombre ON catalog_products(nombre);
+  CREATE INDEX IF NOT EXISTS idx_daily_closures_created_at ON daily_closures(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_daily_closures_date_key ON daily_closures(date_key DESC);
 `);
 
 ensureColumn("orders", "total", "REAL");
 ensureColumn("order_items", "precio_unitario", "REAL");
 ensureColumn("order_items", "subtotal", "REAL");
+ensureColumn("orders", "archived_at", "TEXT");
+ensureColumn("orders", "closure_id", "TEXT");
 
 const insertOrderStatement = db.prepare(`
   INSERT INTO orders (
@@ -196,11 +215,13 @@ const listOrderRowsBase = `
 
 const getOrderByIdStatement = db.prepare(`${listOrderRowsBase} WHERE o.id = ? ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
 const getOrderBySourceMessageIdStatement = db.prepare(`${listOrderRowsBase} WHERE o.source_message_id = ? ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
-const getActiveOrderByPhoneStatement = db.prepare(`${listOrderRowsBase} WHERE o.telefono = ? AND o.estado IN ('pendiente', 'en proceso') ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
-const listOrdersStatement = db.prepare(`${listOrderRowsBase} ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
-const listOrdersByStatusStatement = db.prepare(`${listOrderRowsBase} WHERE o.estado = ? ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
+const getActiveOrderByPhoneStatement = db.prepare(`${listOrderRowsBase} WHERE o.telefono = ? AND o.closure_id IS NULL AND o.estado IN ('pendiente', 'en proceso') ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
+const listOrdersStatement = db.prepare(`${listOrderRowsBase} WHERE o.closure_id IS NULL ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
+const listOrdersByStatusStatement = db.prepare(`${listOrderRowsBase} WHERE o.closure_id IS NULL AND o.estado = ? ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
+const listOrdersIncludingArchivedStatement = db.prepare(`${listOrderRowsBase} ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
+const listOrdersIncludingArchivedByStatusStatement = db.prepare(`${listOrderRowsBase} WHERE o.estado = ? ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
 const updateOrderStatusStatement = db.prepare(`UPDATE orders SET estado = ?, updated_at = ? WHERE id = ?`);
-const countOrdersStatement = db.prepare("SELECT COUNT(*) AS total FROM orders");
+const countOrdersStatement = db.prepare("SELECT COUNT(*) AS total FROM orders WHERE closure_id IS NULL");
 const getOrderItemsCountStatement = db.prepare("SELECT COUNT(*) AS total FROM order_items WHERE order_id = ?");
 const getOrderExistenceStatement = db.prepare("SELECT id FROM orders WHERE id = ?");
 const insertMessageStatement = db.prepare(`
@@ -248,6 +269,26 @@ const listActiveCatalogProductsStatement = db.prepare(`
 const countCatalogProductsStatement = db.prepare(`SELECT COUNT(*) AS total FROM catalog_products WHERE activo = 1`);
 const countAllCatalogProductsStatement = db.prepare(`SELECT COUNT(*) AS total FROM catalog_products`);
 const countInactiveCatalogProductsStatement = db.prepare(`SELECT COUNT(*) AS total FROM catalog_products WHERE activo = 0`);
+const insertDailyClosureStatement = db.prepare(`
+  INSERT INTO daily_closures (id, date_key, title, summary_json, pdf_path, archived_orders_count, total_sales, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const listDailyClosuresStatement = db.prepare(`
+  SELECT id, date_key, title, summary_json, pdf_path, archived_orders_count, total_sales, created_at
+  FROM daily_closures
+  ORDER BY datetime(created_at) DESC, rowid DESC
+`);
+const getDailyClosureByIdStatement = db.prepare(`
+  SELECT id, date_key, title, summary_json, pdf_path, archived_orders_count, total_sales, created_at
+  FROM daily_closures
+  WHERE id = ?
+  LIMIT 1
+`);
+const archiveOrdersByClosureStatement = db.prepare(`
+  UPDATE orders
+  SET closure_id = ?, archived_at = ?, updated_at = ?
+  WHERE id = ?
+`);
 
 const LIST_CONVERSATIONS_BASE_QUERY = `
   WITH ranked_messages AS (
@@ -465,6 +506,15 @@ function listOrders({ status } = {}) {
   const rows = normalizedStatus
     ? listOrdersByStatusStatement.all(normalizedStatus)
     : listOrdersStatement.all();
+
+  return hydrateOrders(rows);
+}
+
+function listOrdersIncludingArchived({ status } = {}) {
+  const normalizedStatus = normalizeText(status) ? normalizeStatus(status) : null;
+  const rows = normalizedStatus
+    ? listOrdersIncludingArchivedByStatusStatement.all(normalizedStatus)
+    : listOrdersIncludingArchivedStatement.all();
 
   return hydrateOrders(rows);
 }
@@ -852,6 +902,75 @@ function updateMessageOrder(messageId, orderId) {
   updateMessageOrderStatement.run(normalizeText(orderId), messageId);
 }
 
+function hydrateDailyClosure(row) {
+  if (!row) {
+    return null;
+  }
+
+  let summary = null;
+
+  if (row.summary_json) {
+    try {
+      summary = JSON.parse(row.summary_json);
+    } catch (_error) {
+      summary = null;
+    }
+  }
+
+  return {
+    id: row.id,
+    dateKey: row.date_key,
+    title: row.title,
+    summary,
+    pdfPath: row.pdf_path,
+    archivedOrdersCount: Number(row.archived_orders_count || 0),
+    totalSales: parseOptionalNumber(row.total_sales),
+    createdAt: row.created_at
+  };
+}
+
+function createDailyClosure({
+  id = randomUUID(),
+  dateKey,
+  title = null,
+  summary,
+  pdfPath = null,
+  orderIds = [],
+  createdAt = new Date().toISOString()
+}) {
+  const safeSummary = summary && typeof summary === "object" ? summary : {};
+  const safeOrderIds = Array.isArray(orderIds)
+    ? [...new Set(orderIds.map((value) => normalizeText(value)).filter(Boolean))]
+    : [];
+
+  runInTransaction(() => {
+    insertDailyClosureStatement.run(
+      id,
+      normalizeText(dateKey) || createdAt.slice(0, 10),
+      normalizeText(title),
+      JSON.stringify(safeSummary),
+      normalizeText(pdfPath),
+      safeOrderIds.length,
+      parseOptionalNumber(safeSummary?.stats?.totalSales ?? safeSummary?.totalSales),
+      createdAt
+    );
+
+    for (const orderId of safeOrderIds) {
+      archiveOrdersByClosureStatement.run(id, createdAt, createdAt, orderId);
+    }
+  });
+
+  return getDailyClosureById(id);
+}
+
+function listDailyClosures() {
+  return listDailyClosuresStatement.all().map(hydrateDailyClosure);
+}
+
+function getDailyClosureById(id) {
+  return hydrateDailyClosure(getDailyClosureByIdStatement.get(id));
+}
+
 module.exports = {
   db,
   databasePath,
@@ -860,6 +979,7 @@ module.exports = {
   humanizeStatus,
   saveOrder,
   listOrders,
+  listOrdersIncludingArchived,
   getOrderById,
   updateOrderStatus,
   countOrders,
@@ -875,5 +995,8 @@ module.exports = {
   listConversations,
   listMessagesByPhone,
   countMessagesByPhone,
-  conversationExists
+  conversationExists,
+  createDailyClosure,
+  listDailyClosures,
+  getDailyClosureById
 };

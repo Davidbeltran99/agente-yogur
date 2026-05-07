@@ -235,6 +235,7 @@ async function main() {
     await page.send("Page.navigate", { url: APP_URL });
 
     await waitForEvaluate(page.evaluate, "document.readyState === 'complete'");
+    await waitForEvaluate(page.evaluate, "document.title.includes('Tellolac AI')");
     await waitForEvaluate(page.evaluate, "document.querySelector('#conversationMeta')?.textContent && !document.querySelector('#conversationMeta').textContent.includes('Cargando')");
     await waitForEvaluate(page.evaluate, "document.querySelectorAll('.conversation-item[data-phone]').length > 0");
 

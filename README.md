@@ -1,6 +1,6 @@
 # Tellolac AI
 
-Servicio para leer mensajes, extraer pedidos, validarlos contra catálogo real, guardar en SQLite/Google Sheets y responder por WhatsApp Cloud API con Abby como asistente.
+Servicio para leer mensajes, extraer pedidos, validarlos contra catálogo real, guardar en SQLite/Google Sheets y responder por WhatsApp Cloud API con Abi como asistente.
 
 ## 1. Instalar dependencias
 

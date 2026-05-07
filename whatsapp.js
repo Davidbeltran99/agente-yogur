@@ -79,8 +79,8 @@ function construirLineaCatalogoSugerido() {
 
 function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
   return customerName
-    ? `¡Hola ${customerName}! 😊\nSoy Abby, tu asistente de Tellolac AI.\n\nCuéntame en qué te puedo ayudar hoy.`
-    : "¡Hola! 😊\nMi nombre es Abby, soy tu asistente virtual de Tellolac AI para Tellolac Productos Lácteos.\n\nEstoy aquí para ayudarte con información de productos, precios y pedidos 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
+    ? `¡Hola ${customerName}! 😊\nSoy Abi, tu asistente de Tellolac AI.\n\nCuéntame en qué te puedo ayudar hoy.`
+    : "Hola 😊\nMi nombre es Abi, soy tu asistente virtual de Tellolac.\n\nEstoy aquí para ayudarte con información de productos, precios y pedidos 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
 }
 
 function construirLineasCatalogo(featuredProducts = []) {
@@ -195,7 +195,7 @@ function construirTituloAmbiguo(input) {
 }
 
 function construirRespuestaIdentidad() {
-  return "Soy Abby 😊, tu asistente virtual de Tellolac AI. Te puedo ayudar con productos, precios y pedidos.";
+  return "Soy Abi 😊, tu asistente virtual de Tellolac. Te puedo ayudar con productos, precios y pedidos.";
 }
 
 function construirRespuestaDespedida() {

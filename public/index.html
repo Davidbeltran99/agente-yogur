@@ -3,60 +3,125 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tellolac AI | Panel operativo</title>
+  <title>Tellolac AI | Panel SaaS</title>
   <link rel="icon" type="image/jpeg" href="/assets/logo-tellolac.jpg" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="brand-block">
-        <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="brand-logo" />
+  <div class="saas-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="sidebar-logo" />
         <div>
           <p class="eyebrow">Tellolac AI</p>
-          <h1>Tellolac AI</h1>
-          <p class="brand-subtitle">Abby Assistant · Operación comercial</p>
-          <p class="subtitle">Panel profesional para revisar pedidos, conversaciones y responder manualmente sin tocar el webhook ni romper producción.</p>
+          <h1 class="sidebar-title">Tellolac AI</h1>
+          <p class="sidebar-subtitle">Asistente Comercial Inteligente</p>
         </div>
       </div>
-      <div class="topbar-actions">
-        <label class="filter compact-filter">
-          <span>Estado</span>
-          <select id="statusFilter">
-            <option value="">Todos</option>
-            <option value="pendiente">Pendiente</option>
-            <option value="en proceso">En proceso</option>
-            <option value="entregado">Entregado</option>
-            <option value="cancelado">Cancelado</option>
-          </select>
-        </label>
-        <button id="refreshButton" class="secondary">Actualizar</button>
-        <button id="logoutButton" class="secondary ghost">Salir</button>
-      </div>
-    </header>
 
-    <section class="workspace-grid">
-      <div class="workspace-column">
-        <main class="layout">
-          <section class="panel table-panel">
-            <div class="panel-header">
-              <div>
-                <h2>Listado de pedidos</h2>
-                <p id="tableMeta">Cargando pedidos...</p>
-              </div>
+      <nav class="sidebar-nav">
+        <button class="nav-link active" data-target="dashboardSection">Dashboard</button>
+        <button class="nav-link" data-target="ordersSection">Pedidos</button>
+        <button class="nav-link" data-target="historySection">Historial</button>
+        <button class="nav-link" data-target="reportsSection">Reportes</button>
+        <button class="nav-link" data-target="settingsSection">Configuración</button>
+      </nav>
+
+      <div class="sidebar-footer">Powered by Abi AI</div>
+    </aside>
+
+    <main class="main-shell">
+      <header class="app-header">
+        <div class="header-brand">
+          <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="brand-logo" />
+          <div>
+            <p class="eyebrow">Panel premium</p>
+            <h2>Tellolac AI</h2>
+            <p class="subtitle">Asistente Comercial Inteligente</p>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <span class="status-pill status-online">🟢 Abi Online</span>
+          <button id="refreshButton" class="secondary">Actualizar</button>
+          <button id="closeDayButton" class="primary soft">📄 Finalizar Día</button>
+          <button id="logoutButton" class="secondary ghost">Salir</button>
+        </div>
+      </header>
+
+      <section id="dashboardSection" class="section-block">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Dashboard</p>
+            <h3>Resumen del día</h3>
+            <p class="section-copy">Vista operativa con métricas, pedidos y conversaciones de Abi en un solo lugar.</p>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <article class="kpi-card">
+            <div class="kpi-icon">🧾</div>
+            <div>
+              <p class="kpi-label">Pedidos Hoy</p>
+              <strong id="kpiOrdersToday">0</strong>
             </div>
+          </article>
+          <article class="kpi-card">
+            <div class="kpi-icon">💰</div>
+            <div>
+              <p class="kpi-label">Ventas Hoy</p>
+              <strong id="kpiSalesToday">$0</strong>
+            </div>
+          </article>
+          <article class="kpi-card">
+            <div class="kpi-icon">🟡</div>
+            <div>
+              <p class="kpi-label">Pendientes</p>
+              <strong id="kpiPending">0</strong>
+            </div>
+          </article>
+          <article class="kpi-card">
+            <div class="kpi-icon">🟢</div>
+            <div>
+              <p class="kpi-label">Entregados</p>
+              <strong id="kpiDelivered">0</strong>
+            </div>
+          </article>
+        </div>
+      </section>
 
-            <div id="feedback" class="feedback" hidden></div>
+      <section id="ordersSection" class="section-block">
+        <div class="section-heading section-heading-split">
+          <div>
+            <p class="eyebrow">Pedidos</p>
+            <h3>Operación comercial</h3>
+            <p id="tableMeta" class="section-copy">Cargando pedidos...</p>
+          </div>
+          <label class="filter compact-filter">
+            <span>Estado</span>
+            <select id="statusFilter">
+              <option value="">Todos</option>
+              <option value="pendiente">Pendiente</option>
+              <option value="en proceso">En camino</option>
+              <option value="entregado">Entregado</option>
+              <option value="cancelado">Cancelado</option>
+            </select>
+          </label>
+        </div>
 
+        <div id="feedback" class="feedback" hidden></div>
+
+        <div class="orders-layout">
+          <section class="surface table-surface">
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Fecha</th>
                     <th>Cliente</th>
-                    <th>Detalle</th>
-                    <th>Dirección</th>
+                    <th>Pedido</th>
+                    <th>Fecha</th>
                     <th>Pago</th>
+                    <th>Total</th>
                     <th>Estado</th>
                     <th>Acción</th>
                   </tr>
@@ -70,62 +135,135 @@
             </div>
           </section>
 
-          <aside class="panel detail-panel">
-            <div class="panel-header">
+          <aside class="surface detail-surface">
+            <div class="surface-header">
               <div>
-                <h2>Detalle del pedido</h2>
-                <p>Selecciona una fila para ver más información.</p>
+                <h3>Detalle del pedido</h3>
+                <p class="helper-text">Dirección, pago, productos y notas.</p>
               </div>
             </div>
-
             <div id="orderDetail" class="detail-empty">
               <p>No hay ningún pedido seleccionado.</p>
             </div>
           </aside>
-        </main>
-      </div>
+        </div>
+      </section>
 
-      <section class="panel crm-panel">
-        <div class="panel-header crm-header">
+      <section class="section-block">
+        <div class="section-heading">
           <div>
-            <h2>Conversaciones / CRM</h2>
-            <p id="conversationMeta">Cargando conversaciones...</p>
+            <p class="eyebrow">Conversación</p>
+            <h3>CRM de Abi</h3>
+            <p id="conversationMeta" class="section-copy">Cargando conversaciones...</p>
           </div>
         </div>
 
         <div id="chatFeedback" class="feedback" hidden></div>
 
-        <div class="crm-layout">
-          <aside class="conversation-sidebar">
-            <div id="conversationList" class="conversation-list">
-              <div class="conversation-empty">Cargando conversaciones...</div>
-            </div>
-          </aside>
-
-          <section class="chat-panel">
-            <div class="chat-header">
-              <div>
-                <h3 id="chatTitle">Selecciona una conversación</h3>
-                <p id="chatSubtitle" class="helper-text">Aquí verás el historial del cliente.</p>
+        <section class="surface crm-panel">
+          <div class="crm-layout">
+            <aside class="conversation-sidebar">
+              <div id="conversationList" class="conversation-list">
+                <div class="conversation-empty">Cargando conversaciones...</div>
               </div>
-              <div id="chatOrderSummary" class="chat-order-summary"></div>
-            </div>
+            </aside>
 
-            <div id="chatMessages" class="chat-messages empty-chat">
-              <p>No hay conversación seleccionada.</p>
-            </div>
-
-            <form id="chatComposer" class="chat-composer">
-              <textarea id="chatMessageInput" rows="3" placeholder="Escribe una respuesta manual..."></textarea>
-              <div class="chat-composer-actions">
-                <p class="helper-text">Si WhatsApp está desactivado, el envío queda simulado y se guarda igual en DB.</p>
-                <button type="submit" id="sendMessageButton" class="primary">Enviar mensaje</button>
+            <section class="chat-panel">
+              <div class="chat-header">
+                <div>
+                  <h3 id="chatTitle">Selecciona una conversación</h3>
+                  <p id="chatSubtitle" class="helper-text">Aquí verás el historial del cliente.</p>
+                </div>
+                <div id="chatOrderSummary" class="chat-order-summary"></div>
               </div>
-            </form>
+
+              <div id="chatMessages" class="chat-messages empty-chat">
+                <p>No hay conversación seleccionada.</p>
+              </div>
+
+              <form id="chatComposer" class="chat-composer">
+                <textarea id="chatMessageInput" rows="3" placeholder="Escribe una respuesta cálida y comercial..."></textarea>
+                <div class="chat-composer-actions">
+                  <p class="helper-text">Si WhatsApp está desactivado, el envío queda simulado y se guarda igual en DB.</p>
+                  <button type="submit" id="sendMessageButton" class="primary">Enviar mensaje</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+      </section>
+
+      <section id="historySection" class="section-block">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Historial</p>
+            <h3>Cierres anteriores</h3>
+            <p class="section-copy">Consulta cierres archivados, resúmenes del día y descarga PDFs históricos.</p>
+          </div>
+        </div>
+
+        <div class="history-layout">
+          <section class="surface history-list-surface">
+            <div class="surface-header">
+              <h3>Cierres guardados</h3>
+            </div>
+            <div id="historyList" class="history-list"></div>
+          </section>
+
+          <section class="surface history-detail-surface">
+            <div class="surface-header">
+              <h3>Detalle del cierre</h3>
+            </div>
+            <div id="historyDetail" class="detail-empty">
+              <p>Aquí verás el resumen del cierre seleccionado.</p>
+            </div>
           </section>
         </div>
       </section>
-    </section>
+
+      <section id="reportsSection" class="section-block">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Reportes</p>
+            <h3>Lectura rápida del negocio</h3>
+            <p class="section-copy">Resumen comercial del día con ventas, pagos y estado operativo.</p>
+          </div>
+        </div>
+
+        <div id="reportsGrid" class="reports-grid"></div>
+      </section>
+
+      <section id="settingsSection" class="section-block">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Configuración</p>
+            <h3>Estado del sistema</h3>
+            <p class="section-copy">Monitoreo rápido de login, catálogo, WhatsApp y persistencia.</p>
+          </div>
+        </div>
+
+        <div id="settingsGrid" class="reports-grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+
+  <div id="closeDayModal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Cierre operativo</p>
+          <h3>📄 Finalizar Día</h3>
+        </div>
+        <button id="closeModalButton" class="secondary ghost">Cerrar</button>
+      </div>
+      <div id="closeDaySummary" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="cancelCloseDayButton" class="secondary">Cancelar</button>
+        <button id="confirmCloseDayButton" class="primary">Confirmar cierre</button>
+      </div>
+    </div>
   </div>
 
   <script src="/app.js" defer></script>

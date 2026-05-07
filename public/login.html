@@ -3,17 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tellolac AI | Acceso admin</title>
+  <title>Tellolac AI | Acceso premium</title>
   <link rel="icon" type="image/jpeg" href="/assets/logo-tellolac.jpg" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <main class="auth-shell">
-    <section class="auth-card">
-      <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="auth-logo" />
-      <p class="eyebrow">Tellolac AI</p>
-      <h1>Tellolac AI</h1>
-      <p class="subtitle">Ingreso interno al panel operativo de Abby Assistant.</p>
+    <section class="auth-card premium-auth-card">
+      <div class="auth-brand">
+        <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="auth-logo" />
+        <div>
+          <p class="eyebrow">Tellolac AI</p>
+          <h1>Acceso premium</h1>
+          <p class="subtitle">Ingresa al panel comercial de Abi.</p>
+        </div>
+      </div>
+
+      <div class="auth-copy-box">
+        <span class="status-pill status-online">🟢 Abi Online</span>
+        <p>Administra pedidos, historial, cierres del día y conversaciones en una sola vista moderna.</p>
+      </div>
 
       <form id="loginForm">
         <label>
@@ -25,10 +34,10 @@
           <input id="password" name="password" type="password" autocomplete="current-password" required />
         </label>
         <p id="loginError" class="auth-error"></p>
-        <button type="submit" class="primary">Ingresar</button>
+        <button type="submit" class="primary">Ingresar al panel</button>
       </form>
 
-      <p class="auth-note">Solo personal autorizado.</p>
+      <p class="auth-note">Powered by Abi AI · Solo personal autorizado.</p>
     </section>
   </main>
 

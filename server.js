@@ -17,6 +17,7 @@ const {
   ESTADOS_VALIDOS,
   saveOrder,
   listOrders,
+  listOrdersIncludingArchived,
   updateOrderStatus,
   countOrders,
   getActiveOrderByPhone,
@@ -31,8 +32,12 @@ const {
   listConversations,
   listMessagesByPhone,
   countMessagesByPhone,
-  conversationExists
+  conversationExists,
+  createDailyClosure,
+  listDailyClosures,
+  getDailyClosureById
 } = require("./db");
+const { generateDailyClosurePdf } = require("./reports");
 const {
   DEFAULT_CATALOG_URL,
   fetchCatalogProducts,
@@ -1447,6 +1452,60 @@ function parseBooleanEnv(value, defaultValue = false) {
   return String(value).trim().toLowerCase() === "true";
 }
 
+function formatCurrency(value) {
+  const numeric = Number(value || 0);
+  return new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    maximumFractionDigits: 0
+  }).format(numeric);
+}
+
+function buildOrderAvatarLabel(order) {
+  const source = limpiarTexto(order?.cliente) || limpiarTexto(order?.telefono) || "CL";
+  const parts = source.split(/\s+/).filter(Boolean);
+  return parts.slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("").slice(0, 2) || "CL";
+}
+
+function buildDashboardSummary(orders = []) {
+  const now = new Date();
+  const todayKey = now.toISOString().slice(0, 10);
+  const todayOrders = orders.filter((order) => String(order.fechaRegistro || "").slice(0, 10) === todayKey);
+  return buildOperationalSummary(todayOrders, todayKey);
+}
+
+function buildOperationalSummary(orders = [], dateKey = new Date().toISOString().slice(0, 10)) {
+  const stats = {
+    totalOrders: orders.length,
+    totalSales: orders.reduce((sum, order) => sum + (Number(order.total) || 0), 0),
+    pending: orders.filter((order) => order.estado === "pendiente").length,
+    delivered: orders.filter((order) => order.estado === "entregado").length,
+    cancelled: orders.filter((order) => order.estado === "cancelado").length,
+    inTransit: orders.filter((order) => order.estado === "en proceso").length
+  };
+
+  const paymentMap = new Map();
+  for (const order of orders) {
+    const key = limpiarTexto(order.metodoPago) || "Sin definir";
+    const current = paymentMap.get(key) || { label: key, count: 0, total: 0 };
+    current.count += 1;
+    current.total += Number(order.total) || 0;
+    paymentMap.set(key, current);
+  }
+
+  return {
+    dateKey,
+    generatedAt: new Date().toISOString(),
+    stats,
+    paymentBreakdown: Array.from(paymentMap.values()).sort((a, b) => b.total - a.total),
+    orders: orders.map((order) => ({
+      ...order,
+      avatarLabel: buildOrderAvatarLabel(order),
+      totalLabel: formatCurrency(order.total || 0)
+    }))
+  };
+}
+
 function normalizePanelLoginPath(value) {
   const normalized = String(value || "portal")
     .trim()
@@ -1791,11 +1850,15 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
 
 function normalizarEstadoPanel(valor) {
   const status = String(valor || "").trim().toLowerCase();
+  if (status === "en camino") {
+    return "en proceso";
+  }
+
   return ESTADOS_VALIDOS.has(status) ? status : null;
 }
 
 async function bootstrapDbDesdeSheets() {
-  if (countOrders() > 0) {
+  if (listOrdersIncludingArchived().length > 0) {
     return;
   }
 
@@ -2550,11 +2613,13 @@ app.get("/orders", requirePanelAuth, (req, res) => {
   try {
     const status = normalizarEstadoPanel(req.query.status);
     const orders = listOrders({ status });
+    const summary = buildDashboardSummary(orders);
 
     return res.json({
       ok: true,
       total: orders.length,
-      orders
+      orders,
+      summary
     });
   } catch (error) {
     logEvent("orders_read_error", { error: error.message }, "error");
@@ -2563,6 +2628,81 @@ app.get("/orders", requirePanelAuth, (req, res) => {
       error: "No se pudieron leer los pedidos",
       detalle: error.message
     });
+  }
+});
+
+app.get("/history/closures", requirePanelAuth, (_req, res) => {
+  try {
+    const closures = listDailyClosures().map((closure) => ({
+      ...closure,
+      downloadUrl: closure.pdfPath ? `/history/closures/${encodeURIComponent(closure.id)}/pdf` : null
+    }));
+
+    return res.json({
+      ok: true,
+      total: closures.length,
+      closures
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: "No se pudo cargar el historial", detalle: error.message });
+  }
+});
+
+app.get("/history/closures/:id/pdf", requirePanelAuth, (req, res) => {
+  try {
+    const closure = getDailyClosureById(req.params.id);
+    if (!closure) {
+      return res.status(404).json({ ok: false, error: "Cierre no encontrado" });
+    }
+
+    if (!closure.pdfPath || !fs.existsSync(closure.pdfPath)) {
+      return res.status(404).json({ ok: false, error: "PDF no disponible" });
+    }
+
+    return res.download(closure.pdfPath, path.basename(closure.pdfPath));
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: "No se pudo descargar el PDF", detalle: error.message });
+  }
+});
+
+app.post("/admin/close-day", requirePanelAuth, async (_req, res) => {
+  try {
+    const activeOrders = listOrders();
+    const summary = buildOperationalSummary(activeOrders);
+    const closureTitle = `Cierre ${summary.dateKey}`;
+    const closureId = `closure_${Date.now()}`;
+
+    const pdfPath = await generateDailyClosurePdf({
+      closureId,
+      summary: {
+        ...summary,
+        title: closureTitle
+      }
+    });
+
+    const closure = createDailyClosure({
+      id: closureId,
+      dateKey: summary.dateKey,
+      title: closureTitle,
+      summary: {
+        ...summary,
+        title: closureTitle
+      },
+      pdfPath,
+      orderIds: summary.orders.map((order) => order.id)
+    });
+
+    return res.json({
+      ok: true,
+      closure: {
+        ...closure,
+        downloadUrl: closure.pdfPath ? `/history/closures/${encodeURIComponent(closure.id)}/pdf` : null
+      },
+      archivedOrders: summary.orders.length,
+      remainingOrders: listOrders().length
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: "No se pudo finalizar el día", detalle: error.message });
   }
 });
 

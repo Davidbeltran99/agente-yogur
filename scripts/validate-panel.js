@@ -76,7 +76,7 @@ async function main() {
     return true;
   })()`.replace(/__ORDER_ID__/g, orderId));
 
-  await waitFor(`document.querySelector('tr[data-order-id="' + CSS.escape(${JSON.stringify("__ORDER_ID__")}) + '"] .badge')?.textContent.includes('En proceso')`.replace(/__ORDER_ID__/g, orderId));
+  await waitFor(`document.querySelector('tr[data-order-id="' + CSS.escape(${JSON.stringify("__ORDER_ID__")}) + '"] .badge')?.textContent.includes('En camino')`.replace(/__ORDER_ID__/g, orderId));
 
   const afterUpdate = await evaluate(`(() => ({
     badge: document.querySelector('tr[data-order-id="' + CSS.escape(${JSON.stringify("__ORDER_ID__")}) + '"] .badge')?.textContent.trim() || null,
