@@ -1,7 +1,7 @@
 {
-  "name": "agente-yogur",
+  "name": "tellolac-ai",
   "version": "1.0.0",
-  "description": "Agente IA para pedidos de yogur con OpenAI, Node.js, SQLite y Google Sheets",
+  "description": "Tellolac AI: asistente de pedidos con OpenAI, Node.js, SQLite y Google Sheets",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -16,7 +16,8 @@
     "validate:delivery-dates": "node scripts/validate-delivery-dates.js",
     "validate:hardening": "node scripts/validate-hardening.js",
     "validate:catalog-canonical": "node scripts/validate-catalog-canonicalization.js",
-    "validate:conversation-memory": "node scripts/validate-conversation-memory.js"
+    "validate:conversation-memory": "node scripts/validate-conversation-memory.js",
+    "validate:panel": "node scripts/validate-panel.js"
   },
   "engines": {
     "node": ">=20"

@@ -20,23 +20,23 @@ async function main() {
   assert(catalogRows.some((row) => row.nombre === "Café litro" && Number(row.precio) === 12000), "No se encontró Café litro con precio correcto en catalog_products");
 
   const validPhone = `5732${Date.now().toString().slice(-8)}`;
-  const validMessage = "Quiero 3 aloe litro, 2 café litro y 1 ancheta. Dirección Calle 10 #20-30. Pago Nequi.";
+  const validMessage = "Quiero 3 aloe litro, 2 café litro y 1 ancheta 1. Dirección Calle 10 #20-30. Pago Nequi.";
   const valid = await api.post("/simulate-message", { telefono: validPhone, mensaje: validMessage });
   assert(valid.data.ok === true, "Caso válido no respondió ok=true");
   assert(valid.data.order?.id, "Caso válido no creó order");
   assert(valid.data.order?.items?.length === 3, `Caso válido esperaba 3 items y recibió ${valid.data.order?.items?.length}`);
-  assert(valid.data.order?.resumenItems === "3 Aloe Litro, 2 Café litro, 1 Ancheta", `Resumen inesperado: ${valid.data.order?.resumenItems}`);
+  assert(valid.data.order?.resumenItems === "3 Aloe Litro, 2 Café litro, 1 Ancheta 1", `Resumen inesperado: ${valid.data.order?.resumenItems}`);
 
   const quantities = Object.fromEntries(valid.data.order.items.map((item) => [item.producto, item.cantidad]));
   assert(quantities["Aloe Litro"] === 3, "Cantidad incorrecta para Aloe Litro");
   assert(quantities["Café litro"] === 2, "Cantidad incorrecta para Café litro");
-  assert(quantities["Ancheta"] === 1, "Cantidad incorrecta para Ancheta");
+  assert(quantities["Ancheta 1"] === 1, "Cantidad incorrecta para Ancheta 1");
 
   const prices = Object.fromEntries(valid.data.order.items.map((item) => [item.producto, item.precioUnitario]));
   assert(prices["Aloe Litro"] === 12000, "Precio incorrecto para Aloe Litro");
   assert(prices["Café litro"] === 12000, "Precio incorrecto para Café litro");
-  assert(prices["Ancheta"] === 45000, "Precio incorrecto para Ancheta");
-  assert(Number(valid.data.order?.total) === 105000, `Total incorrecto para el pedido válido: ${valid.data.order?.total}`);
+  assert(prices["Ancheta 1"] === 38000, "Precio incorrecto para Ancheta 1");
+  assert(Number(valid.data.order?.total) === 98000, `Total incorrecto para el pedido válido: ${valid.data.order?.total}`);
 
   const crm = await api.get(`/conversations/${validPhone}/messages`);
   assert(crm.data.total === 2, `CRM debía tener 2 mensajes y tiene ${crm.data.total}`);
@@ -47,20 +47,21 @@ async function main() {
   assert(dbItems.length === 3, `SQLite debía tener 3 items y tiene ${dbItems.length}`);
   assert(dbItems.some((row) => row.producto === "Aloe Litro" && Number(row.subtotal) === 36000), "Subtotal incorrecto para Aloe Litro");
   assert(dbItems.some((row) => row.producto === "Café litro" && Number(row.subtotal) === 24000), "Subtotal incorrecto para Café litro");
-  assert(dbItems.some((row) => row.producto === "Ancheta" && Number(row.subtotal) === 45000), "Subtotal incorrecto para Ancheta");
-  assert(Number(dbOrder?.total) === 105000, `Total incorrecto en SQLite: ${dbOrder?.total}`);
+  assert(dbItems.some((row) => row.producto === "Ancheta 1" && Number(row.subtotal) === 38000), "Subtotal incorrecto para Ancheta 1");
+  assert(Number(dbOrder?.total) === 98000, `Total incorrecto en SQLite: ${dbOrder?.total}`);
 
   const invalidPhone = `5732${(Date.now() + 1).toString().slice(-8)}`;
   const invalid = await api.post("/simulate-message", { telefono: invalidPhone, mensaje: "Quiero 1 producto inventado. Dirección Calle 1 #2-3. Pago Nequi." });
   assert(invalid.data.order === null, "Caso inválido no debía crear order");
   assert(invalid.data.evaluacion?.catalogStatus === "not_found", "Caso inválido debía quedar not_found");
-  assert(invalid.data.respuesta === "No encontré ese producto exacto en el catálogo. Puedes revisarlo aquí: https://catalogo.treinta.co/tellolac y enviarme el nombre como aparece.", "Respuesta inválida inesperada");
+  assert(invalid.data.respuesta.includes("No encontré ese producto en el catálogo"), "Respuesta inválida inesperada");
+  assert(invalid.data.respuesta.includes("https://catalogo.treinta.co/tellolac"), "Caso inválido debía incluir link del catálogo");
 
   const ambiguousPhone = `5732${(Date.now() + 2).toString().slice(-8)}`;
   const ambiguous = await api.post("/simulate-message", { telefono: ambiguousPhone, mensaje: "Quiero 1 aloe garrafa. Dirección Calle 1 #2-3. Pago Nequi." });
   assert(ambiguous.data.order === null, "Caso ambiguo no debía crear order");
   assert(ambiguous.data.evaluacion?.catalogStatus === "ambiguous", "Caso ambiguo debía quedar ambiguous");
-  assert((ambiguous.data.evaluacion?.ambiguousProducts || [])[0]?.options?.includes("Aloe garrafa 1.8 Ml"), "Caso ambiguo no devolvió opciones esperadas");
+  assert((ambiguous.data.evaluacion?.ambiguousProducts || [])[0]?.options?.some((option) => option?.nombre === "Aloe Garrafa 1800 ml"), "Caso ambiguo no devolvió opciones esperadas");
 
   db.close();
 

@@ -1,20 +1,17 @@
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const { structuredLog } = require("./logger");
 
 const promptBase = fs.readFileSync(path.join(__dirname, "prompt.txt"), "utf-8");
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 30000);
 const OPENAI_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS || 160);
 const OPENAI_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE || 0.1);
 const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 
 function logEvent(event, details = {}, level = "info") {
-  const logger = level === "error"
-    ? console.error
-    : (level === "warn" ? console.warn : console.log);
-
-  logger(JSON.stringify({ level, event, ...details }));
+  structuredLog(event, details, level);
 }
 
 function limpiarRespuestaJSON(texto) {

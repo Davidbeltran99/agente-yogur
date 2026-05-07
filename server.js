@@ -4,6 +4,7 @@ const { createHash, createHmac, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
+const { structuredLog } = require("./logger");
 const { procesarMensaje, OPENAI_MODEL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
@@ -1413,15 +1414,7 @@ function evaluarPedido(pedido, catalogAnalysis = { ambiguities: [], unmatched: [
 }
 
 function logEvent(event, details = {}, level = "info") {
-  const logger = level === "error"
-    ? console.error
-    : (level === "warn" ? console.warn : console.log);
-
-  logger(JSON.stringify({
-    level,
-    event,
-    ...details
-  }));
+  structuredLog(event, details, level);
 }
 
 function logRuntimeConfigSnapshot(context = "runtime") {
@@ -2108,7 +2101,7 @@ async function persistirPedidoFinal({ pedido, telefono, mensajeOriginal, sourceM
     sourceMessageId
   });
 
-  logEvent("db_save_completed", {
+  logEvent("order_saved", {
     id: order.id,
     telefono: order.telefono,
     estado: order.estado,
@@ -2443,8 +2436,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (!resultado.order) {
     logEvent("pedido_no_guardado", {
       origen,
-      motivo: "pedido_incompleto_o_invalido",
-      faltantes: resultado.evaluacion.faltantes
+      motivo: resultado.evaluacion?.modelError
+        ? "model_error"
+        : "pedido_incompleto_o_invalido",
+      faltantes: resultado.evaluacion?.faltantes || [],
+      catalogStatus: resultado.evaluacion?.catalogStatus || null
     });
   }
 
@@ -2538,7 +2534,7 @@ app.get("/", requirePanelAuth, (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "agente-yogur",
+    service: "tellolac-ai",
     appVersion: APP_VERSION,
     storage: "sqlite",
     dbPath: databasePath,
@@ -2749,9 +2745,6 @@ app.get("/webhook", (req, res) => {
   const challenge = req.query["hub.challenge"];
   const verifyToken = String(process.env.WHATSAPP_VERIFY_TOKEN || "").trim();
 
-  console.log("ENV TOKEN:", verifyToken);
-  console.log("REQ TOKEN:", token);
-
   if (mode === "subscribe" && token === verifyToken) {
     return res.status(200).send(challenge);
   }
@@ -2761,16 +2754,19 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
-    console.log("WEBHOOK_ROUTE_ENTERED");
-    logEvent("post_webhook_route_entered", { appVersion: APP_VERSION });
-    console.log("POST WEBHOOK RECEIVED");
-    console.dir(req.body, { depth: null });
     logRuntimeConfigSnapshot("webhook");
 
     const entry = req.body.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
     const mensaje = value?.messages?.[0];
+
+    logEvent("webhook_received", {
+      appVersion: APP_VERSION,
+      sourceMessageId: mensaje?.id || null,
+      messageType: mensaje?.type || null,
+      hasTextBody: Boolean(mensaje?.text?.body)
+    });
 
     logEvent("webhook_payload_inspected", {
       hasEntry: Boolean(entry),
@@ -2825,7 +2821,6 @@ app.post("/webhook", async (req, res) => {
       handler: "ejecutarFlujoMensaje"
     });
 
-    console.log("BEFORE_MAIN_FLOW");
     logEvent("before_ejecutar_flujo", {
       appVersion: APP_VERSION,
       sourceMessageId: mensaje.id,
@@ -2840,7 +2835,6 @@ app.post("/webhook", async (req, res) => {
       simulated: false
     });
 
-    console.log("AFTER_MAIN_FLOW");
     logEvent("after_ejecutar_flujo", {
       appVersion: APP_VERSION,
       sourceMessageId: mensaje.id,
@@ -2861,7 +2855,6 @@ app.post("/webhook", async (req, res) => {
 
     return res.sendStatus(200);
   } catch (error) {
-    console.error("WEBHOOK_FATAL_ERROR", error);
     logEvent("webhook_process_error", { error: error.response?.data || error.message }, "error");
     return res.sendStatus(500);
   }
@@ -2931,9 +2924,7 @@ app.post("/simulate-message", async (req, res) => {
   }
 });
 
-app.post("/debug-webhook", (req, res) => {
-  console.log("DEBUG POST RECEIVED");
-  console.dir(req.body, { depth: null });
+app.post("/debug-webhook", (_req, res) => {
   return res.sendStatus(200);
 });
 
@@ -2996,7 +2987,6 @@ async function startServer() {
   await bootstrapCatalogoDesdeTreinta();
 
   app.listen(port, () => {
-    console.log("APP_VERSION", process.env.RAILWAY_GIT_COMMIT_SHA);
     logEvent("app_version_started", { commit: APP_VERSION });
     logRuntimeConfigSnapshot("startup");
     logEvent("server_started", { port, databasePath, appVersion: APP_VERSION });

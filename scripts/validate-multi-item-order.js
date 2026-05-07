@@ -14,7 +14,7 @@ function assert(condition, message) {
 
 async function main() {
   const phone = `57325${Date.now().toString().slice(-7)}`;
-  const mensaje = "Hola soy Laura, quiero 3 aloe litro, 2 café litro y 1 ancheta. Dirección Calle 10 #20-30. Pago Nequi.";
+  const mensaje = "Hola soy Laura, quiero 3 aloe litro, 2 café litro y 1 ancheta 1. Dirección Calle 10 #20-30. Pago Nequi.";
 
   const simulate = await api.post("/simulate-message", { telefono: phone, mensaje });
   const orderId = simulate.data.order?.id;
@@ -26,7 +26,7 @@ async function main() {
   const byProduct = Object.fromEntries(simulate.data.order.items.map((item) => [item.producto, item.cantidad]));
   assert(byProduct['Aloe Litro'] === 3, "Cantidad incorrecta para Aloe Litro");
   assert(byProduct['Café litro'] === 2, "Cantidad incorrecta para Café litro");
-  assert(byProduct['Ancheta'] === 1, "Cantidad incorrecta para Ancheta");
+  assert(byProduct['Ancheta 1'] === 1, "Cantidad incorrecta para Ancheta 1");
 
   const apiTotal = (simulate.data.order.items || []).reduce((sum, item) => sum + (Number(item.subtotal) || 0), 0);
   assert(Number(simulate.data.order.total) === apiTotal, `Total API inconsistente: ${simulate.data.order.total} vs ${apiTotal}`);
@@ -38,7 +38,7 @@ async function main() {
   const orders = await api.get(`/orders`);
   const createdOrder = (orders.data.orders || []).find((order) => order.id === orderId);
   assert(createdOrder, "El order nuevo no apareció en /orders");
-  assert(createdOrder.resumenItems === '3 Aloe Litro, 2 Café litro, 1 Ancheta', `Resumen inesperado: ${createdOrder.resumenItems}`);
+  assert(createdOrder.resumenItems === '3 Aloe Litro, 2 Café litro, 1 Ancheta 1', `Resumen inesperado: ${createdOrder.resumenItems}`);
 
   const db = new DatabaseSync(dbPath);
   const itemRows = db.prepare(`

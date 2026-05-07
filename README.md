@@ -1,6 +1,6 @@
-# Agente IA para pedidos de yogur
+# Tellolac AI
 
-Servicio para leer mensajes, extraer pedidos, validarlos contra catálogo real, guardar en SQLite/Google Sheets y responder por WhatsApp Cloud API.
+Servicio para leer mensajes, extraer pedidos, validarlos contra catálogo real, guardar en SQLite/Google Sheets y responder por WhatsApp Cloud API con Abby como asistente.
 
 ## 1. Instalar dependencias
 
@@ -26,7 +26,7 @@ Copia `.env.example` a `.env` y completa:
 **OpenAI (único proveedor LLM)**
 
 - `OPENAI_API_KEY=tu_api_key`
-- `OPENAI_MODEL=gpt-4o-mini`
+- `OPENAI_MODEL=gpt-5.4-mini`
 - `OPENAI_MAX_TOKENS=160`
 - `OPENAI_TEMPERATURE=0.1`
 - `OPENAI_TIMEOUT_MS=30000`
@@ -223,7 +223,7 @@ Para Railway/hosting usa este perfil:
 
 ```env
 OPENAI_API_KEY=tu_api_key
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-5.4-mini
 OPENAI_MAX_TOKENS=160
 OPENAI_TEMPERATURE=0.1
 OPENAI_TIMEOUT_MS=30000
@@ -279,7 +279,7 @@ Opcional si montas archivo fuera del repo:
 **OpenAI**
 
 - `OPENAI_API_KEY`
-- `OPENAI_MODEL=gpt-4o-mini`
+- `OPENAI_MODEL=gpt-5.4-mini`
 - `OPENAI_MAX_TOKENS=160`
 - `OPENAI_TEMPERATURE=0.1`
 - `OPENAI_TIMEOUT_MS=30000`
@@ -310,7 +310,7 @@ npm run smoke:health
 Respuesta esperada:
 
 ```json
-{ "ok": true, "service": "agente-yogur" }
+{ "ok": true, "service": "tellolac-ai" }
 ```
 
 ### 5. Instrucciones para subirlo a Railway
@@ -318,7 +318,7 @@ Respuesta esperada:
 1. Sube este proyecto a GitHub
 2. Entra a Railway
 3. Crea un proyecto nuevo → **Deploy from GitHub repo**
-4. Selecciona el repo `agente-yogur`
+4. Selecciona el repo de Tellolac AI
 5. Railway detectará Node.js automáticamente
 6. En Variables, pega todas las variables necesarias
 7. Deja el comando de arranque en:
@@ -360,3 +360,4 @@ Lo siguiente que yo haría es:
 - manejo de audios y notas de voz
 - logs de errores y reintentos
 - protección básica contra mensajes vacíos o formatos no soportados
+
