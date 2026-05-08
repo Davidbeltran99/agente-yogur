@@ -8,20 +8,27 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <main class="auth-shell">
+  <main class="auth-shell premium-login-shell">
+    <div class="auth-video-layer" aria-hidden="true">
+      <video class="auth-background-video" autoplay muted loop playsinline preload="metadata">
+        <source src="/assets/video/login-background.mp4" type="video/mp4" />
+      </video>
+      <div class="auth-video-overlay"></div>
+    </div>
+
     <section class="auth-card premium-auth-card">
       <div class="auth-brand">
         <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="auth-logo" />
         <div>
-          <p class="eyebrow">Tellolac AI</p>
+          <p class="eyebrow">Tellolac AI · Abi</p>
           <h1>Acceso premium</h1>
-          <p class="subtitle">Ingresa al panel comercial de Abi.</p>
+          <p class="subtitle">Ingresa al panel comercial con una experiencia moderna, segura y enfocada en ventas.</p>
         </div>
       </div>
 
       <div class="auth-copy-box">
         <span class="status-pill status-online">🟢 Abi Online</span>
-        <p>Administra pedidos, historial, cierres del día y conversaciones en una sola vista moderna.</p>
+        <p>Pedidos, historial, cierres del día y conversaciones en una sola bandeja premium.</p>
       </div>
 
       <form id="loginForm">
@@ -37,7 +44,7 @@
         <button type="submit" class="primary">Ingresar al panel</button>
       </form>
 
-      <p class="auth-note">Powered by Abi AI · Solo personal autorizado.</p>
+      <p class="auth-note">Powered by Tellolac AI + Abi · Solo personal autorizado.</p>
     </section>
   </main>
 
