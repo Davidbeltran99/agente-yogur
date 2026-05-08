@@ -443,6 +443,11 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
       confidence: listOrderAnalysis.confidence,
       items: listOrderAnalysis.items.map((item) => `${item.cantidad} ${item.productText}`)
     });
+    logConfidenceLevel({
+      source: "list_order_parser",
+      stage: "intent_detection",
+      confidence: listOrderAnalysis.confidence
+    });
     return hasDraftContext ? "order_missing_data" : "order_request";
   }
 
@@ -1880,6 +1885,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
         confidence: resolution.confidence || 100,
         product: resolution.product?.nombre || null
       });
+      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 100, input: resolutionInput });
       const cantidad = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
       const precioUnitario = parseOptionalNumber(resolution.product.precio);
 
@@ -1900,6 +1906,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
         confidence: resolution.confidence || null,
         options: (resolution.matches || []).map((option) => option?.nombre).filter(Boolean)
       });
+      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 55, input: resolutionInput });
       ambiguities.push({
         input: resolutionInput,
         options: (resolution.matches || (resolution.product ? [resolution.product] : [])).slice(0, 3),
@@ -1941,6 +1948,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
         confidence: 0,
         options: quickMatches.map((entry) => entry.product?.nombre).filter(Boolean)
       });
+      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: 0, input: resolutionInput });
       unmatched.push(resolutionInput);
       if (parsedLineItem) {
         items.push({ producto: parsedLineItem.productText, sabor: null, cantidad: parsedLineItem.cantidad || 1, precio_unitario: null, subtotal: null });
@@ -2044,6 +2052,11 @@ function detectarIntencionPedido(texto) {
       confidence: listOrderAnalysis.confidence,
       items: listOrderAnalysis.items.map((item) => `${item.cantidad} ${item.productText}`)
     });
+    logConfidenceLevel({
+      source: "list_order_parser",
+      stage: "order_resolution",
+      confidence: listOrderAnalysis.confidence
+    });
     return true;
   }
 
@@ -2066,6 +2079,11 @@ function detectarIntencionPedido(texto) {
     hasProductCue,
     hasPurchaseVerb,
     hasQuantity
+  });
+  logConfidenceLevel({
+    source: "default_order_detector",
+    stage: "intent_detection",
+    confidence
   });
 
   return (hasProductCue && (hasPurchaseVerb || hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference || hasSemanticPreferenceCue || hasPureCatalogIntent))
@@ -2402,6 +2420,56 @@ function evaluarPedido(pedido, catalogAnalysis = { ambiguities: [], unmatched: [
 
 function logEvent(event, details = {}, level = "info") {
   structuredLog(event, details, level);
+}
+
+function resolveConfidenceLevel(confidence) {
+  const value = Number(confidence);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  if (value >= 85) {
+    return "high";
+  }
+
+  if (value >= 60) {
+    return "medium";
+  }
+
+  return "low";
+}
+
+function logConfidenceLevel(details = {}) {
+  const numericConfidence = Number(details.confidence);
+  logEvent("CONFIDENCE_LEVEL", {
+    ...details,
+    confidence: Number.isFinite(numericConfidence) ? numericConfidence : null,
+    level: details.level || resolveConfidenceLevel(numericConfidence)
+  });
+}
+
+function logProductMemory(state, reason = null) {
+  logEvent("PRODUCT_MEMORY", {
+    reason,
+    lastProduct: state?.lastProductReference?.nombre || null,
+    family: state?.lastProductReference?.familia || null,
+    hasSuggestionMemory: Boolean(obtenerSuggestionMemoryActiva(state)),
+    lastResolvedItems: Array.isArray(state?.lastResolvedOrder?.productos) ? state.lastResolvedOrder.productos.length : 0
+  });
+}
+
+function logMultiTurnState(state, details = {}) {
+  logEvent("MULTI_TURN_STATE", {
+    ...details,
+    customerName: (details.customerName ?? state?.customerName) || null,
+    lastIntent: (details.lastIntent ?? state?.lastIntent) || null,
+    awaitingName: details.awaitingName ?? state?.awaitingName ?? false,
+    pendingItems: details.pendingItems ?? (Array.isArray(state?.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0),
+    hasSuggestionMemory: details.hasSuggestionMemory ?? Boolean(obtenerSuggestionMemoryActiva(state)),
+    hasActiveOrderContext: details.hasActiveOrderContext ?? Boolean(obtenerActiveOrderContext(state)),
+    lastProduct: (details.lastProduct ?? state?.lastProductReference?.nombre) || null,
+    lastPaymentMethod: state?.lastPaymentMethod || null
+  });
 }
 
 function logRuntimeConfigSnapshot(context = "runtime") {
@@ -3057,6 +3125,15 @@ function actualizarActiveOrderContext(state, { pedido = null, intent = null } = 
     hasAddress: Boolean(state.activeOrderContext.direccion),
     hasPayment: Boolean(state.activeOrderContext.metodo_pago)
   });
+
+  logEvent("ACTIVE_ORDER_CONTEXT", {
+    intent: state.activeOrderContext.intent,
+    products: state.activeOrderContext.products.map((item) => `${item.cantidad} ${item.producto}`),
+    suggestions: state.activeOrderContext.suggestions,
+    hasAddress: Boolean(state.activeOrderContext.direccion),
+    hasPayment: Boolean(state.activeOrderContext.metodo_pago),
+    customerName: state.activeOrderContext.customerName || null
+  });
 }
 
 function obtenerActiveOrderContext(state, now = Date.now()) {
@@ -3195,6 +3272,7 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
   const lastReference = buildProductReference(lastProduct?.producto);
   if (lastReference) {
     state.lastProductReference = lastReference;
+    logProductMemory(state, "last_product_from_order");
   }
 
   if (evaluacion?.catalogStatus === "ambiguous" && evaluacion.ambiguousProducts?.length) {
@@ -3208,6 +3286,7 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     const ambiguityReference = buildProductReference(firstOption?.nombre);
     if (ambiguityReference) {
       state.lastProductReference = ambiguityReference;
+      logProductMemory(state, "ambiguity_resolution_seed");
     }
   }
 
@@ -3241,6 +3320,8 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     hasSuggestionMemory: Boolean(obtenerSuggestionMemoryActiva(state)),
     lastProduct: state.lastProductReference?.nombre || null
   });
+
+  logMultiTurnState(state);
 }
 
 function aplicarContextoProductoAMensaje(texto, state) {
@@ -3290,6 +3371,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
       product: suggestionResolution.option.nombre,
       reason: suggestionResolution.reason
     });
+    logConfidenceLevel({ source: "suggestion_memory", stage: "context_resolution", confidence: suggestionResolution.confidence, input: raw });
 
     return {
       text: `${encontrarCantidadEnSegmento(normalized) || 1} ${suggestionResolution.option.nombre}`,
@@ -3902,6 +3984,16 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   });
 
   logEvent("CONVERSATION_STATE", {
+    telefono,
+    intent: routingIntent,
+    hasDraftContext,
+    hasSuggestionContext,
+    hasActiveOrderContext,
+    contextReason: contextualizedMessage.reason || null,
+    selectedProduct: contextualizedMessage.selectedProduct || null
+  });
+
+  logMultiTurnState(state, {
     telefono,
     intent: routingIntent,
     hasDraftContext,
