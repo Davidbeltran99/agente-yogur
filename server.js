@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { procesarMensaje, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
+const { procesarMensaje, generarRespuestaAbi, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -49,6 +49,7 @@ const {
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
   construirRespuestaNombreRegistrado,
+  construirRespuestaPreciosInformativo,
   construirRespuestaIdentidad,
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,
@@ -261,6 +262,17 @@ function esIntencionNombre(texto) {
   return Boolean(extraerNombreExplícito(texto));
 }
 
+function esNombreDirectoValido(texto) {
+  const raw = String(texto || "").trim();
+  if (!raw) {
+    return false;
+  }
+
+  const normalized = normalizarTextoAnalisis(raw);
+  const tokens = normalized.split(" ").filter(Boolean);
+  return tokens.length <= 2 && esNombreHumanoValido(raw);
+}
+
 function extraerNombreConversacional(texto) {
   const explicit = extraerNombreExplícito(texto);
   if (explicit) {
@@ -287,12 +299,18 @@ function esIntencionInfoCatalogo(texto) {
     return false;
   }
 
-  if (/\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme)\b/i.test(normalized)) {
+  return /^(info|informacion|menu|catalogo|precios|portafolio|productos)$/.test(normalized)
+    || /\b(ver|mostrar|muestrame|quiero ver)\s+(el\s+)?(portafolio|catalogo|menu)\b/.test(normalized)
+    || /\b(que venden|que productos tienen|que manejan|catalogo|menu|precios|informacion|portafolio|productos)\b/.test(normalized);
+}
+
+function esIntencionPrecio(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
     return false;
   }
 
-  return /^(info|informacion|información|menu|menú|catalogo|catálogo|precios|portafolio)$/.test(normalized)
-    || /\b(que venden|que productos tienen|que manejan|catalogo|catálogo|menu|menú|precios|informacion|información|portafolio)\b/.test(normalized);
+  return /\b(precio|precios|cuanto vale|cuanto cuesta|valor|vale)\b/.test(normalized);
 }
 
 function esPreguntaIdentidad(texto) {
@@ -318,40 +336,44 @@ function esConfirmacionCasual(texto) {
   return /^(listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
 }
 
-function detectarIntencionConversacional(texto, { hasDraftContext = false } = {}) {
+function detectarIntencionConversacional(texto, { hasDraftContext = false, customerName = null, awaitingName = false } = {}) {
   if (esPreguntaIdentidad(texto)) {
-    return "identidad";
-  }
-
-  if (esIntencionNombre(texto)) {
-    return "nombre";
+    return "identity";
   }
 
   if (esDespedida(texto)) {
-    return "despedida";
+    return "closing";
   }
 
-  if (detectarIntencionPedido(texto)) {
-    return "pedido";
+  if (esIntencionNombre(texto) || (awaitingName && !customerName && esNombreDirectoValido(texto))) {
+    return "provide_name";
   }
 
   if (esIntencionInfoCatalogo(texto)) {
-    return "info_catalogo";
+    return "catalog_request";
+  }
+
+  if (esIntencionPrecio(texto)) {
+    return "price_request";
   }
 
   if (esMensajeBienvenida(texto)) {
-    return "saludo";
+    return customerName ? "general_chat" : "greeting";
+  }
+
+  if (detectarIntencionPedido(texto)) {
+    return hasDraftContext ? "order_missing_data" : "order_request";
   }
 
   if (esConfirmacionCasual(texto)) {
-    return "confirmacion";
+    return hasDraftContext ? "order_missing_data" : "general_chat";
   }
 
   if (hasDraftContext) {
-    return "faltan_datos";
+    return "order_missing_data";
   }
 
-  return "conversacion_general";
+  return "general_chat";
 }
 
 function normalizarTextoAnalisis(valor) {
@@ -1635,14 +1657,18 @@ function buildCatalogShortList(limit = 5) {
 function buildCatalogFeaturedProducts() {
   const catalog = getCatalogProductsCache();
   const specs = [
-    { key: "aloe", emoji: "🥛", label: "Aloe Litro", matcher: (product) => product.nombre_canonico?.includes("aloe litro") || product.nombre_familia?.includes("aloe") },
-    { key: "cafe", emoji: "☕", label: "Café Litro", matcher: (product) => product.nombre_canonico?.includes("cafe litro") || product.nombre_familia?.includes("cafe") },
-    { key: "ancheta", emoji: "🎁", label: "Anchetas", matcher: (product) => product.nombre_familia?.includes("ancheta"), pricePrefix: "desde" },
-    { key: "bandeja", emoji: "🧀", label: "Bandejas con queso y arequipe", matcher: (product) => product.nombre_familia?.includes("bandeja") }
+    { emoji: "🥛", label: "Aloe Litro", exactName: "aloe litro" },
+    { emoji: "☕", label: "Café Litro", exactName: "cafe litro" },
+    { emoji: "🎁", label: "Anchetas", familyName: "ancheta", pricePrefix: "desde" },
+    { emoji: "🧀", label: "Bandejas con queso y arequipe", exactName: "bandeja con queso y arequipe" }
   ];
 
   return specs.map((spec) => {
-    const matches = catalog.filter((product) => spec.matcher(product));
+    const matches = catalog.filter((product) => {
+      const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
+      const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia || product?.nombre);
+      return spec.exactName ? canonical === spec.exactName : family === spec.familyName;
+    });
     if (!matches.length) {
       return null;
     }
@@ -1659,6 +1685,36 @@ function buildCatalogFeaturedProducts() {
       pricePrefix: spec.pricePrefix || null
     };
   }).filter(Boolean);
+}
+
+function buildPriceRequestProducts(texto, limit = 4) {
+  const catalog = getCatalogProductsCache();
+  const preferences = extractSemanticCatalogPreferences(texto);
+  const familyMatches = catalog.filter((product) => preferences.families.has(product?.nombre_raiz_familia || product?.nombre_familia));
+  const matches = (familyMatches.length ? familyMatches : encontrarCoincidenciasCatalogo(texto, { minScore: 60, limit }).map((entry) => entry.product))
+    .filter(Boolean);
+
+  return buildCatalogAmbiguityOptions(matches).slice(0, limit).map((product) => ({
+    emoji: product.nombreCanonico?.includes("cafe") ? "☕" : (product.nombreCanonico?.includes("ancheta") ? "🎁" : "🥛"),
+    label: product.nombre,
+    price: parseOptionalNumber(product.precio),
+    pricePrefix: null
+  }));
+}
+
+async function generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context }) {
+  try {
+    const respuesta = await generarRespuestaAbi({ intent: routingIntent, ...context, fallback });
+    if (respuesta) {
+      logEvent("RESPONSE_SOURCE", { telefono, sourceMessageId, intent: routingIntent, source: "ai" });
+      return respuesta;
+    }
+  } catch (_error) {
+    // fallback below
+  }
+
+  logEvent("RESPONSE_SOURCE", { telefono, sourceMessageId, intent: routingIntent, source: "template" });
+  return fallback;
 }
 
 function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { items: [] }) {
@@ -2479,6 +2535,7 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
 
   if (pedido?.cliente) {
     state.customerName = pedido.cliente;
+    state.awaitingName = false;
   }
 
   if (pedido?.metodo_pago) {
@@ -2502,6 +2559,11 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
 
   if (intent) {
     state.lastIntent = intent;
+    if (intent === "greeting" && !state.customerName) {
+      state.awaitingName = true;
+    } else if (intent !== "provide_name") {
+      state.awaitingName = false;
+    }
   }
 }
 
@@ -2544,7 +2606,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
 function obtenerEstadoConversacion(phone) {
   const key = limpiarTexto(phone);
   if (!key) {
-    return { customerName: null, pendingPedido: null, pendingClarification: null, lastPaymentMethod: null, lastProductReference: null, lastIntent: null };
+    return { customerName: null, pendingPedido: null, pendingClarification: null, lastPaymentMethod: null, lastProductReference: null, lastIntent: null, awaitingName: false };
   }
 
   if (!conversationMemoryState.has(key)) {
@@ -2554,7 +2616,8 @@ function obtenerEstadoConversacion(phone) {
       pendingClarification: null,
       lastPaymentMethod: null,
       lastProductReference: null,
-      lastIntent: null
+      lastIntent: null,
+      awaitingName: false
     });
   }
 
@@ -2656,7 +2719,7 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
       respuesta,
       delivery,
       sheets: { saved: false, skipped: true, reason: "awaiting_valid_disambiguation_choice" },
-      intent: "aclaracion_producto"
+      intent: "ambiguous_product"
     };
   }
 
@@ -2677,7 +2740,7 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
   const evaluacion = evaluarPedido(pedidoResuelto, { ambiguities: [], unmatched: [] });
   let order = null;
   let sheets = { saved: false, skipped: true, reason: "order_not_persisted" };
-  const intent = evaluacion.esValido ? "pedido" : "faltan_datos";
+  const intent = evaluacion.esValido ? "order_request" : "order_missing_data";
 
   logEvent("product_disambiguation_resolved", {
     telefono,
@@ -2945,9 +3008,15 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const state = obtenerEstadoConversacion(telefono);
   const contextualizedMessage = aplicarContextoProductoAMensaje(mensaje, state);
   const hasDraftContext = tieneBorradorPedido(state);
-  const intent = detectarIntencionConversacional(contextualizedMessage.text || mensaje, { hasDraftContext });
-  const hasOrderIntent = intent === "pedido" || intent === "faltan_datos";
-  const explicitName = intent === "nombre" ? extraerNombreExplícito(mensaje) : null;
+  const routingIntent = detectarIntencionConversacional(contextualizedMessage.text || mensaje, {
+    hasDraftContext,
+    customerName: state.customerName || null,
+    awaitingName: state.awaitingName || false
+  });
+  const hasOrderIntent = routingIntent === "order_request" || routingIntent === "order_missing_data";
+  const explicitName = routingIntent === "provide_name"
+    ? (extraerNombreExplícito(mensaje) || ((state.awaitingName && !state.customerName && esNombreDirectoValido(mensaje)) ? capitalizarNombre(mensaje) : null))
+    : null;
 
   const inboundMessage = persistirMensaje({
     phone: telefono,
@@ -2964,14 +3033,15 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     preview: String(mensaje || "").slice(0, 120)
   });
 
-  logEvent("intencion_detectada", {
+  logEvent("INTENT_DETECTED", {
     telefono,
     sourceMessageId,
-    intent,
+    intent: routingIntent,
     contextApplied: contextualizedMessage.used || false,
     contextReason: contextualizedMessage.reason || null,
     explicitName: explicitName || null,
-    customerNameBefore: state.customerName || null
+    customerNameBefore: state.customerName || null,
+    awaitingName: state.awaitingName || false
   });
 
   const aclaracionResuelta = await intentarResolverAclaracionPendiente({
@@ -2986,63 +3056,100 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     return aclaracionResuelta;
   }
 
-  if (intent === "saludo") {
-    state.lastIntent = intent;
-    const respuesta = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
+  if (routingIntent === "greeting") {
+    state.lastIntent = routingIntent;
+    state.awaitingName = !state.customerName;
+    const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent,
+      fallback,
+      context: { customerName: state.customerName || null, userMessage: mensaje }
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
-  if (intent === "identidad") {
-    state.lastIntent = intent;
-    const respuesta = construirRespuestaIdentidad();
+  if (routingIntent === "identity") {
+    state.lastIntent = routingIntent;
+    const fallback = construirRespuestaIdentidad();
+    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { userMessage: mensaje } });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
-  if (intent === "despedida") {
+  if (routingIntent === "closing") {
     state.pendingPedido = null;
-    state.lastIntent = intent;
+    state.lastIntent = routingIntent;
+    state.awaitingName = false;
     limpiarAclaracionPendiente(state);
-    const respuesta = construirRespuestaDespedida();
+    const fallback = construirRespuestaDespedida();
+    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
-  if (intent === "nombre" && explicitName) {
+  if (routingIntent === "provide_name" && explicitName) {
     state.customerName = explicitName;
-    state.lastIntent = intent;
-    const respuesta = construirRespuestaNombreRegistrado({
-      customerName: explicitName,
-      featuredProducts: buildCatalogFeaturedProducts()
+    state.awaitingName = false;
+    state.lastIntent = routingIntent;
+    const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts() });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent,
+      fallback,
+      context: { customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts(), catalogUrl: CATALOG_URL, userMessage: mensaje }
     });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
-  if (intent === "info_catalogo") {
-    state.lastIntent = intent;
-    const respuesta = construirRespuestaCatalogoInformativo({
+  if (routingIntent === "catalog_request") {
+    state.lastIntent = routingIntent;
+    state.awaitingName = false;
+    const featuredProducts = buildCatalogFeaturedProducts();
+    const fallback = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent,
+      fallback,
+      context: { customerName: state.customerName || null, featuredProducts, catalogUrl: CATALOG_URL, userMessage: mensaje }
+    });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+  }
+
+  if (routingIntent === "price_request") {
+    state.lastIntent = routingIntent;
+    state.awaitingName = false;
+    const featuredProducts = buildPriceRequestProducts(contextualizedMessage.text || mensaje);
+    const queryLabel = limpiarTextoProductoSolicitado(contextualizedMessage.text || mensaje) || "ese producto";
+    const fallback = construirRespuestaPreciosInformativo({
       customerName: state.customerName || null,
-      featuredProducts: buildCatalogFeaturedProducts()
+      featuredProducts: featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts(),
+      queryLabel
+    });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent,
+      fallback,
+      context: { customerName: state.customerName || null, featuredProducts, queryLabel, catalogUrl: CATALOG_URL, userMessage: mensaje }
     });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
-  if (intent === "confirmacion") {
-    state.lastIntent = intent;
-    const respuesta = construirRespuestaConfirmacion({ hasDraftContext });
+  if (routingIntent === "general_chat") {
+    state.lastIntent = routingIntent;
+    state.awaitingName = false;
+    const fallback = construirRespuestaCasual();
+    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
-  }
-
-  if (intent === "conversacion_general") {
-    state.lastIntent = intent;
-    const respuesta = construirRespuestaCasual();
-    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
   const resultadoActual = await procesarPedidoDesdeTexto(contextualizedMessage.text || mensaje, {
@@ -3070,7 +3177,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     evaluacion: evaluacionCombinada,
     order: null,
     sheets: { saved: false, skipped: true, reason: "order_not_persisted" },
-    intent: evaluacionCombinada.catalogStatus === "ambiguous" ? "aclaracion_producto" : (evaluacionCombinada.esValido ? "pedido" : "faltan_datos")
+    intent: evaluacionCombinada.catalogStatus === "ambiguous" ? "ambiguous_product" : (evaluacionCombinada.esValido ? "order_request" : "order_missing_data")
   };
 
   actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: resultado.intent });
@@ -3087,7 +3194,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       resultado.sheets = persisted.sheets;
       state.pendingPedido = null;
       limpiarAclaracionPendiente(state);
-      actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: "pedido" });
+      actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: "order_request" });
     } catch (error) {
       throw error;
     }
@@ -3129,8 +3236,22 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     inboundMessage.orderId = resultado.order.id;
   }
 
-  const respuesta = construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
+  const fallbackRespuesta = construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
     availableProducts: buildCatalogShortList(5)
+  });
+  const respuesta = await generarRespuestaConversacional({
+    telefono,
+    sourceMessageId,
+    routingIntent: resultado.intent,
+    fallback: fallbackRespuesta,
+    context: {
+      customerName: state.customerName || resultado.pedido?.cliente || null,
+      userMessage: mensaje,
+      pedido: resultado.pedido,
+      evaluacion: resultado.evaluacion,
+      availableProducts: buildCatalogShortList(5),
+      catalogUrl: CATALOG_URL
+    }
   });
   const delivery = await responderAlCliente({
     telefono,

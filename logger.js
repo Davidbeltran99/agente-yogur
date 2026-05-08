@@ -10,13 +10,16 @@ const ALLOWED_EVENTS = new Set([
   "model_used",
   "runtime_config_snapshot",
   "runtime_config_warning",
-  "MODEL_ERROR"
+  "MODEL_ERROR",
+  "INTENT_DETECTED",
+  "RESPONSE_SOURCE"
 ]);
 
 const EVENT_ALIASES = {
   post_webhook_route_entered: "webhook_received",
   db_save_completed: "order_saved",
-  pedido_no_guardado: "order_rejected"
+  pedido_no_guardado: "order_rejected",
+  intencion_detectada: "INTENT_DETECTED"
 };
 
 function getLogger(level = "info") {

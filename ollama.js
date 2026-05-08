@@ -42,7 +42,7 @@ function construirMensajes(mensaje) {
   ];
 }
 
-async function llamarOpenAI({ mensaje }) {
+async function llamarOpenAIBase({ messages, temperature = OPENAI_TEMPERATURE, maxTokens = OPENAI_MAX_TOKENS, responseFormat = { type: "json_object" } }) {
   logEvent("PROVIDER_ACTIVE", {
     provider: OPENAI_PROVIDER,
     baseUrl: OPENAI_BASE_URL
@@ -59,15 +59,20 @@ async function llamarOpenAI({ mensaje }) {
     throw new Error("Falta OPENAI_API_KEY válida en .env");
   }
 
+  const payload = {
+    model: OPENAI_MODEL,
+    temperature,
+    max_completion_tokens: maxTokens,
+    messages
+  };
+
+  if (responseFormat) {
+    payload.response_format = responseFormat;
+  }
+
   const response = await axios.post(
     `${OPENAI_BASE_URL}/chat/completions`,
-    {
-      model: OPENAI_MODEL,
-      temperature: OPENAI_TEMPERATURE,
-      max_completion_tokens: OPENAI_MAX_TOKENS,
-      response_format: { type: "json_object" },
-      messages: construirMensajes(mensaje)
-    },
+    payload,
     {
       timeout: OPENAI_TIMEOUT_MS,
       headers: {
@@ -78,6 +83,36 @@ async function llamarOpenAI({ mensaje }) {
   );
 
   return response.data.choices?.[0]?.message?.content || "{}";
+}
+
+async function llamarOpenAI({ mensaje }) {
+  return llamarOpenAIBase({ messages: construirMensajes(mensaje) });
+}
+
+async function generarRespuestaAbi(contexto = {}) {
+  const systemPrompt = [
+    "Eres Abi, asesora comercial de Tellolac.",
+    "Responde en español natural, cálido y breve.",
+    "Usa solo los datos entregados en el contexto.",
+    "No inventes productos, precios, links ni estados.",
+    "Evita sonar robótica y evita frases como 'lo que capté' o 'cuéntame qué necesitas'.",
+    "Si falta un dato del pedido, pide solo ese dato de forma puntual.",
+    "Si hay catálogo o precios, preséntalos de forma comercial y clara.",
+    "Devuelve solo texto plano para enviar al cliente."
+  ].join(" ");
+
+  const userPrompt = `Contexto seguro:\n${JSON.stringify(contexto, null, 2)}\n\nRedacta la respuesta final para el cliente.`;
+  const content = await llamarOpenAIBase({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0.45,
+    maxTokens: 220,
+    responseFormat: null
+  });
+
+  return String(content || "").trim();
 }
 
 async function procesarMensaje(mensaje) {
@@ -92,6 +127,7 @@ async function procesarMensaje(mensaje) {
 
 module.exports = {
   procesarMensaje,
+  generarRespuestaAbi,
   OPENAI_PROVIDER,
   OPENAI_MODEL,
   OPENAI_BASE_URL
