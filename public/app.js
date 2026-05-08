@@ -9,6 +9,10 @@ const ordersAutoRefreshMeta = document.getElementById("ordersAutoRefreshMeta");
 
 const conversationMeta = document.getElementById("conversationMeta");
 const conversationList = document.getElementById("conversationList");
+const conversationSearchInput = document.getElementById("conversationSearchInput");
+const chatWorkspace = document.getElementById("chatWorkspace");
+const chatBackButton = document.getElementById("chatBackButton");
+const chatContactAvatar = document.getElementById("chatContactAvatar");
 const chatTitle = document.getElementById("chatTitle");
 const chatSubtitle = document.getElementById("chatSubtitle");
 const chatOrderSummary = document.getElementById("chatOrderSummary");
@@ -70,6 +74,9 @@ let lastOrdersSyncAt = null;
 let ordersAutoRefreshHandle = null;
 let ordersRefreshMetaHandle = null;
 let ordersPollingInFlight = false;
+let conversationSearchQuery = "";
+let conversationSearchDebounce = null;
+let visibleMessagesLimit = 60;
 
 function formatDate(value) {
   if (!value) return "-";
@@ -114,6 +121,24 @@ function buildAvatarLabel(order) {
   const source = String(order?.cliente || order?.telefono || "CL").trim();
   const parts = source.split(/\s+/).filter(Boolean);
   return parts.slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("").slice(0, 2) || "CL";
+}
+
+function buildConversationLabel(conversation) {
+  const relatedOrder = getOrderById(conversation?.lastOrderId);
+  return relatedOrder?.cliente || conversation?.phone || "CL";
+}
+
+function getUnreadCount(conversation) {
+  return conversation?.lastMessageDirection === "in" ? 1 : 0;
+}
+
+function syncChatWorkspaceState() {
+  if (!chatWorkspace) {
+    return;
+  }
+
+  const mobileChatOpen = MOBILE_LAYOUT.matches && Boolean(selectedPhone) && activeSection === "dashboard";
+  chatWorkspace.classList.toggle("chat-mobile-active", mobileChatOpen);
 }
 
 function redirectToLogin() {
@@ -233,6 +258,8 @@ function showSection(sectionName) {
     view.classList.toggle("is-hidden", !isVisible);
     view.toggleAttribute("hidden", !isVisible);
   });
+
+  syncChatWorkspaceState();
 }
 
 function initSectionState() {
@@ -396,8 +423,13 @@ function setLoadingState() {
     </tr>
   `).join("");
 
-  conversationList.innerHTML = Array.from({ length: 4 }).map(() => `
-    <div class="conversation-item"><div class="skeleton" style="height: 66px;"></div></div>
+  conversationList.innerHTML = Array.from({ length: 5 }).map(() => `
+    <div class="conversation-item conversation-skeleton"><div class="skeleton" style="height: 82px;"></div></div>
+  `).join("");
+
+  chatMessages.className = "chat-messages";
+  chatMessages.innerHTML = Array.from({ length: 4 }).map((_, index) => `
+    <div class="message-row ${index % 2 === 0 ? "in" : "out"}"><div class="skeleton" style="height: 76px; width: ${index % 2 === 0 ? "68%" : "56%"}; border-radius: 22px;"></div></div>
   `).join("");
 
   historyList.innerHTML = Array.from({ length: 3 }).map(() => `
@@ -657,25 +689,36 @@ function renderDetail() {
 
 function renderConversationList() {
   if (!conversations.length) {
-    conversationList.innerHTML = '<div class="conversation-empty">No hay conversaciones todavía.</div>';
+    conversationList.innerHTML = '<div class="conversation-empty modern-empty-state"><p class="modal-empty-title">No hay conversaciones</p><p class="helper-text">Cuando entren mensajes, aparecerán aquí.</p></div>';
     return;
   }
 
   conversationList.innerHTML = conversations.map((conversation) => {
     const activeClass = conversation.phone === selectedPhone ? "active" : "";
-    const relatedOrder = getOrderById(conversation.lastOrderId);
-    const customerName = relatedOrder?.cliente || conversation.phone;
+    const customerName = buildConversationLabel(conversation);
+    const avatar = buildAvatarLabel({ cliente: customerName, telefono: conversation.phone });
+    const unreadCount = getUnreadCount(conversation);
+    const whatsappState = healthState?.whatsappEnabled ? "Conectado" : "Simulado";
 
     return `
       <article class="conversation-item ${activeClass}" data-phone="${escapeHtml(conversation.phone)}">
-        <div class="conversation-topline">
-          <div class="conversation-phone">${escapeHtml(customerName)}</div>
-          <span class="helper-text">${escapeHtml(formatTime(conversation.lastMessageAt))}</span>
+        <div class="conversation-avatar-wrap">
+          <span class="conversation-avatar">${escapeHtml(avatar)}</span>
+          <span class="presence-dot ${healthState?.whatsappEnabled ? "is-online" : "is-idle"}"></span>
         </div>
-        <div class="helper-text">${escapeHtml(conversation.phone)}</div>
-        <div class="conversation-snippet">${escapeHtml(conversation.lastMessage || "Sin mensajes")}</div>
-        <div class="conversation-meta">
-          <span class="badge light">Último pedido: ${escapeHtml(conversation.lastOrderId || "ninguno")}</span>
+        <div class="conversation-main">
+          <div class="conversation-topline">
+            <div class="conversation-phone">${escapeHtml(customerName)}</div>
+            <span class="helper-text">${escapeHtml(formatTime(conversation.lastMessageAt))}</span>
+          </div>
+          <div class="conversation-meta-row">
+            <span class="helper-text conversation-phone-sub">${escapeHtml(conversation.phone)}</span>
+            <span class="helper-text">${escapeHtml(whatsappState)}</span>
+          </div>
+          <div class="conversation-bottomline">
+            <div class="conversation-snippet">${escapeHtml(conversation.lastMessage || "Sin mensajes")}</div>
+            ${unreadCount ? `<span class="unread-badge">${unreadCount}</span>` : ""}
+          </div>
         </div>
       </article>
     `;
@@ -686,53 +729,71 @@ function renderChatHeader() {
   const conversation = getConversationByPhone(selectedPhone);
 
   if (!conversation) {
+    chatContactAvatar.textContent = "AB";
     chatTitle.textContent = "Selecciona una conversación";
-    chatSubtitle.textContent = "Aquí verás el historial del cliente.";
+    chatSubtitle.textContent = "Abre un chat para ver el historial completo.";
     chatOrderSummary.innerHTML = "";
     chatMessageInput.disabled = true;
     sendMessageButton.disabled = true;
+    syncChatWorkspaceState();
     return;
   }
 
-  const relatedOrder = getOrderById(conversation.lastOrderId);
-  chatTitle.textContent = relatedOrder?.cliente || conversation.phone;
-  chatSubtitle.textContent = `${conversation.phone} · Último mensaje ${formatDate(conversation.lastMessageAt)}`;
+  const customerName = buildConversationLabel(conversation);
+  chatContactAvatar.textContent = buildAvatarLabel({ cliente: customerName, telefono: conversation.phone });
+  chatTitle.textContent = customerName;
+  chatSubtitle.textContent = `${conversation.phone} · ${conversation.lastMessageDirection === "in" ? "Cliente activo" : "Abi respondió"}`;
   chatOrderSummary.innerHTML = `
-    <span class="badge light">lastMessageOrderId: ${escapeHtml(conversation.lastMessageOrderId || "null")}</span>
-    <span class="badge light">lastOrderId: ${escapeHtml(conversation.lastOrderId || "null")}</span>
+    <span class="badge light">Pedido: ${escapeHtml(conversation.lastOrderId || "ninguno")}</span>
+    <span class="badge light">${healthState?.whatsappEnabled ? "WhatsApp online" : "Envío simulado"}</span>
   `;
   chatMessageInput.disabled = false;
   sendMessageButton.disabled = false;
+  syncChatWorkspaceState();
 }
 
 function renderMessages() {
   if (!selectedPhone) {
     chatMessages.className = "chat-messages empty-chat";
-    chatMessages.innerHTML = "<p>No hay conversación seleccionada.</p>";
+    chatMessages.innerHTML = '<div class="modern-empty-state"><p class="modal-empty-title">Chat de Abi</p><p class="helper-text">Selecciona una conversación de la izquierda para comenzar.</p></div>';
+    syncChatWorkspaceState();
     return;
   }
 
   if (!activeMessages.length) {
     chatMessages.className = "chat-messages empty-chat";
-    chatMessages.innerHTML = "<p>Esta conversación aún no tiene mensajes.</p>";
+    chatMessages.innerHTML = '<div class="modern-empty-state"><p class="modal-empty-title">Sin mensajes</p><p class="helper-text">Esta conversación todavía no tiene historial.</p></div>';
+    syncChatWorkspaceState();
     return;
   }
 
+  const hasMore = activeMessages.length > visibleMessagesLimit;
+  const visibleMessages = hasMore ? activeMessages.slice(-visibleMessagesLimit) : activeMessages;
+
   chatMessages.className = "chat-messages";
-  chatMessages.innerHTML = activeMessages.map((message) => `
-    <div class="message-row ${escapeHtml(message.direction)}">
-      <article class="message-bubble">
-        <div>${escapeHtml(message.messageText || "")}</div>
-        <div class="message-meta">
-          <span>${escapeHtml(message.direction === "in" ? "Entrante" : "Saliente")}</span>
-          <span>${escapeHtml(formatDate(message.createdAt))}</span>
-          <span>orderId: ${escapeHtml(message.orderId || "null")}</span>
-        </div>
-      </article>
-    </div>
-  `).join("");
+  chatMessages.innerHTML = `
+    ${hasMore ? `<button type="button" class="secondary ghost load-older-button" id="loadOlderMessagesButton">Cargar mensajes anteriores</button>` : ""}
+    ${visibleMessages.map((message) => `
+      <div class="message-row ${escapeHtml(message.direction)}">
+        <article class="message-bubble">
+          <div class="message-text">${escapeHtml(message.messageText || "")}</div>
+          <div class="message-meta compact-message-meta">
+            <span>${escapeHtml(formatTime(message.createdAt))}</span>
+            <span>${escapeHtml(message.direction === "in" ? "Cliente" : "Abi")}</span>
+          </div>
+        </article>
+      </div>
+    `).join("")}
+  `;
+
+  const loadOlderButton = document.getElementById("loadOlderMessagesButton");
+  loadOlderButton?.addEventListener("click", () => {
+    visibleMessagesLimit += 40;
+    renderMessages();
+  }, { once: true });
 
   chatMessages.scrollTop = chatMessages.scrollHeight;
+  syncChatWorkspaceState();
 }
 
 function renderHistory() {
@@ -976,9 +1037,11 @@ async function loadOrders(options = {}) {
 
 async function loadConversations() {
   conversationMeta.textContent = "Cargando conversaciones...";
+  const query = conversationSearchQuery.trim();
+  const requestQuery = query ? `?q=${encodeURIComponent(query)}` : "";
 
   try {
-    const response = await fetch("/conversations");
+    const response = await fetch(`/conversations${requestQuery}`, { cache: "no-store" });
     const payload = await response.json();
 
     if (response.status === 401) {
@@ -991,10 +1054,10 @@ async function loadConversations() {
     }
 
     conversations = payload.conversations || [];
-    conversationMeta.textContent = `${payload.total || conversations.length} conversación(es) activas`;
+    conversationMeta.textContent = `${payload.total || conversations.length} conversación(es) ${query ? "filtradas" : "activas"}`;
 
     if (!conversations.some((conversation) => conversation.phone === selectedPhone)) {
-      selectedPhone = conversations[0]?.phone || null;
+      selectedPhone = MOBILE_LAYOUT.matches ? null : (conversations[0]?.phone || null);
     }
 
     renderConversationList();
@@ -1011,7 +1074,7 @@ async function loadConversations() {
     selectedPhone = null;
     activeMessages = [];
     conversationMeta.textContent = "No se pudieron cargar conversaciones";
-    conversationList.innerHTML = `<div class="conversation-empty">${escapeHtml(error.message)}</div>`;
+    conversationList.innerHTML = `<div class="conversation-empty modern-empty-state"><p class="modal-empty-title">No fue posible cargar la bandeja</p><p class="helper-text">${escapeHtml(error.message)}</p></div>`;
     renderChatHeader();
     renderMessages();
     showChatFeedback(error.message, "error");
@@ -1019,8 +1082,14 @@ async function loadConversations() {
 }
 
 async function loadMessages(phone) {
+  visibleMessagesLimit = 60;
+  chatMessages.className = "chat-messages";
+  chatMessages.innerHTML = Array.from({ length: 3 }).map((_, index) => `
+    <div class="message-row ${index % 2 === 0 ? "in" : "out"}"><div class="skeleton" style="height: 76px; width: ${index % 2 === 0 ? "68%" : "54%"}; border-radius: 22px;"></div></div>
+  `).join("");
+
   try {
-    const response = await fetch(`/conversations/${encodeURIComponent(phone)}/messages`);
+    const response = await fetch(`/conversations/${encodeURIComponent(phone)}/messages`, { cache: "no-store" });
     const payload = await response.json();
 
     if (response.status === 401) {
@@ -1070,11 +1139,13 @@ async function loadHistory() {
 
 async function loadHealth() {
   try {
-    const response = await fetch("/health");
+    const response = await fetch("/health", { cache: "no-store" });
     const payload = await response.json();
     if (response.ok && payload.ok) {
       healthState = payload;
       renderSettings();
+      renderConversationList();
+      renderChatHeader();
     }
   } catch (_error) {
     // noop
@@ -1149,7 +1220,7 @@ async function sendChatMessage(event) {
 
     chatMessageInput.value = "";
     showChatFeedback(payload.delivery?.simulated ? "Mensaje guardado y envío simulado correctamente." : "Mensaje enviado correctamente.", "success");
-    showToast("Mensaje enviado desde Abi CRM.", "success");
+    showToast("Mensaje enviado desde Chat de Abi.", "success");
     await loadConversations();
   } catch (error) {
     showChatFeedback(error.message, "error");
@@ -1226,6 +1297,7 @@ document.addEventListener("click", (event) => {
     hideChatFeedback();
     loadMessages(selectedPhone);
     renderConversationList();
+    syncChatWorkspaceState();
     return;
   }
 
@@ -1263,11 +1335,29 @@ sidebarBackdrop?.addEventListener("click", closeMobileSidebar);
 MOBILE_LAYOUT.addEventListener("change", () => {
   mobileSidebarOpen = false;
   syncSidebarState();
+  syncChatWorkspaceState();
 });
 
 statusFilter.addEventListener("change", () => {
   hideFeedback();
   loadOrders();
+});
+
+conversationSearchInput?.addEventListener("input", (event) => {
+  window.clearTimeout(conversationSearchDebounce);
+  conversationSearchQuery = event.target.value || "";
+  conversationSearchDebounce = window.setTimeout(() => {
+    loadConversations();
+  }, 220);
+});
+
+chatBackButton?.addEventListener("click", () => {
+  selectedPhone = null;
+  activeMessages = [];
+  renderConversationList();
+  renderChatHeader();
+  renderMessages();
+  syncChatWorkspaceState();
 });
 
 closeDayButton?.addEventListener("click", openFinalizeModal);
@@ -1289,6 +1379,15 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (MOBILE_LAYOUT.matches && selectedPhone) {
+    selectedPhone = null;
+    activeMessages = [];
+    renderConversationList();
+    renderChatHeader();
+    renderMessages();
+    return;
+  }
+
   closeMobileSidebar();
 });
 
@@ -1303,6 +1402,11 @@ logoutButton?.addEventListener("click", async () => {
 
 window.addEventListener("beforeunload", stopOrdersAutoRefresh);
 document.addEventListener("visibilitychange", handleOrdersAutoRefreshVisibility);
+
+chatMessageInput?.addEventListener("input", () => {
+  chatMessageInput.style.height = "auto";
+  chatMessageInput.style.height = `${Math.min(chatMessageInput.scrollHeight, 140)}px`;
+});
 
 chatComposer.addEventListener("submit", sendChatMessage);
 
