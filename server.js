@@ -54,9 +54,16 @@ const {
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,
   construirRespuestaCasual,
+  construirRespuestaCorreccion,
+  construirRespuestaAyudaHumana,
   construirLineaCatalogoSugerido,
   CATALOG_URL
 } = require("./whatsapp");
+const {
+  createDefaultConversationState,
+  getConversationState,
+  appendRecentHistory
+} = require("./conversationStateManager");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -347,11 +354,74 @@ function esConfirmacionCasual(texto) {
   return /^(listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
 }
 
-function detectarIntencionConversacional(texto, { hasDraftContext = false, hasActiveContext = false, customerName = null, awaitingName = false } = {}) {
+function esIntencionAyudaHumana(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /\b(hablar con asesor|asesor humano|atencion humana|atencion por favor|persona real|humano)\b/.test(normalized);
+}
+
+function esIntencionCorreccion(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /\b(no entendiste|eso no era|te equivocaste|no ese|no era ese|el otro|me equivoque|me equivoqué|corrige|corregir)\b/.test(normalized);
+}
+
+function esIntencionReorden(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /\b(lo mismo de ayer|lo mismo de la otra vez|lo de siempre|el pedido anterior|lo mismo)\b/.test(normalized);
+}
+
+function esIntencionRemoverItem(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /\b(quita|quitame|quítame|elimina|borra|ya no quiero)\b/.test(normalized);
+}
+
+function esIntencionModificarCantidad(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return /\b(mejor|solo|deja|dejalo|déjalo|pon|ponme|agrega|agregale|suma|sumale|cambia a)\b/.test(normalized)
+    || new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)
+    || /\b(una mas|uno mas|dos mas|3 mas|4 mas|5 mas|mas)\b/.test(normalized);
+}
+
+function esIntencionMetodoPago(texto) {
+  return Boolean(extraerMetodoPagoDesdeTexto(texto));
+}
+
+function esIntencionDireccion(texto) {
+  return Boolean(extraerDireccionDesdeTexto(texto));
+}
+
+function esReferenciaAmbigua(texto, state) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  const hasReferenceCue = /\b(el primero|la primera|el segundo|el grande|el pequeno|el pequeño|el barato|ese|esa|el otro)\b/.test(normalized);
+  if (!hasReferenceCue) {
+    return false;
+  }
+
+  const suggestionMemory = obtenerSuggestionMemoryActiva(state);
+  const activeContext = obtenerActiveOrderContext(state);
+  return Boolean((suggestionMemory?.options || []).length || (activeContext?.products || []).length || state?.lastProductReference?.nombre);
+}
+
+function detectarIntencionConversacional(texto, { hasDraftContext = false, hasActiveContext = false, customerName = null, awaitingName = false, state = null } = {}) {
   const listOrderAnalysis = analizarPedidoFormatoLista(texto);
 
   if (esPreguntaIdentidad(texto)) {
     return "identity";
+  }
+
+  if (esIntencionAyudaHumana(texto)) {
+    return "human_help";
+  }
+
+  if (esIntencionCorreccion(texto)) {
+    return "complaint_confusion";
   }
 
   if (esDespedida(texto)) {
@@ -374,6 +444,30 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
       items: listOrderAnalysis.items.map((item) => `${item.cantidad} ${item.productText}`)
     });
     return hasDraftContext ? "order_missing_data" : "order_request";
+  }
+
+  if (esIntencionReorden(texto)) {
+    return "reorder_memory";
+  }
+
+  if (esIntencionRemoverItem(texto) && (hasDraftContext || hasActiveContext)) {
+    return "remove_item";
+  }
+
+  if (esIntencionModificarCantidad(texto) && (hasDraftContext || hasActiveContext)) {
+    return "modify_quantity";
+  }
+
+  if (esReferenciaAmbigua(texto, state) && hasActiveContext) {
+    return "ambiguous_reference";
+  }
+
+  if (esIntencionMetodoPago(texto) && (hasDraftContext || hasActiveContext)) {
+    return "payment_method";
+  }
+
+  if (esIntencionDireccion(texto) && (hasDraftContext || hasActiveContext)) {
+    return "address_provided";
   }
 
   if (esIntencionInfoCatalogo(texto)) {
@@ -3079,6 +3173,14 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     return;
   }
 
+  appendRecentHistory(state, {
+    role: "assistant_state",
+    intent,
+    text: Array.isArray(pedido?.productos) && pedido.productos.length
+      ? pedido.productos.map((item) => `${item.cantidad || 1} ${item.producto || "producto"}`).join(", ")
+      : intent || "state_update"
+  });
+
   if (pedido?.cliente) {
     state.customerName = pedido.cliente;
     state.awaitingName = false;
@@ -3107,6 +3209,17 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     if (ambiguityReference) {
       state.lastProductReference = ambiguityReference;
     }
+  }
+
+  if (evaluacion?.esValido && Array.isArray(pedido?.productos) && pedido.productos.length) {
+    state.lastResolvedOrder = {
+      cliente: pedido.cliente || state.customerName || null,
+      productos: pedido.productos,
+      direccion: pedido.direccion || null,
+      metodo_pago: pedido.metodo_pago || null,
+      total: pedido.total || null,
+      updated_at: Date.now()
+    };
   }
 
   if (intent) {
@@ -3143,6 +3256,20 @@ function aplicarContextoProductoAMensaje(texto, state) {
 
   const activeContext = obtenerActiveOrderContext(state);
   const lastActiveProduct = activeContext?.products?.[activeContext.products.length - 1]?.producto || state?.lastProductReference?.nombre || null;
+  if (esIntencionReorden(raw)) {
+    return { text: raw, used: false };
+  }
+
+  if (new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized) && lastActiveProduct) {
+    return {
+      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${lastActiveProduct}`,
+      used: true,
+      reason: "quantity_for_active_product",
+      selectedProduct: lastActiveProduct,
+      appendProducts: false
+    };
+  }
+
   if (esIntencionAgregarMas(raw) && lastActiveProduct) {
     return {
       text: `${encontrarCantidadEnSegmento(normalized) || 1} ${lastActiveProduct}`,
@@ -3212,24 +3339,10 @@ function aplicarContextoProductoAMensaje(texto, state) {
 function obtenerEstadoConversacion(phone) {
   const key = limpiarTexto(phone);
   if (!key) {
-    return { customerName: null, pendingPedido: null, pendingClarification: null, lastPaymentMethod: null, lastProductReference: null, lastIntent: null, awaitingName: false, lastSuggestedProducts: null, activeOrderContext: null };
+    return createDefaultConversationState();
   }
 
-  if (!conversationMemoryState.has(key)) {
-    conversationMemoryState.set(key, {
-      customerName: inferirNombreDesdeConversacion(key),
-      pendingPedido: null,
-      pendingClarification: null,
-      lastPaymentMethod: null,
-      lastProductReference: null,
-      lastIntent: null,
-      awaitingName: false,
-      lastSuggestedProducts: null,
-      activeOrderContext: null
-    });
-  }
-
-  return conversationMemoryState.get(key);
+  return getConversationState(conversationMemoryState, key, { customerName: inferirNombreDesdeConversacion(key) });
 }
 
 function limpiarAclaracionPendiente(state) {
@@ -3299,6 +3412,127 @@ function extraerIndiceOpcionAclaracion(texto, totalOpciones = 0) {
   }
 
   return null;
+}
+
+function construirPedidoDesdeEstado(state) {
+  if (state?.pendingPedido) {
+    return normalizarPedido(state.pendingPedido);
+  }
+
+  const activeContext = obtenerActiveOrderContext(state);
+  if (!activeContext?.products?.length) {
+    return normalizarPedido({ cliente: state?.customerName || null });
+  }
+
+  return calcularTotalesPedido({
+    cliente: state?.customerName || activeContext.customerName || null,
+    productos: activeContext.products.map((item) => ({
+      producto: item.producto,
+      cantidad: item.cantidad || 1
+    })),
+    direccion: activeContext.direccion || null,
+    metodo_pago: activeContext.metodo_pago || null,
+    estado: "pendiente"
+  });
+}
+
+function buscarUltimoPedidoCliente(telefono) {
+  return listOrdersIncludingArchived()
+    .filter((order) => limpiarTexto(order?.telefono) === limpiarTexto(telefono))
+    .sort((a, b) => new Date(b?.fechaRegistro || 0).getTime() - new Date(a?.fechaRegistro || 0).getTime())[0] || null;
+}
+
+function construirPedidoDesdeOrder(order) {
+  if (!order) {
+    return null;
+  }
+
+  return calcularTotalesPedido({
+    cliente: order.cliente || null,
+    productos: (order.items || []).map((item) => ({
+      producto: item.producto,
+      sabor: item.sabor || null,
+      cantidad: item.cantidad || 1,
+      precio_unitario: item.precioUnitario,
+      subtotal: item.subtotal
+    })),
+    direccion: order.direccion || null,
+    metodo_pago: order.metodoPago || null,
+    estado: "pendiente"
+  });
+}
+
+function encontrarIndiceProductoEnPedido(pedido, texto, state) {
+  const productos = Array.isArray(pedido?.productos) ? pedido.productos : [];
+  if (!productos.length) {
+    return -1;
+  }
+
+  const normalized = normalizarTextoAnalisis(texto);
+  const explicitMatches = productos
+    .map((item, index) => ({ item, index, score: puntuarCoincidenciaCatalogo(normalizeCatalogText(texto), normalizeCatalogText(item?.producto)) }))
+    .sort((a, b) => b.score - a.score);
+
+  if (explicitMatches[0]?.score >= 72) {
+    return explicitMatches[0].index;
+  }
+
+  if (/\b(ese|esa|el otro|el grande|el pequeno|el pequeño|el barato|primero|segunda?|tercero)\b/.test(normalized)) {
+    const options = productos.map((item, index) => ({
+      id: String(index + 1),
+      nombre: item.producto,
+      precio: item.precio_unitario,
+      variant: /\b(garrafa|grande|kilo|1800 ml|1000 g)\b/i.test(item.producto) ? "large" : (/\b(litro|500 g|250 g|pequeno|pequeño)\b/i.test(item.producto) ? "small" : null)
+    }));
+    const resolution = resolverReferenciaProductoEnOpciones(texto, options);
+    if (resolution?.index !== null && resolution?.index !== undefined) {
+      return resolution.index;
+    }
+  }
+
+  const lastProduct = state?.lastProductReference?.nombre;
+  if (lastProduct) {
+    const idx = productos.findIndex((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(lastProduct));
+    if (idx >= 0) {
+      return idx;
+    }
+  }
+
+  return productos.length === 1 ? 0 : productos.length - 1;
+}
+
+function quitarProductoDePedido(pedido, texto, state) {
+  const productos = Array.isArray(pedido?.productos) ? [...pedido.productos] : [];
+  const index = encontrarIndiceProductoEnPedido(pedido, texto, state);
+  if (index < 0 || !productos[index]) {
+    return { pedido, removed: null };
+  }
+
+  const [removed] = productos.splice(index, 1);
+  return {
+    pedido: calcularTotalesPedido({ ...pedido, productos }),
+    removed
+  };
+}
+
+function actualizarCantidadPedido(pedido, texto, state) {
+  const productos = Array.isArray(pedido?.productos) ? [...pedido.productos] : [];
+  const index = encontrarIndiceProductoEnPedido(pedido, texto, state);
+  const cantidad = encontrarCantidadEnSegmento(normalizarTextoAnalisis(texto));
+  if (index < 0 || !productos[index] || !cantidad) {
+    return { pedido, updated: null };
+  }
+
+  const isIncrement = /\b(mas|más|agrega|suma)\b/.test(normalizarTextoAnalisis(texto)) && !/\bsolo\b/.test(normalizarTextoAnalisis(texto));
+  productos[index] = {
+    ...productos[index],
+    cantidad: isIncrement ? (Number(productos[index].cantidad) || 0) + cantidad : cantidad
+  };
+
+  return {
+    pedido: calcularTotalesPedido({ ...pedido, productos }),
+    updated: productos[index]
+  };
 }
 
 function agregarProductoAPedido(pedidoBase = {}, item = {}) {
@@ -3632,7 +3866,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     hasDraftContext,
     hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used),
     customerName: state.customerName || null,
-    awaitingName: state.awaitingName || false
+    awaitingName: state.awaitingName || false,
+    state
   });
   const hasOrderIntent = routingIntent === "order_request" || routingIntent === "order_missing_data";
   const explicitName = routingIntent === "provide_name"
@@ -3645,6 +3880,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     messageText: mensaje,
     whatsappMessageId: sourceMessageId
   });
+  appendRecentHistory(state, { role: "user", intent: routingIntent, text: mensaje });
 
   logEvent("mensaje_extraido", {
     origen,
@@ -3740,6 +3976,82 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+  }
+
+  if (routingIntent === "human_help") {
+    state.lastIntent = routingIntent;
+    const fallback = construirRespuestaAyudaHumana();
+    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+  }
+
+  if (routingIntent === "complaint_confusion") {
+    state.lastIntent = routingIntent;
+    const pedidoActual = construirPedidoDesdeEstado(state);
+    const fallback = construirRespuestaCorreccion({ pedido: pedidoActual });
+    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: pedidoActual, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+  }
+
+  if (routingIntent === "reorder_memory") {
+    const lastOrder = buscarUltimoPedidoCliente(telefono);
+    if (lastOrder?.items?.length) {
+      const pedidoRecordado = construirPedidoDesdeOrder(lastOrder);
+      state.pendingPedido = pedidoRecordado;
+      actualizarMemoriaConversacional(state, { pedido: pedidoRecordado, evaluacion: evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] }), intent: "order_missing_data" });
+      const fallback = construirRespuestaPedido(pedidoRecordado, evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] }), { availableProducts: buildCatalogShortList(5) });
+      const respuesta = await responderAlCliente({ telefono, respuesta: fallback, simulated, orderId: null });
+      return { pedido: pedidoRecordado, evaluacion: evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] }), order: null, inboundMessage, respuesta: fallback, delivery: respuesta, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    }
+
+    const fallback = "No veo un pedido reciente listo para repetir. Escríbeme qué quieres y te lo armo 😊";
+    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+  }
+
+  if (["payment_method", "address_provided", "remove_item", "modify_quantity"].includes(routingIntent)) {
+    let pedidoActual = construirPedidoDesdeEstado(state);
+
+    if (routingIntent === "payment_method") {
+      pedidoActual = calcularTotalesPedido({ ...pedidoActual, metodo_pago: extraerMetodoPagoDesdeTexto(mensaje) || pedidoActual.metodo_pago || null });
+    }
+
+    if (routingIntent === "address_provided") {
+      pedidoActual = calcularTotalesPedido({ ...pedidoActual, direccion: extraerDireccionDesdeTexto(mensaje) || pedidoActual.direccion || null });
+    }
+
+    if (routingIntent === "remove_item") {
+      pedidoActual = quitarProductoDePedido(pedidoActual, contextualizedMessage.text || mensaje, state).pedido;
+    }
+
+    if (routingIntent === "modify_quantity") {
+      pedidoActual = actualizarCantidadPedido(pedidoActual, contextualizedMessage.text || mensaje, state).pedido;
+    }
+
+    state.pendingPedido = pedidoActual;
+    const evaluacionContextual = evaluarPedido(pedidoActual, { ambiguities: [], unmatched: [] });
+    actualizarMemoriaConversacional(state, { pedido: pedidoActual, evaluacion: evaluacionContextual, intent: "order_missing_data" });
+
+    if (evaluacionContextual.esValido && ["payment_method", "address_provided"].includes(routingIntent)) {
+      const persisted = await persistirPedidoFinal({
+        pedido: pedidoActual,
+        telefono,
+        mensajeOriginal: mensaje,
+        sourceMessageId
+      });
+      state.pendingPedido = null;
+      actualizarMemoriaConversacional(state, { pedido: pedidoActual, evaluacion: evaluacionContextual, intent: "order_request" });
+      const fallback = construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
+      const delivery = await responderAlCliente({ telefono, respuesta: fallback, simulated, orderId: persisted.order?.id || null });
+      return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: persisted.order, inboundMessage, respuesta: fallback, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "order_request" };
+    }
+
+    const fallback = construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
+    const delivery = await responderAlCliente({ telefono, respuesta: fallback, simulated, orderId: null });
+    return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: null, inboundMessage, respuesta: fallback, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
 
   if (routingIntent === "catalog_request") {
@@ -4541,4 +4853,3 @@ startServer().catch((error) => {
   logEvent("server_start_error", { error: error.message }, "error");
   process.exit(1);
 });
-

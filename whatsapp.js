@@ -251,6 +251,19 @@ function construirRespuestaCasual() {
   ]);
 }
 
+function construirRespuestaCorreccion({ pedido = null } = {}) {
+  const detalle = construirDetalleProductosAmable(Array.isArray(pedido?.productos) ? pedido.productos : []);
+  return [
+    "Tienes razón 😊",
+    detalle ? `Por ahora te entendí esto:\n${detalle}` : null,
+    "Dime qué ajustamos y lo corrijo."
+  ].filter(Boolean).join("\n\n");
+}
+
+function construirRespuestaAyudaHumana() {
+  return "Claro 😊 Si prefieres atención humana, déjame tu duda o tu pedido y lo dejamos listo para pasarlo al asesor.";
+}
+
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductosAmable(productos);
@@ -395,5 +408,7 @@ module.exports = {
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,
   construirRespuestaCasual,
+  construirRespuestaCorreccion,
+  construirRespuestaAyudaHumana,
   construirLineaCatalogoSugerido
 };
