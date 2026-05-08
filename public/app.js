@@ -33,6 +33,9 @@ const closeModalButton = document.getElementById("closeModalButton");
 const cancelCloseDayButton = document.getElementById("cancelCloseDayButton");
 const confirmCloseDayButton = document.getElementById("confirmCloseDayButton");
 const navLinks = Array.from(document.querySelectorAll(".nav-link[data-target]"));
+const saasShell = document.querySelector(".saas-shell");
+const sidebarToggle = document.getElementById("sidebarToggle");
+const sidebarBackdrop = document.getElementById("sidebarBackdrop");
 
 const STATUS_OPTIONS = [
   { value: "pendiente", label: "Pendiente" },
@@ -42,6 +45,8 @@ const STATUS_OPTIONS = [
 ];
 
 const PANEL_LOGIN_PATH = window.__PANEL_LOGIN_PATH__ || "/portal";
+const SIDEBAR_STORAGE_KEY = "sidebarCollapsed";
+const MOBILE_LAYOUT = window.matchMedia("(max-width: 1100px)");
 let orders = [];
 let dashboardSummary = null;
 let selectedOrderId = null;
@@ -53,6 +58,8 @@ let selectedClosureId = null;
 let healthState = null;
 let sessionTimeoutHandle = null;
 let finalizeModalOpen = false;
+let sidebarCollapsed = false;
+let mobileSidebarOpen = false;
 
 function formatDate(value) {
   if (!value) return "-";
@@ -102,6 +109,66 @@ function buildAvatarLabel(order) {
 function redirectToLogin() {
   const next = encodeURIComponent(window.location.pathname + window.location.search);
   window.location.href = `${PANEL_LOGIN_PATH}?next=${next}`;
+}
+
+function getStoredSidebarPreference() {
+  try {
+    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function storeSidebarPreference() {
+  try {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
+  } catch (_error) {
+    // noop
+  }
+}
+
+function syncSidebarState() {
+  const isMobile = MOBILE_LAYOUT.matches;
+  saasShell.classList.toggle("sidebar-collapsed", !isMobile && sidebarCollapsed);
+  saasShell.classList.toggle("sidebar-mobile-open", isMobile && mobileSidebarOpen);
+  document.body.classList.toggle("sidebar-mobile-open", isMobile && mobileSidebarOpen);
+
+  if (sidebarToggle) {
+    sidebarToggle.setAttribute("aria-expanded", String(isMobile ? mobileSidebarOpen : !sidebarCollapsed));
+  }
+
+  if (sidebarBackdrop) {
+    const shouldShowBackdrop = isMobile && mobileSidebarOpen;
+    sidebarBackdrop.hidden = !shouldShowBackdrop;
+    sidebarBackdrop.setAttribute("aria-hidden", String(!shouldShowBackdrop));
+  }
+}
+
+function closeMobileSidebar() {
+  if (!MOBILE_LAYOUT.matches || !mobileSidebarOpen) {
+    return;
+  }
+
+  mobileSidebarOpen = false;
+  syncSidebarState();
+}
+
+function toggleSidebar() {
+  if (MOBILE_LAYOUT.matches) {
+    mobileSidebarOpen = !mobileSidebarOpen;
+    syncSidebarState();
+    return;
+  }
+
+  sidebarCollapsed = !sidebarCollapsed;
+  storeSidebarPreference();
+  syncSidebarState();
+}
+
+function initSidebarState() {
+  sidebarCollapsed = getStoredSidebarPreference();
+  mobileSidebarOpen = false;
+  syncSidebarState();
 }
 
 function scheduleSessionTimeout(expiresAt) {
@@ -941,8 +1008,16 @@ document.addEventListener("click", (event) => {
     if (target) {
       navLinks.forEach((link) => link.classList.toggle("active", link === navLink));
       target.scrollIntoView({ behavior: "smooth", block: "start" });
+      closeMobileSidebar();
     }
   }
+});
+
+sidebarToggle?.addEventListener("click", toggleSidebar);
+sidebarBackdrop?.addEventListener("click", closeMobileSidebar);
+MOBILE_LAYOUT.addEventListener("change", () => {
+  mobileSidebarOpen = false;
+  syncSidebarState();
 });
 
 statusFilter.addEventListener("change", () => {
@@ -964,9 +1039,16 @@ closeDayModal?.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && finalizeModalOpen) {
-    closeFinalizeModal();
+  if (event.key !== "Escape") {
+    return;
   }
+
+  if (finalizeModalOpen) {
+    closeFinalizeModal();
+    return;
+  }
+
+  closeMobileSidebar();
 });
 
 logoutButton?.addEventListener("click", async () => {
@@ -978,6 +1060,8 @@ logoutButton?.addEventListener("click", async () => {
 });
 
 chatComposer.addEventListener("submit", sendChatMessage);
+
+initSidebarState();
 
 (async () => {
   const authenticated = await initSessionGuard();

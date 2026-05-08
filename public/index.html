@@ -9,10 +9,10 @@
 </head>
 <body>
   <div class="saas-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
         <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="sidebar-logo" />
-        <div>
+        <div class="sidebar-brand-copy">
           <p class="eyebrow">Tellolac AI</p>
           <h1 class="sidebar-title">Tellolac AI</h1>
           <p class="sidebar-subtitle">Asistente Comercial Inteligente</p>
@@ -20,24 +20,47 @@
       </div>
 
       <nav class="sidebar-nav">
-        <button class="nav-link active" data-target="dashboardSection">Dashboard</button>
-        <button class="nav-link" data-target="ordersSection">Pedidos</button>
-        <button class="nav-link" data-target="historySection">Historial</button>
-        <button class="nav-link" data-target="reportsSection">Reportes</button>
-        <button class="nav-link" data-target="settingsSection">Configuración</button>
+        <button class="nav-link active" data-target="dashboardSection" title="Dashboard" aria-label="Dashboard">
+          <span class="nav-icon" aria-hidden="true">📊</span>
+          <span class="nav-label">Dashboard</span>
+        </button>
+        <button class="nav-link" data-target="ordersSection" title="Pedidos" aria-label="Pedidos">
+          <span class="nav-icon" aria-hidden="true">🧾</span>
+          <span class="nav-label">Pedidos</span>
+        </button>
+        <button class="nav-link" data-target="historySection" title="Historial" aria-label="Historial">
+          <span class="nav-icon" aria-hidden="true">🗂️</span>
+          <span class="nav-label">Historial</span>
+        </button>
+        <button class="nav-link" data-target="reportsSection" title="Reportes" aria-label="Reportes">
+          <span class="nav-icon" aria-hidden="true">📈</span>
+          <span class="nav-label">Reportes</span>
+        </button>
+        <button class="nav-link" data-target="settingsSection" title="Configuración" aria-label="Configuración">
+          <span class="nav-icon" aria-hidden="true">⚙️</span>
+          <span class="nav-label">Configuración</span>
+        </button>
       </nav>
 
-      <div class="sidebar-footer">Powered by Abi AI</div>
+      <div class="sidebar-footer">
+        <span class="nav-icon" aria-hidden="true">🤖</span>
+        <span class="nav-label">Powered by Abi AI</span>
+      </div>
     </aside>
+
+    <button id="sidebarBackdrop" class="sidebar-backdrop" type="button" hidden aria-hidden="true" tabindex="-1"></button>
 
     <main class="main-shell">
       <header class="app-header">
-        <div class="header-brand">
-          <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="brand-logo" />
-          <div>
-            <p class="eyebrow">Panel premium</p>
-            <h2>Tellolac AI</h2>
-            <p class="subtitle">Asistente Comercial Inteligente</p>
+        <div class="header-left">
+          <button id="sidebarToggle" class="menu-toggle secondary ghost" type="button" aria-label="Abrir o cerrar menú" aria-controls="sidebar" aria-expanded="true">☰</button>
+          <div class="header-brand">
+            <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="brand-logo" />
+            <div>
+              <p class="eyebrow">Panel premium</p>
+              <h2>Tellolac AI</h2>
+              <p class="subtitle">Asistente Comercial Inteligente</p>
+            </div>
           </div>
         </div>
 
