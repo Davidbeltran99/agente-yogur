@@ -178,7 +178,7 @@ const MONTH_INDEX = new Map([
   ["noviembre", 10],
   ["diciembre", 11]
 ]);
-const ADDRESS_KEYWORDS = /(calle|cll|carrera|cra|cr|avenida|av\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|conjunto)/i;
+const ADDRESS_KEYWORDS = /(calle|cll|cl|carrera|cra|cr|avenida|av\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|conjunto|centro)/i;
 const PRODUCT_ALIAS_INDEX = (() => {
   const index = new Map();
 
@@ -216,6 +216,7 @@ const LIST_ORDER_NON_IDENTITY_TOKENS = new Set([
 ].flatMap((value) => normalizeCatalogText(value).split(" ").filter(Boolean)));
 const PRICE_VALUE_TOKENS = ["barato", "barata", "baratos", "baratas", "economico", "económico", "economica", "económica", "economicos", "económicos", "economicas", "económicas", "asequible", "asequibles"];
 const SAME_PRODUCT_TOKENS = ["lo mismo", "el mismo", "la misma", "ese", "esa", "el de siempre", "la de siempre", "como siempre"];
+const PARTIAL_ADDRESS_REFERENCE_TOKENS = ["la misma direccion", "la misma dirección", "misma direccion", "misma dirección", "donde siempre"];
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
@@ -432,6 +433,22 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
     return "provide_name";
   }
 
+  if (esIntencionMetodoPago(texto) && (hasDraftContext || hasActiveContext)) {
+    return "payment_method";
+  }
+
+  if (esIntencionDireccion(texto) && (hasDraftContext || hasActiveContext)) {
+    return "address_provided";
+  }
+
+  if (esIntencionRemoverItem(texto) && (hasDraftContext || hasActiveContext)) {
+    return "remove_item";
+  }
+
+  if (esIntencionModificarCantidad(texto) && (hasDraftContext || hasActiveContext)) {
+    return "modify_quantity";
+  }
+
   if (listOrderAnalysis.detected) {
     logEvent("LIST_ORDER_DETECTED", {
       multiLine: listOrderAnalysis.multiLine,
@@ -455,24 +472,8 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
     return "reorder_memory";
   }
 
-  if (esIntencionRemoverItem(texto) && (hasDraftContext || hasActiveContext)) {
-    return "remove_item";
-  }
-
-  if (esIntencionModificarCantidad(texto) && (hasDraftContext || hasActiveContext)) {
-    return "modify_quantity";
-  }
-
   if (esReferenciaAmbigua(texto, state) && hasActiveContext) {
     return "ambiguous_reference";
-  }
-
-  if (esIntencionMetodoPago(texto) && (hasDraftContext || hasActiveContext)) {
-    return "payment_method";
-  }
-
-  if (esIntencionDireccion(texto) && (hasDraftContext || hasActiveContext)) {
-    return "address_provided";
   }
 
   if (esIntencionInfoCatalogo(texto)) {
@@ -854,9 +855,40 @@ function normalizeFuzzyCatalogToken(token = "") {
   return String(token || "")
     .trim()
     .toLowerCase()
+    .replace(/(.)\1{2,}/g, "$1$1")
     .replace(/^yogur(?:t|th)?$/i, "yogurt")
+    .replace(/^yogou?rt$/i, "yogurt")
     .replace(/^griegos?$/i, "griego")
+    .replace(/^kefyr$/i, "kefir")
+    .replace(/^cafee$/i, "cafe")
+    .replace(/^aloee$/i, "aloe")
     .replace(/(es|s)$/i, "");
+}
+
+function normalizeFuzzyCatalogPhrase(value = "") {
+  return normalizeCatalogText(value)
+    .replace(/(.)\1{2,}/g, "$1$1")
+    .replace(/\byogou?rt\b/g, "yogurt")
+    .replace(/\byogurth\b/g, "yogurt")
+    .replace(/\byogur\b/g, "yogurt")
+    .replace(/\bgri+ego\b/g, "griego")
+    .replace(/\bkefyr\b/g, "kefir")
+    .replace(/\bkefír\b/g, "kefir")
+    .replace(/\bcafee\b/g, "cafe")
+    .replace(/\baloee\b/g, "aloe")
+    .replace(/\bsabila\b/g, "aloe")
+    .trim();
+}
+
+function logFuzzyMatchResult(details = {}) {
+  logEvent("FUZZY_MATCH_RESULT", {
+    query: details.query || null,
+    normalizedQuery: details.normalizedQuery || null,
+    match: details.match || null,
+    confidence: Number.isFinite(Number(details.confidence)) ? Number(details.confidence) : null,
+    score: Number.isFinite(Number(details.score)) ? Number(details.score) : null,
+    status: details.status || null
+  });
 }
 
 function buildCharacterNgrams(value = "", size = 3) {
@@ -934,20 +966,23 @@ function puntuarCoincidenciaCatalogo(candidate, alias) {
     return 0;
   }
 
-  if (candidate === alias) {
+  const candidateValue = normalizeFuzzyCatalogPhrase(candidate);
+  const aliasValue = normalizeFuzzyCatalogPhrase(alias);
+
+  if (candidateValue === aliasValue) {
     return 140 + alias.length / 100;
   }
 
-  if (candidate.includes(alias)) {
+  if (candidateValue.includes(aliasValue)) {
     return 115 + alias.length / 100;
   }
 
-  if (alias.includes(candidate) && candidate.length >= 5) {
+  if (aliasValue.includes(candidateValue) && candidateValue.length >= 5) {
     return 92 + candidate.length / 100;
   }
 
-  const candidateTokens = candidate.split(" ").filter((token) => token.length >= 2);
-  const aliasTokens = alias.split(" ").filter((token) => token.length >= 2);
+  const candidateTokens = candidateValue.split(" ").filter((token) => token.length >= 2);
+  const aliasTokens = aliasValue.split(" ").filter((token) => token.length >= 2);
   const normalizedCandidateTokens = candidateTokens.map((token) => normalizeFuzzyCatalogToken(token));
   const normalizedAliasTokens = aliasTokens.map((token) => normalizeFuzzyCatalogToken(token));
 
@@ -993,13 +1028,15 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
     return [];
   }
 
+  const normalizedCandidate = normalizeFuzzyCatalogPhrase(candidate);
+
   const matches = [];
 
   for (const product of getCatalogProductsCache()) {
     let bestScore = 0;
 
     for (const alias of product.aliases || []) {
-      bestScore = Math.max(bestScore, puntuarCoincidenciaCatalogo(candidate, alias));
+      bestScore = Math.max(bestScore, puntuarCoincidenciaCatalogo(normalizedCandidate, alias));
     }
 
     bestScore = Math.max(bestScore, puntuarCoincidenciaSemanticaCatalogo(texto, product));
@@ -1009,11 +1046,23 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
     }
   }
 
-  return matches
+  const sortedMatches = matches
     .sort((a, b) => (b.score - a.score)
       || ((a.product?.nombre_canonico || a.product?.nombre || "").length - (b.product?.nombre_canonico || b.product?.nombre || "").length)
       || ((parseOptionalNumber(a.product?.precio) ?? Number.MAX_SAFE_INTEGER) - (parseOptionalNumber(b.product?.precio) ?? Number.MAX_SAFE_INTEGER)))
     .slice(0, limit);
+
+  const bestMatch = sortedMatches[0] || null;
+  logFuzzyMatchResult({
+    query: candidate,
+    normalizedQuery: normalizedCandidate,
+    match: bestMatch?.product?.nombre || null,
+    confidence: bestMatch?.confidence || null,
+    score: bestMatch?.score || null,
+    status: bestMatch ? "matched" : "not_found"
+  });
+
+  return sortedMatches;
 }
 
 function buildCanonicalCatalogEntries() {
@@ -1519,16 +1568,58 @@ function extraerMetodoPagoDesdeTexto(texto) {
   return null;
 }
 
-function extraerDireccionDesdeTexto(texto) {
+function esDireccionIncompleta(direccion) {
+  const normalized = normalizarTextoAnalisis(direccion);
+  if (!normalized) {
+    return true;
+  }
+
+  if (/^(centro|barrio\s+.+)$/.test(normalized) && !/#|\d+\s*-\s*\d+/.test(normalized)) {
+    return true;
+  }
+
+  if (/^(cl|cll|calle|cra|cr|carrera|av|avenida)\s+\d+[a-z]?$/.test(normalized)) {
+    return true;
+  }
+
+  const hasExactPoint = /#|\b\d+\s*-\s*\d+\b|\b\d+\s+\d+\s+\d+\b/.test(normalized);
+  const hasReference = /\b(frente|esquina|porton|porter[aí]a|referencia|casa|apto|apartamento|torre|bloque|conjunto)\b/.test(normalized);
+  return !(hasExactPoint || hasReference);
+}
+
+function extraerDireccionDesdeTexto(texto, { lastAddress = null } = {}) {
   const raw = String(texto || "").trim();
+  const normalized = normalizarTextoAnalisis(raw);
+
+  if (!raw) {
+    return null;
+  }
+
+  if (PARTIAL_ADDRESS_REFERENCE_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
+    return limpiarTexto(lastAddress || null);
+  }
+
   const labeledMatch = raw.match(/(?:direcci[oó]n|direccion)\s*[:\-]?\s*(.+?)(?=(?:\.|,|\s+pago\b|\s+nequi\b|\s+daviplata\b|\s+efectivo\b|\s+transferencia\b|$))/i);
 
   if (labeledMatch?.[1]) {
     return limpiarTexto(labeledMatch[1]);
   }
 
-  const keywordMatch = raw.match(new RegExp(`((?:calle|cll|carrera|cra|cr|avenida|av\\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque)[^,.]+)`, "i"));
-  return limpiarTexto(keywordMatch?.[1] || null);
+  const keywordMatch = raw.match(new RegExp(`((?:calle|cll|cl|carrera|cra|cr|avenida|av\\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|centro)[^,.]*)`, "i"));
+  if (keywordMatch?.[1]) {
+    return limpiarTexto(keywordMatch[1]);
+  }
+
+  if (/^(centro|barrio\s+.+)$/i.test(raw)) {
+    return limpiarTexto(raw);
+  }
+
+  const compactStreetMatch = raw.match(/^(?:cl|cll|calle|cra|cr|carrera)\s*\d+[a-z]?(?:\s*(?:#|nro|numero)?\s*\d+[a-z]?(?:\s*[- ]\s*\d+[a-z]?)?)?$/i);
+  if (compactStreetMatch?.[0]) {
+    return limpiarTexto(compactStreetMatch[0]);
+  }
+
+  return null;
 }
 
 function extraerClienteDesdeTexto(texto) {
@@ -2369,6 +2460,7 @@ function calcularTotalesPedido(pedido = {}) {
 function evaluarPedido(pedido, catalogAnalysis = { ambiguities: [], unmatched: [] }) {
   const faltantes = [];
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
+  const addressStatus = !pedido.direccion ? "missing" : (esDireccionIncompleta(pedido.direccion) ? "partial" : "complete");
 
   const hasCatalogAmbiguity = Array.isArray(catalogAnalysis.ambiguities) && catalogAnalysis.ambiguities.length > 0;
   const hasCatalogMiss = Array.isArray(catalogAnalysis.unmatched) && catalogAnalysis.unmatched.length > 0;
@@ -2395,7 +2487,7 @@ function evaluarPedido(pedido, catalogAnalysis = { ambiguities: [], unmatched: [
     faltantes.push("productos_catalogo");
   }
 
-  if (!pedido.direccion) {
+  if (addressStatus !== "complete") {
     faltantes.push("direccion");
   }
 
@@ -2412,6 +2504,7 @@ function evaluarPedido(pedido, catalogAnalysis = { ambiguities: [], unmatched: [
     faltantes,
     productosInvalidos: [],
     priceValidation: missingPrice ? "missing_price" : "ok",
+    addressStatus,
     catalogStatus: hasCatalogMiss ? "not_found" : (hasCatalogAmbiguity ? "ambiguous" : "ok"),
     ambiguousProducts: Array.isArray(catalogAnalysis.ambiguities) ? catalogAnalysis.ambiguities : [],
     unmatchedProducts: Array.isArray(catalogAnalysis.unmatched) ? catalogAnalysis.unmatched : []
@@ -3155,8 +3248,10 @@ function esIntencionAgregarMas(texto) {
     return false;
   }
 
-  return /\b(agrega|agregame|agregale|suma|sumale|ponme|mandame|dame)\b/.test(normalized)
-    && /\b(mas|más|otro|otra|otros|otras)\b/.test(normalized);
+  return (/\b(agrega|agregame|agregale|suma|sumale|ponme|mandame|dame)\b/.test(normalized)
+      && /\b(mas|más|otro|otra|otros|otras)\b/.test(normalized))
+    || /^(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)?\s*(mas|más|otro|otra)$/.test(normalized)
+    || /^(agrega|suma)\s+(otro|otra)$/.test(normalized);
 }
 
 function resolverReferenciaProductoEnOpciones(texto, options = []) {
@@ -3361,6 +3456,39 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
+  const sameProductReference = state?.lastProductReference?.nombre || lastActiveProduct || null;
+  if (sameProductReference && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
+    return {
+      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${sameProductReference}`,
+      used: true,
+      reason: "same_product_reference",
+      selectedProduct: sameProductReference,
+      appendProducts: esIntencionAgregarMas(raw)
+    };
+  }
+
+  const hasFamilyReference = Boolean(state?.lastProductReference?.familia);
+  const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
+  if (hasFamilyReference) {
+    const alreadyMentionsFamily = getCatalogProductsCache().some((product) => {
+      const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia);
+      return family && normalized.includes(family);
+    });
+
+    if (!alreadyMentionsFamily && hasVariantCue) {
+      return {
+        text: `${state.lastProductReference.familia} ${raw}`.trim(),
+        used: true,
+        reason: "family_context_reference",
+        appendProducts: esIntencionAgregarMas(raw)
+      };
+    }
+
+    if (alreadyMentionsFamily) {
+      return { text: raw, used: false };
+    }
+  }
+
   const suggestionMemory = obtenerSuggestionMemoryActiva(state);
   const suggestionResolution = resolverReferenciaProductoEnOpciones(raw, suggestionMemory?.options || []);
   if (suggestionResolution?.option?.nombre) {
@@ -3382,40 +3510,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
-  if (!state?.lastProductReference?.familia) {
-    return { text: raw, used: false };
-  }
-
-  const alreadyMentionsFamily = getCatalogProductsCache().some((product) => {
-    const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia);
-    return family && normalized.includes(family);
-  });
-
-  if (alreadyMentionsFamily) {
-    return { text: raw, used: false };
-  }
-
-  if (SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
-    return {
-      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${state.lastProductReference.nombre}`,
-      used: true,
-      reason: "same_product_reference",
-      selectedProduct: state.lastProductReference.nombre,
-      appendProducts: esIntencionAgregarMas(raw)
-    };
-  }
-
-  const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
-  if (!hasVariantCue) {
-    return { text: raw, used: false };
-  }
-
-  return {
-    text: `${state.lastProductReference.familia} ${raw}`.trim(),
-    used: true,
-    reason: "family_context_reference",
-    appendProducts: esIntencionAgregarMas(raw)
-  };
+  return { text: raw, used: false };
 }
 
 function obtenerEstadoConversacion(phone) {
@@ -3559,7 +3654,15 @@ function encontrarIndiceProductoEnPedido(pedido, texto, state) {
     return explicitMatches[0].index;
   }
 
+  const lastProduct = state?.lastProductReference?.nombre;
   if (/\b(ese|esa|el otro|el grande|el pequeno|el pequeño|el barato|primero|segunda?|tercero)\b/.test(normalized)) {
+    if (SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token))) && lastProduct) {
+      const sameIdx = productos.findIndex((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(lastProduct));
+      if (sameIdx >= 0) {
+        return sameIdx;
+      }
+    }
+
     const options = productos.map((item, index) => ({
       id: String(index + 1),
       nombre: item.producto,
@@ -3572,7 +3675,6 @@ function encontrarIndiceProductoEnPedido(pedido, texto, state) {
     }
   }
 
-  const lastProduct = state?.lastProductReference?.nombre;
   if (lastProduct) {
     const idx = productos.findIndex((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(lastProduct));
     if (idx >= 0) {
@@ -3944,7 +4046,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const hasDraftContext = tieneBorradorPedido(state);
   const hasSuggestionContext = Boolean(obtenerSuggestionMemoryActiva(state));
   const hasActiveOrderContext = Boolean(obtenerActiveOrderContext(state));
-  const routingIntent = detectarIntencionConversacional(contextualizedMessage.text || mensaje, {
+  const routingIntent = detectarIntencionConversacional(mensaje, {
     hasDraftContext,
     hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used),
     customerName: state.customerName || null,
@@ -4112,15 +4214,20 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     }
 
     if (routingIntent === "address_provided") {
-      pedidoActual = calcularTotalesPedido({ ...pedidoActual, direccion: extraerDireccionDesdeTexto(mensaje) || pedidoActual.direccion || null });
+      pedidoActual = calcularTotalesPedido({
+        ...pedidoActual,
+        direccion: extraerDireccionDesdeTexto(mensaje, {
+          lastAddress: pedidoActual.direccion || state.lastResolvedOrder?.direccion || null
+        }) || pedidoActual.direccion || state.lastResolvedOrder?.direccion || null
+      });
     }
 
     if (routingIntent === "remove_item") {
-      pedidoActual = quitarProductoDePedido(pedidoActual, contextualizedMessage.text || mensaje, state).pedido;
+      pedidoActual = quitarProductoDePedido(pedidoActual, mensaje, state).pedido;
     }
 
     if (routingIntent === "modify_quantity") {
-      pedidoActual = actualizarCantidadPedido(pedidoActual, contextualizedMessage.text || mensaje, state).pedido;
+      pedidoActual = actualizarCantidadPedido(pedidoActual, mensaje, state).pedido;
     }
 
     state.pendingPedido = pedidoActual;

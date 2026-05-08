@@ -118,6 +118,57 @@ function buildSizeSemanticAliases(name) {
   return new Set(Array.from(aliases).map((alias) => alias.trim()).filter(Boolean));
 }
 
+function buildConversationalAliases(name) {
+  const aliases = new Set();
+  const normalized = normalizeCatalogText(name);
+
+  if (!normalized) {
+    return aliases;
+  }
+
+  const variants = new Set([normalized]);
+
+  if (/\byogurt\b/.test(normalized)) {
+    variants.add(normalized.replace(/\byogurt\b/g, "yogur"));
+    variants.add(normalized.replace(/\byogurt\b/g, "yoghurt"));
+    variants.add(normalized.replace(/\byogurt\b/g, "yogourt"));
+  }
+
+  if (/\byogur\b/.test(normalized)) {
+    variants.add(normalized.replace(/\byogur\b/g, "yogurt"));
+    variants.add(normalized.replace(/\byogur\b/g, "yoghurt"));
+    variants.add(normalized.replace(/\byogur\b/g, "yogourt"));
+  }
+
+  if (/\bkefir\b/.test(normalized)) {
+    variants.add(normalized.replace(/\bkefir\b/g, "kefyr"));
+    variants.add(normalized.replace(/\bkefir\b/g, "kefir"));
+  }
+
+  if (/\bcafe\b/.test(normalized)) {
+    variants.add(normalized.replace(/\bcafe\b/g, "cafee"));
+    variants.add(normalized.replace(/\bcafe\b/g, "cafecito"));
+  }
+
+  if (/\baloe\b/.test(normalized)) {
+    variants.add(normalized.replace(/\baloe\b/g, "aloee"));
+    variants.add(normalized.replace(/\baloe\b/g, "sabila"));
+  }
+
+  if (/\bgriego\b/.test(normalized) && !/\byogur|\byogurt|\byogourt|\byoghurt/.test(normalized)) {
+    variants.add(`yogur ${normalized}`);
+    variants.add(`yogurt ${normalized}`);
+    variants.add(`yogourt ${normalized}`);
+  }
+
+  for (const variant of variants) {
+    aliases.add(variant);
+    aliases.add(variant.replace(/(.)\1{2,}/g, "$1$1"));
+  }
+
+  return new Set(Array.from(aliases).map((alias) => alias.trim()).filter(Boolean));
+}
+
 function buildAliases(product) {
   const aliases = new Set();
   const explicitAliases = Array.isArray(product?.aliases) ? product.aliases : [];
@@ -134,6 +185,10 @@ function buildAliases(product) {
   }
 
   for (const alias of buildSizeSemanticAliases(product?.nombre)) {
+    aliases.add(alias);
+  }
+
+  for (const alias of buildConversationalAliases(product?.nombre)) {
     aliases.add(alias);
   }
 

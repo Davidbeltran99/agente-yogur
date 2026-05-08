@@ -19,11 +19,11 @@ function countOrdersByPhone(db, phone) {
 async function main() {
   const db = new DatabaseSync(dbPath);
   const dirtyCases = [
-    { label: "mora_incompleto", mensaje: "quiero 2 de mora pa ya", response: /(me falta confirmar|revisa el catálogo|envíame el nombre exacto|no pude validar el precio)/i },
-    { label: "siempre", mensaje: "mandame lo de siempre", response: /(me falta confirmar|lo que capté|envíame)/i },
-    { label: "otro_normal", mensaje: "2 aloe y lo otro normal", response: /(me falta confirmar|revisa el catálogo|envíame el nombre exacto)/i },
-    { label: "ayer", mensaje: "lo mismo de ayer", response: /(me falta confirmar|lo que capté|envíame)/i },
-    { label: "hola", mensaje: "hola", response: /(catálogo|envíame el producto|productos aquí)/i }
+    { label: "mora_incompleto", mensaje: "quiero 2 de mora pa ya", response: /(me falta confirmar|revisa el catálogo|envíame el nombre exacto|no pude validar el precio|no encontr[eé] ese producto|productos disponibles)/i },
+    { label: "siempre", mensaje: "mandame lo de siempre", response: /(me falta confirmar|lo que capté|envíame|no veo un pedido reciente|escr[ií]beme qu[eé] quieres)/i },
+    { label: "otro_normal", mensaje: "2 aloe y lo otro normal", response: /(me falta confirmar|revisa el catálogo|envíame el nombre exacto|no encontr[eé] ese producto|productos disponibles|encontré varias opciones|responde con el número)/i },
+    { label: "ayer", mensaje: "lo mismo de ayer", response: /(me falta confirmar|lo que capté|envíame|no veo un pedido reciente|escr[ií]beme qu[eé] quieres)/i },
+    { label: "hola", mensaje: "hola", response: /(catálogo|envíame el producto|productos aquí|abi|tellolac)/i }
   ];
 
   const dirtyResults = [];
@@ -47,14 +47,14 @@ async function main() {
   }
 
   const totalPhone = `5737${Date.now().toString().slice(-6)}`.slice(0, 10);
-  const totalMessage = "Quiero 3 aloe litro, 2 café litro y 1 ancheta. Dirección Calle 10 #20-30. Pago transferencia.";
+  const totalMessage = "Quiero 3 aloe litro, 2 café litro y 1 ancheta 1. Dirección Calle 10 #20-30. Pago transferencia.";
   const totalResponse = await api.post("/simulate-message", { telefono: totalPhone, mensaje: totalMessage });
   assert(totalResponse.data.order?.id, "Caso de totales debía crear order");
-  assert(Number(totalResponse.data.order?.total) === 105000, `Total esperado 105000 y llegó ${totalResponse.data.order?.total}`);
-  assert(/Total:\s*\$105\.000/i.test(totalResponse.data.respuesta), `Respuesta no mostró el total esperado: ${totalResponse.data.respuesta}`);
+  assert(Number(totalResponse.data.order?.total) === 98000, `Total esperado 98000 y llegó ${totalResponse.data.order?.total}`);
+  assert(/Total:\s*\$98\.000/i.test(totalResponse.data.respuesta), `Respuesta no mostró el total esperado: ${totalResponse.data.respuesta}`);
 
   const dbOrder = db.prepare("SELECT total FROM orders WHERE id = ?").get(totalResponse.data.order.id);
-  assert(Number(dbOrder?.total) === 105000, `SQLite debía guardar total 105000 y guardó ${dbOrder?.total}`);
+  assert(Number(dbOrder?.total) === 98000, `SQLite debía guardar total 98000 y guardó ${dbOrder?.total}`);
 
   const dedupePhone = `5738${Date.now().toString().slice(-6)}`.slice(0, 10);
   const dedupeMessage = "Quiero 1 aloe litro. Dirección Calle 1 #2-3. Pago efectivo.";

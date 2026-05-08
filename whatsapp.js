@@ -264,6 +264,24 @@ function construirRespuestaAyudaHumana() {
   return "Claro 😊 Si prefieres atención humana, déjame tu duda o tu pedido y lo dejamos listo para pasarlo al asesor.";
 }
 
+function construirUpsellSuave(productos = []) {
+  const first = String(productos?.[0]?.producto || "").toLowerCase();
+
+  if (/aloe/.test(first)) {
+    return "Si quieres también te dejo la presentación grande 😊";
+  }
+
+  if (/ancheta/.test(first)) {
+    return "También tengo otra opción de ancheta por si quieres comparar ✨";
+  }
+
+  if (/cafe|café/.test(first)) {
+    return "Ese sale bastante 😊 Si quieres también te agrego otra unidad.";
+  }
+
+  return productos.length === 1 ? "Si quieres también puedo agregarte otra unidad o otra presentación 😊" : null;
+}
+
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductosAmable(productos);
@@ -343,13 +361,24 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   }
 
   if (!evaluacion.esValido) {
+    if (evaluacion.addressStatus === "partial" && productos.length) {
+      return [
+        construirSaludoNatural(nombreCliente),
+        detalle,
+        pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
+        `Tengo esta dirección: ${pedido.direccion}`,
+        "Perfecto 😊 ¿me confirmas el número de casa o una referencia?"
+      ].filter(Boolean).join("\n\n");
+    }
+
     if (evaluacion.faltantes?.includes("direccion") && productos.length) {
       return [
         construirSaludoNatural(nombreCliente),
-        productos.length > 1 ? "Te agrego:" : null,
+        productos.length > 1 ? "Te dejo esto por ahora:" : null,
         detalle,
         pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
-        "Perfecto 😊 ¿A qué dirección lo enviamos?",
+        construirUpsellSuave(productos),
+        "Perfecto 😊 ¿A qué dirección te lo enviamos?",
         "Ejemplo: Calle 10 #20-30, Barrio Centro"
       ].filter(Boolean).join("\n\n");
     }
@@ -359,6 +388,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         construirSaludoNatural(nombreCliente),
         detalle,
         pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
+        construirUpsellSuave(productos),
         "Listo, ¿pagas por Nequi, efectivo o transferencia?"
       ].filter(Boolean).join("\n\n");
     }
@@ -392,7 +422,8 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     null,
     pedido.total ? `Total: ${formatearMoneda(pedido.total)}` : null,
     null,
-    pickVariant(`${nombreCliente}-${pedido.total}`, ["En un momento te confirmamos el despacho 🚚", "Ya te dejamos esto en curso 🚚", "Te confirmamos el despacho en un momento 🚚"])
+    pickVariant(`${nombreCliente}-${pedido.total}`, ["En un momento te confirmamos el despacho 🚚", "Ya te dejamos esto en curso 🚚", "Te confirmamos el despacho en un momento 🚚"]),
+    construirUpsellSuave(productos)
   ].filter((line) => line !== null).join("\n");
 }
 

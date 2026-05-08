@@ -1,0 +1,97 @@
+{
+  "fuzzyFixtures": [
+    {
+      "productName": "Yogurt Griego",
+      "expectedAliases": ["yogur griego", "yogurt griego", "yogourt griego"]
+    },
+    {
+      "productName": "Kefir Natural",
+      "expectedAliases": ["kefir natural"]
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "greeting_name_catalog",
+      "steps": [
+        { "message": "Hola", "expect": { "intent": "greeting", "responseIncludes": ["Abi"] } },
+        { "message": "Mi nombre es Ana", "expect": { "intent": "provide_name", "responseIncludes": ["Ana"] } },
+        { "message": "catalogo", "expect": { "intent": "catalog_request", "responseIncludes": ["Tellolac"] } }
+      ]
+    },
+    {
+      "name": "typo_partial_address_payment",
+      "steps": [
+        { "message": "quiero 2 aloee litro", "expect": { "intent": "order_missing_data", "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "centro", "expect": { "intent": "address_provided", "responseIncludes": ["número de casa", "centro"], "orderCreated": false } },
+        { "message": "cra 5 10 20", "expect": { "responseIncludes": ["pagas"] } },
+        { "message": "pago nequi", "expect": { "orderCreated": true, "orderProductsIncludes": ["Aloe Litro"] } }
+      ]
+    },
+    {
+      "name": "multiline_add_more",
+      "steps": [
+        { "message": "1 aloe litro\n1 ancheta", "expect": { "intent": "order_missing_data", "pedidoProductsIncludes": ["Aloe Litro", "Ancheta"] } },
+        { "message": "2 más", "expect": { "pedidoQuantityFor": { "product": "Ancheta", "quantity": 3 } } }
+      ]
+    },
+    {
+      "name": "suggestion_first_option",
+      "steps": [
+        { "message": "catalogo", "expect": { "intent": "catalog_request", "responseIncludes": ["Tellolac"] } },
+        { "message": "el primero", "expect": { "pedidoProductsIncludes": ["Aloe Litro"], "orderCreated": false } }
+      ]
+    },
+    {
+      "name": "contextual_value_option",
+      "steps": [
+        { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "el barato", "expect": { "pedidoProductsIncludes": ["Aloe Litro"], "orderCreated": false } }
+      ]
+    },
+    {
+      "name": "family_large_reference",
+      "steps": [
+        { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "el grande", "expect": { "pedidoProductsIncludes": ["Aloe Garrafa 1800 ml"], "orderCreated": false } }
+      ]
+    },
+    {
+      "name": "remove_item_reference",
+      "steps": [
+        { "message": "quiero 1 aloe litro y 1 ancheta", "expect": { "pedidoProductsIncludes": ["Aloe Litro", "Ancheta"] } },
+        { "message": "quita ese", "expect": { "pedidoProductsIncludes": ["Aloe Litro"], "pedidoProductsExcludes": ["Ancheta"] } }
+      ]
+    },
+    {
+      "name": "payment_and_address_split",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "cl 10", "expect": { "responseIncludes": ["número de casa"] } },
+        { "message": "cl 10 # 20-30", "expect": { "responseIncludes": ["pagas"] } },
+        { "message": "transferencia", "expect": { "orderCreated": true } }
+      ]
+    },
+    {
+      "name": "reorder_memory",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "calle 10 #20-30", "expect": { "responseIncludes": ["pagas"] } },
+        { "message": "nequi", "expect": { "orderCreated": true } },
+        { "message": "lo mismo de ayer", "expect": { "intent": "reorder_memory", "pedidoProductsIncludes": ["Aloe Litro"], "responseIncludes": ["Aloe Litro"] } }
+      ]
+    },
+    {
+      "name": "human_correction",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "no entendiste", "expect": { "intent": "complaint_confusion", "responseIncludes": ["Tienes razón"] } }
+      ]
+    },
+    {
+      "name": "human_help",
+      "steps": [
+        { "message": "asesor humano", "expect": { "intent": "human_help", "responseIncludes": ["asesor"] } }
+      ]
+    }
+  ]
+}
