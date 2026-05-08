@@ -1148,21 +1148,21 @@ tr.active td {
 }
 
 .chat-section-fullscreen {
-  min-height: calc(100vh - 126px);
+  min-height: calc(100vh - 110px);
 }
 
 .crm-panel {
-  min-height: min(72vh, 820px);
-  height: min(72vh, 820px);
+  min-height: min(78vh, 880px);
+  height: min(78vh, 880px);
 }
 
 .chat-shell-fullscreen {
-  min-height: calc(100vh - 126px) !important;
-  height: calc(100vh - 126px) !important;
+  min-height: calc(100vh - 110px) !important;
+  height: calc(100vh - 110px) !important;
 }
 
 .chat-workspace-fullscreen {
-  grid-template-columns: minmax(280px, 22%) minmax(0, 78%);
+  grid-template-columns: minmax(240px, 18%) minmax(0, 82%);
 }
 
 .crm-layout {
@@ -1313,7 +1313,7 @@ tr.active td {
 
 .chat-header,
 .chat-composer {
-  padding: 18px;
+  padding: 16px 18px;
 }
 
 .chat-header {
@@ -1380,7 +1380,7 @@ tr.active td {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 24px 22px;
+  padding: 28px 28px 24px;
   overflow-y: auto;
   background:
     linear-gradient(180deg, rgba(95, 141, 247, 0.04), rgba(255,255,255,0)),
@@ -1450,7 +1450,7 @@ tr.active td {
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  max-width: min(82%, 880px);
+  max-width: min(92%, 1080px);
 }
 
 .message-row.out .message-cluster {
@@ -2064,8 +2064,8 @@ tr.active td {
 
   .crm-panel,
   .chat-shell-fullscreen {
-    min-height: calc(100vh - 154px);
-    height: calc(100vh - 154px);
+    min-height: calc(100vh - 140px);
+    height: calc(100vh - 140px);
   }
 
   .conversation-sidebar {
@@ -2176,8 +2176,8 @@ tr.active td {
   .crm-panel,
   .chat-shell-fullscreen,
   .chat-section-fullscreen {
-    min-height: calc(100vh - 184px);
-    height: calc(100vh - 184px);
+    min-height: calc(100vh - 172px);
+    height: calc(100vh - 172px);
   }
 
   .chat-list-panel,
