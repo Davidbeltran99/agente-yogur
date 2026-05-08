@@ -105,8 +105,8 @@ function construirSaludoNatural(nombreCliente = "") {
 
 function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
   return customerName
-    ? `¡Hola ${customerName}! 😊\nSoy Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`
-    : "Hola 😊\nSoy Abi, la asistente virtual de Tellolac.\nSi quieres, te ayudo con productos, precios y pedidos.\n\n¿Me compartes tu nombre para atenderte mejor?";
+    ? `¡Hola ${customerName}! 😊\nMi nombre es Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`
+    : "Hola 😊\nMi nombre es Abi, la asistente virtual de Tellolac.\nSi quieres, te ayudo con productos, precios y pedidos.\n\n¿Me compartes tu nombre para atenderte mejor?";
 }
 
 function construirLineasCatalogo(featuredProducts = []) {
@@ -212,7 +212,7 @@ function construirTituloAmbiguo(input) {
 }
 
 function construirRespuestaIdentidad() {
-  return "Soy Abi 😊, la asistente virtual de Tellolac. Te ayudo con productos, precios y pedidos.";
+  return "Soy Abi 😊, la asistente virtual de Tellolac. Mi nombre es Abi y te ayudo con productos, precios y pedidos.";
 }
 
 function construirRespuestaDespedida() {
@@ -250,7 +250,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
 
   if (evaluacion.catalogStatus === "not_found") {
     return [
-      "No encontré ese producto tal cual en el catálogo 😕",
+      "No encontré ese producto en el catálogo 😕",
       listaProductosDisponibles,
       `Si quieres, aquí puedes verlo completo: ${CATALOG_URL}`
     ].filter(Boolean).join("\n\n");
@@ -281,13 +281,16 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     if (evaluacion.faltantes?.includes("direccion") && productos.length) {
       return [
         construirSaludoNatural(nombreCliente),
-        pickVariant(`${nombreCliente}-${productos[0]?.producto || "direccion"}`, [
-          "Ya te separé eso 😊 ¿Me compartes la dirección para enviártelo?",
-          "Perfecto, ya tengo el producto ✨ Ahora pásame la dirección para el envío.",
+        productos.length > 1 ? "Te agrego:" : null,
+        detalle,
+        pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
+        pickVariant(`${nombreCliente}-${productos[0]?.producto || "direccion"}-${productos.length}`, [
+          "¿A qué dirección te enviamos el pedido?",
+          "Perfecto, ya tengo el pedido ✨ Ahora pásame la dirección para el envío.",
           "Súper 😊 Solo me falta la dirección para dejarlo listo."
         ]),
         "Ejemplo: Calle 10 #20-30, Barrio Centro"
-      ].join("\n");
+      ].filter(Boolean).join("\n\n");
     }
 
     if (evaluacion.faltantes?.includes("metodo_pago") && productos.length) {

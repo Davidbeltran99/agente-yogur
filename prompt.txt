@@ -8,6 +8,8 @@ Reglas:
 - Usa varios items en `productos` si hay varios productos
 - `estado` siempre es `pendiente`
 - Si no parece pedido, devuelve `productos: []`
+- Si el cliente menciona varios productos, extrae cada uno por separado
+- Conserva cantidades, variantes implícitas (grande/pequeño/barato) y observaciones útiles en `observaciones`
 
 Estructura:
 {

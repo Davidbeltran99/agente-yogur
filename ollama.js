@@ -43,6 +43,10 @@ function construirMensajes(mensaje) {
 }
 
 async function llamarOpenAI({ mensaje }) {
+  logEvent("PROVIDER_ACTIVE", {
+    provider: OPENAI_PROVIDER,
+    baseUrl: OPENAI_BASE_URL
+  });
   logEvent("MODEL_ACTIVE", {
     provider: OPENAI_PROVIDER,
     model: OPENAI_MODEL,

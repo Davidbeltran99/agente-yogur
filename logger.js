@@ -6,6 +6,7 @@ const ALLOWED_EVENTS = new Set([
   "whatsapp_send_error",
   "owner_notify_error",
   "MODEL_ACTIVE",
+  "PROVIDER_ACTIVE",
   "model_used",
   "runtime_config_snapshot",
   "runtime_config_warning",

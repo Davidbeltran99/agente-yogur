@@ -1243,7 +1243,7 @@ function renderCloseDaySummary() {
   if (!hasOrders) {
     closeDaySummary.innerHTML = `
       <div class="modal-empty-state">
-        ${renderEmptyState({ iconName: "file-text", title: "No hay pedidos activos para cerrar hoy", copy: "Cuando existan pedidos del día, aquí verás el resumen antes de confirmar el cierre." })}
+        ${renderEmptyState({ iconName: "file-text", title: "No hay pedidos activos para cerrar hoy.", copy: "Cuando existan pedidos del día, aquí verás el resumen antes de confirmar el cierre." })}
       </div>
     `;
     return;
