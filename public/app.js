@@ -1,11 +1,11 @@
 const statusFilter = document.getElementById("statusFilter");
-const refreshButton = document.getElementById("refreshButton");
 const logoutButton = document.getElementById("logoutButton");
 const closeDayButton = document.getElementById("closeDayButton");
 const ordersTableBody = document.getElementById("ordersTableBody");
 const orderDetail = document.getElementById("orderDetail");
 const tableMeta = document.getElementById("tableMeta");
 const feedback = document.getElementById("feedback");
+const ordersAutoRefreshMeta = document.getElementById("ordersAutoRefreshMeta");
 
 const conversationMeta = document.getElementById("conversationMeta");
 const conversationList = document.getElementById("conversationList");
@@ -32,7 +32,9 @@ const closeDaySummary = document.getElementById("closeDaySummary");
 const closeModalButton = document.getElementById("closeModalButton");
 const cancelCloseDayButton = document.getElementById("cancelCloseDayButton");
 const confirmCloseDayButton = document.getElementById("confirmCloseDayButton");
-const navLinks = Array.from(document.querySelectorAll(".nav-link[data-target]"));
+const navLinks = Array.from(document.querySelectorAll(".nav-link[data-section]"));
+const sectionViews = Array.from(document.querySelectorAll(".panel-view[data-view]"));
+const tableWrap = document.querySelector(".table-wrap");
 const saasShell = document.querySelector(".saas-shell");
 const sidebarToggle = document.getElementById("sidebarToggle");
 const sidebarBackdrop = document.getElementById("sidebarBackdrop");
@@ -46,6 +48,8 @@ const STATUS_OPTIONS = [
 
 const PANEL_LOGIN_PATH = window.__PANEL_LOGIN_PATH__ || "/portal";
 const SIDEBAR_STORAGE_KEY = "sidebarCollapsed";
+const ACTIVE_SECTION_STORAGE_KEY = "activeSection";
+const ORDERS_REFRESH_MS = 8000;
 const MOBILE_LAYOUT = window.matchMedia("(max-width: 1100px)");
 let orders = [];
 let dashboardSummary = null;
@@ -60,6 +64,12 @@ let sessionTimeoutHandle = null;
 let finalizeModalOpen = false;
 let sidebarCollapsed = false;
 let mobileSidebarOpen = false;
+let activeSection = "dashboard";
+let lastOrdersSnapshot = new Map();
+let lastOrdersSyncAt = null;
+let ordersAutoRefreshHandle = null;
+let ordersRefreshMetaHandle = null;
+let ordersPollingInFlight = false;
 
 function formatDate(value) {
   if (!value) return "-";
@@ -119,9 +129,26 @@ function getStoredSidebarPreference() {
   }
 }
 
+function getStoredActiveSection() {
+  try {
+    const stored = window.localStorage.getItem(ACTIVE_SECTION_STORAGE_KEY);
+    return navLinks.some((link) => link.dataset.section === stored) ? stored : "dashboard";
+  } catch (_error) {
+    return "dashboard";
+  }
+}
+
 function storeSidebarPreference() {
   try {
     window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
+  } catch (_error) {
+    // noop
+  }
+}
+
+function storeActiveSection() {
+  try {
+    window.localStorage.setItem(ACTIVE_SECTION_STORAGE_KEY, activeSection);
   } catch (_error) {
     // noop
   }
@@ -169,6 +196,119 @@ function initSidebarState() {
   sidebarCollapsed = getStoredSidebarPreference();
   mobileSidebarOpen = false;
   syncSidebarState();
+}
+
+function updateOrdersRefreshMeta() {
+  if (!ordersAutoRefreshMeta) {
+    return;
+  }
+
+  if (!lastOrdersSyncAt) {
+    ordersAutoRefreshMeta.textContent = "Actualizando pedidos automáticamente...";
+    return;
+  }
+
+  const diffSeconds = Math.max(Math.round((Date.now() - lastOrdersSyncAt) / 1000), 0);
+  if (diffSeconds < 5) {
+    ordersAutoRefreshMeta.textContent = "Actualizado hace unos segundos";
+  } else if (diffSeconds < 60) {
+    ordersAutoRefreshMeta.textContent = `Actualizado hace ${diffSeconds}s`;
+  } else {
+    ordersAutoRefreshMeta.textContent = `Actualizado hace ${Math.round(diffSeconds / 60)} min`;
+  }
+}
+
+function showSection(sectionName) {
+  activeSection = navLinks.some((link) => link.dataset.section === sectionName) ? sectionName : "dashboard";
+  storeActiveSection();
+
+  navLinks.forEach((link) => {
+    const isActive = link.dataset.section === activeSection;
+    link.classList.toggle("active", isActive);
+    link.classList.toggle("is-active", isActive);
+  });
+
+  sectionViews.forEach((view) => {
+    const isVisible = view.dataset.view === activeSection;
+    view.classList.toggle("is-hidden", !isVisible);
+    view.toggleAttribute("hidden", !isVisible);
+  });
+}
+
+function initSectionState() {
+  showSection(getStoredActiveSection());
+}
+
+function getOrderSnapshot(orderList) {
+  return new Map((orderList || []).map((order) => [order.id, JSON.stringify({
+    estado: order.estado,
+    total: Number(order.total || 0),
+    resumenItems: formatOrderItemsSummary(order)
+  })]));
+}
+
+function captureTablePosition() {
+  if (!tableWrap) {
+    return null;
+  }
+
+  return { top: tableWrap.scrollTop, left: tableWrap.scrollLeft };
+}
+
+function restoreTablePosition(position) {
+  if (!tableWrap || !position) {
+    return;
+  }
+
+  tableWrap.scrollTop = position.top;
+  tableWrap.scrollLeft = position.left;
+}
+
+function notifyOrderChanges(nextOrders, previousSnapshot) {
+  const nextSnapshot = getOrderSnapshot(nextOrders);
+  const previousIds = new Set(previousSnapshot.keys());
+  const newOrders = [];
+  let statusChanged = false;
+
+  for (const order of nextOrders) {
+    if (!previousSnapshot.has(order.id)) {
+      newOrders.push(order);
+      continue;
+    }
+
+    if (previousSnapshot.get(order.id) !== nextSnapshot.get(order.id)) {
+      statusChanged = true;
+    }
+
+    previousIds.delete(order.id);
+  }
+
+  lastOrdersSnapshot = nextSnapshot;
+
+  if (newOrders.length) {
+    showToast(newOrders.length === 1 ? "Nuevo pedido recibido" : `${newOrders.length} pedidos nuevos recibidos`, "success");
+  } else if (statusChanged) {
+    showToast("Pedidos actualizados automáticamente.", "info");
+  }
+}
+
+function startOrdersAutoRefresh() {
+  stopOrdersAutoRefresh();
+  ordersAutoRefreshHandle = window.setInterval(() => {
+    loadOrders({ silent: true, source: "poll" });
+  }, ORDERS_REFRESH_MS);
+  ordersRefreshMetaHandle = window.setInterval(updateOrdersRefreshMeta, 1000);
+}
+
+function stopOrdersAutoRefresh() {
+  if (ordersAutoRefreshHandle) {
+    window.clearInterval(ordersAutoRefreshHandle);
+    ordersAutoRefreshHandle = null;
+  }
+  if (ordersRefreshMetaHandle) {
+    window.clearInterval(ordersRefreshMetaHandle);
+    ordersRefreshMetaHandle = null;
+  }
 }
 
 function scheduleSessionTimeout(expiresAt) {
@@ -275,10 +415,44 @@ function renderKPIs(summary) {
   kpiDelivered.textContent = String(stats.delivered || 0);
 }
 
+function getTopProductSummary(orderList = []) {
+  const counts = new Map();
+
+  for (const order of orderList) {
+    for (const item of order.items || []) {
+      const label = [item.producto || "Producto", item.sabor || null].filter(Boolean).join(" ");
+      counts.set(label, (counts.get(label) || 0) + Number(item.cantidad || 0));
+    }
+  }
+
+  const [label, total] = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0] || [];
+  return label ? `${label} · ${total} und` : "Sin datos suficientes";
+}
+
+function getClosureTotals(days) {
+  const now = Date.now();
+  return historyClosures.reduce((sum, closure) => {
+    const createdAt = new Date(closure.createdAt).getTime();
+    if (!createdAt || Number.isNaN(createdAt)) {
+      return sum;
+    }
+
+    const ageDays = (now - createdAt) / (1000 * 60 * 60 * 24);
+    if (ageDays <= days) {
+      return sum + Number(closure.totalSales || closure.summary?.stats?.totalSales || 0);
+    }
+
+    return sum;
+  }, 0);
+}
+
 function renderReports() {
   const stats = dashboardSummary?.stats || {};
   const payments = dashboardSummary?.paymentBreakdown || [];
   const latestClosure = historyClosures[0] || null;
+  const topProduct = getTopProductSummary(orders);
+  const weeklyTotal = getClosureTotals(7) + Number(stats.totalSales || 0);
+  const monthlyTotal = getClosureTotals(30) + Number(stats.totalSales || 0);
 
   reportsGrid.innerHTML = `
     <article class="report-card">
@@ -299,6 +473,27 @@ function renderReports() {
       </div>
     </article>
     <article class="report-card">
+      <h3>Producto más vendido</h3>
+      <p class="report-copy">Lectura rápida del catálogo con mayor salida.</p>
+      <div class="report-stack">
+        <span class="metric-pill">${escapeHtml(topProduct)}</span>
+      </div>
+    </article>
+    <article class="report-card">
+      <h3>Total semanal</h3>
+      <p class="report-copy">Cierres recientes + operación activa.</p>
+      <div class="report-stack">
+        <span class="metric-pill">${formatCurrency(weeklyTotal)}</span>
+      </div>
+    </article>
+    <article class="report-card">
+      <h3>Total mensual</h3>
+      <p class="report-copy">Acumulado del último mes según historial.</p>
+      <div class="report-stack">
+        <span class="metric-pill">${formatCurrency(monthlyTotal)}</span>
+      </div>
+    </article>
+    <article class="report-card">
       <h3>Último cierre</h3>
       <p class="report-copy">Consulta rápida del último archivo histórico.</p>
       <div class="report-stack">
@@ -313,28 +508,44 @@ function renderSettings() {
   const summary = dashboardSummary?.stats || {};
   settingsGrid.innerHTML = `
     <article class="setting-card">
+      <h3>Estado de Abi</h3>
+      <p class="setting-copy">${healthState?.ok ? "Online" : "Sin respuesta"}</p>
+    </article>
+    <article class="setting-card">
+      <h3>Negocio</h3>
+      <p class="setting-copy">Tellolac AI · Panel comercial</p>
+    </article>
+    <article class="setting-card">
+      <h3>Versión del sistema</h3>
+      <p class="setting-copy">${escapeHtml(healthState?.appVersion || "local")}</p>
+    </article>
+    <article class="setting-card">
       <h3>WhatsApp</h3>
       <p class="setting-copy">${healthState?.whatsappEnabled ? "Activo" : "Simulado / desactivado"}</p>
+    </article>
+    <article class="setting-card">
+      <h3>Google Sheets</h3>
+      <p class="setting-copy">${escapeHtml(healthState?.sheetsRole || "disabled")}</p>
+    </article>
+    <article class="setting-card">
+      <h3>Base de datos</h3>
+      <p class="setting-copy">${escapeHtml(healthState?.sourceOfTruth || "sqlite")}</p>
     </article>
     <article class="setting-card">
       <h3>Autenticación panel</h3>
       <p class="setting-copy">${healthState?.panelAuthEnabled ? "Protegido con login" : "Modo abierto"}</p>
     </article>
     <article class="setting-card">
+      <h3>Variables visibles</h3>
+      <p class="setting-copy">WHATSAPP_ENABLED=${healthState?.whatsappEnabled ? "true" : "false"} · SHEETS_ROLE=${escapeHtml(healthState?.sheetsRole || "disabled")}</p>
+    </article>
+    <article class="setting-card">
       <h3>Catálogo activo</h3>
       <p class="setting-copy">${healthState?.catalogProducts || 0} producto(s) sincronizados</p>
     </article>
     <article class="setting-card">
-      <h3>Fuente de verdad</h3>
-      <p class="setting-copy">${escapeHtml(healthState?.sourceOfTruth || "sqlite")}</p>
-    </article>
-    <article class="setting-card">
       <h3>Pedidos visibles</h3>
       <p class="setting-copy">${summary.totalOrders || 0} pedido(s) activos hoy</p>
-    </article>
-    <article class="setting-card">
-      <h3>Respaldo Sheets</h3>
-      <p class="setting-copy">${escapeHtml(healthState?.sheetsRole || "disabled")}</p>
     </article>
   `;
 }
@@ -680,13 +891,27 @@ function closeFinalizeModal() {
   resetFinalizeModalState();
 }
 
-async function loadOrders() {
+async function loadOrders(options = {}) {
+  const { silent = false, source = "manual" } = options;
   const status = statusFilter.value;
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
-  tableMeta.textContent = "Cargando pedidos...";
+  const previousSnapshot = lastOrdersSnapshot;
+  const tablePosition = captureTablePosition();
+
+  if (ordersPollingInFlight && source === "poll") {
+    return;
+  }
+
+  if (source === "poll") {
+    ordersPollingInFlight = true;
+  }
+
+  if (!silent) {
+    tableMeta.textContent = "Cargando pedidos...";
+  }
 
   try {
-    const response = await fetch(`/orders${query}`);
+    const response = await fetch(`/orders${query}`, { cache: "no-store" });
     const payload = await response.json();
 
     if (response.status === 401) {
@@ -713,13 +938,29 @@ async function loadOrders() {
     renderDetail();
     renderConversationList();
     renderChatHeader();
+    restoreTablePosition(tablePosition);
+
+    if (silent && previousSnapshot.size) {
+      notifyOrderChanges(orders, previousSnapshot);
+    } else {
+      lastOrdersSnapshot = getOrderSnapshot(orders);
+    }
+
+    lastOrdersSyncAt = Date.now();
+    updateOrdersRefreshMeta();
   } catch (error) {
-    orders = [];
-    selectedOrderId = null;
-    tableMeta.textContent = "No se pudieron cargar pedidos";
-    ordersTableBody.innerHTML = '<tr><td colspan="7" class="empty">No fue posible cargar los pedidos.</td></tr>';
-    orderDetail.innerHTML = `<div class="detail-empty"><p>${escapeHtml(error.message)}</p></div>`;
-    showFeedback(error.message, "error");
+    if (!silent) {
+      orders = [];
+      selectedOrderId = null;
+      tableMeta.textContent = "No se pudieron cargar pedidos";
+      ordersTableBody.innerHTML = '<tr><td colspan="7" class="empty">No fue posible cargar los pedidos.</td></tr>';
+      orderDetail.innerHTML = `<div class="detail-empty"><p>${escapeHtml(error.message)}</p></div>`;
+      showFeedback(error.message, "error");
+    }
+  } finally {
+    if (source === "poll") {
+      ordersPollingInFlight = false;
+    }
   }
 }
 
@@ -948,7 +1189,6 @@ async function confirmCloseDay() {
 }
 
 async function loadDashboard() {
-  refreshButton.disabled = true;
   closeDayButton.disabled = true;
   hideFeedback();
   hideChatFeedback();
@@ -957,7 +1197,6 @@ async function loadDashboard() {
   try {
     await Promise.all([loadOrders(), loadConversations(), loadHistory(), loadHealth()]);
   } finally {
-    refreshButton.disabled = false;
     closeDayButton.disabled = false;
   }
 }
@@ -1002,14 +1241,10 @@ document.addEventListener("click", (event) => {
     return;
   }
 
-  const navLink = event.target.closest(".nav-link[data-target]");
+  const navLink = event.target.closest(".nav-link[data-section]");
   if (navLink) {
-    const target = document.getElementById(navLink.dataset.target);
-    if (target) {
-      navLinks.forEach((link) => link.classList.toggle("active", link === navLink));
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
-      closeMobileSidebar();
-    }
+    showSection(navLink.dataset.section);
+    closeMobileSidebar();
   }
 });
 
@@ -1023,10 +1258,6 @@ MOBILE_LAYOUT.addEventListener("change", () => {
 statusFilter.addEventListener("change", () => {
   hideFeedback();
   loadOrders();
-});
-
-refreshButton.addEventListener("click", () => {
-  loadDashboard();
 });
 
 closeDayButton?.addEventListener("click", openFinalizeModal);
@@ -1052,6 +1283,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 logoutButton?.addEventListener("click", async () => {
+  stopOrdersAutoRefresh();
   try {
     await fetch("/auth/logout", { method: "POST" });
   } finally {
@@ -1059,13 +1291,18 @@ logoutButton?.addEventListener("click", async () => {
   }
 });
 
+window.addEventListener("beforeunload", stopOrdersAutoRefresh);
+
 chatComposer.addEventListener("submit", sendChatMessage);
 
 initSidebarState();
+initSectionState();
+updateOrdersRefreshMeta();
 
 (async () => {
   const authenticated = await initSessionGuard();
   if (authenticated) {
-    loadDashboard();
+    await loadDashboard();
+    startOrdersAutoRefresh();
   }
 })();

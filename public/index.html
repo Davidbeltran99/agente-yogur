@@ -20,23 +20,23 @@
       </div>
 
       <nav class="sidebar-nav">
-        <button class="nav-link active" data-target="dashboardSection" title="Dashboard" aria-label="Dashboard">
+        <button class="nav-link active" data-section="dashboard" title="Dashboard" aria-label="Dashboard">
           <span class="nav-icon" aria-hidden="true">📊</span>
           <span class="nav-label">Dashboard</span>
         </button>
-        <button class="nav-link" data-target="ordersSection" title="Pedidos" aria-label="Pedidos">
+        <button class="nav-link" data-section="orders" title="Pedidos" aria-label="Pedidos">
           <span class="nav-icon" aria-hidden="true">🧾</span>
           <span class="nav-label">Pedidos</span>
         </button>
-        <button class="nav-link" data-target="historySection" title="Historial" aria-label="Historial">
+        <button class="nav-link" data-section="history" title="Historial" aria-label="Historial">
           <span class="nav-icon" aria-hidden="true">🗂️</span>
           <span class="nav-label">Historial</span>
         </button>
-        <button class="nav-link" data-target="reportsSection" title="Reportes" aria-label="Reportes">
+        <button class="nav-link" data-section="reports" title="Reportes" aria-label="Reportes">
           <span class="nav-icon" aria-hidden="true">📈</span>
           <span class="nav-label">Reportes</span>
         </button>
-        <button class="nav-link" data-target="settingsSection" title="Configuración" aria-label="Configuración">
+        <button class="nav-link" data-section="settings" title="Configuración" aria-label="Configuración">
           <span class="nav-icon" aria-hidden="true">⚙️</span>
           <span class="nav-label">Configuración</span>
         </button>
@@ -66,13 +66,12 @@
 
         <div class="header-actions">
           <span class="status-pill status-online">🟢 Abi Online</span>
-          <button id="refreshButton" class="secondary">Actualizar</button>
           <button id="closeDayButton" class="primary soft">📄 Finalizar Día</button>
           <button id="logoutButton" class="secondary ghost">Salir</button>
         </div>
       </header>
 
-      <section id="dashboardSection" class="section-block">
+      <section id="dashboardSection" class="section-block panel-view" data-view="dashboard">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Dashboard</p>
@@ -113,12 +112,13 @@
         </div>
       </section>
 
-      <section id="ordersSection" class="section-block">
+      <section id="ordersSection" class="section-block panel-view" data-view="orders">
         <div class="section-heading section-heading-split">
           <div>
             <p class="eyebrow">Pedidos</p>
             <h3>Operación comercial</h3>
             <p id="tableMeta" class="section-copy">Cargando pedidos...</p>
+            <p id="ordersAutoRefreshMeta" class="helper-text auto-refresh-meta">Actualizando pedidos automáticamente...</p>
           </div>
           <label class="filter compact-filter">
             <span>Estado</span>
@@ -172,10 +172,10 @@
         </div>
       </section>
 
-      <section class="section-block">
+      <section class="section-block panel-view" data-view="dashboard">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Conversación</p>
+            <p class="eyebrow">Acceso rápido</p>
             <h3>CRM de Abi</h3>
             <p id="conversationMeta" class="section-copy">Cargando conversaciones...</p>
           </div>
@@ -216,7 +216,7 @@
         </section>
       </section>
 
-      <section id="historySection" class="section-block">
+      <section id="historySection" class="section-block panel-view" data-view="history">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Historial</p>
@@ -244,7 +244,7 @@
         </div>
       </section>
 
-      <section id="reportsSection" class="section-block">
+      <section id="reportsSection" class="section-block panel-view" data-view="reports">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Reportes</p>
@@ -256,7 +256,7 @@
         <div id="reportsGrid" class="reports-grid"></div>
       </section>
 
-      <section id="settingsSection" class="section-block">
+      <section id="settingsSection" class="section-block panel-view" data-view="settings">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Configuración</p>

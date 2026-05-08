@@ -238,7 +238,8 @@ h1, h2, h3, p {
 }
 
 .nav-link:hover,
-.nav-link.active {
+.nav-link.active,
+.nav-link.is-active {
   background: var(--surface-strong);
   border-color: rgba(78, 124, 240, 0.16);
   box-shadow: 0 12px 28px rgba(60, 84, 124, 0.08);
@@ -375,6 +376,14 @@ h1, h2, h3, p {
 .section-block {
   display: grid;
   gap: 16px;
+}
+
+.panel-view.is-hidden {
+  display: none !important;
+}
+
+.auto-refresh-meta {
+  margin-top: 6px;
 }
 
 .section-heading {
