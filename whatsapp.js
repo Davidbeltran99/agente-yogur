@@ -78,6 +78,10 @@ function construirLineaCatalogoSugerido() {
 }
 
 function formatearMoneda(valor) {
+  if (valor === null || valor === undefined || valor === "") {
+    return null;
+  }
+
   const numero = Number(valor);
   if (!Number.isFinite(numero)) {
     return null;
@@ -258,10 +262,28 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   }
 
   if (evaluacion.priceValidation === "missing_price") {
+    if (productos.length) {
+      return [
+        construirSaludoNatural(nombreCliente),
+        "Te entendí este pedido:",
+        detalle,
+        "¿Me compartes la dirección y el método de pago para dejarlo listo?"
+      ].filter(Boolean).join("\n\n");
+    }
+
     return "No alcancé a confirmar el precio exacto. ¿Me lo envías como aparece en el catálogo para dejarlo bien?";
   }
 
   if (evaluacion.catalogStatus === "not_found") {
+    if (productos.length) {
+      return [
+        construirSaludoNatural(nombreCliente),
+        "Te entendí este pedido:",
+        detalle,
+        "¿Me compartes la dirección y el método de pago para dejarlo listo?"
+      ].filter(Boolean).join("\n\n");
+    }
+
     return [
       "Quiero ayudarte a pedirlo bien 😊",
       listaProductosDisponibles,
