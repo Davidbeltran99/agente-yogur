@@ -77,10 +77,36 @@ function construirLineaCatalogoSugerido() {
   return `También puedes ver todo el catálogo aquí:\n${CATALOG_URL}`;
 }
 
+function formatearMoneda(valor) {
+  const numero = Number(valor);
+  if (!Number.isFinite(numero)) {
+    return null;
+  }
+
+  return `$${Math.round(numero).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".")}`;
+}
+
+function pickVariant(seed, variants = []) {
+  if (!variants.length) {
+    return "";
+  }
+
+  const source = String(seed || "abi");
+  const hash = Array.from(source).reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  return variants[hash % variants.length];
+}
+
+function construirSaludoNatural(nombreCliente = "") {
+  const normalized = String(nombreCliente || "").trim();
+  return normalized
+    ? pickVariant(normalized, [`Perfecto ${normalized} 😊`, `Claro ${normalized} 😊`, `Listo ${normalized} 😊`])
+    : pickVariant("sin-nombre", ["Perfecto 😊", "Claro 😊", "Listo 😊"]);
+}
+
 function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
   return customerName
-    ? `¡Hola ${customerName}! 😊\nSoy Abi, tu asistente de Tellolac AI.\n\nCuéntame en qué te puedo ayudar hoy.`
-    : "Hola 😊\nMi nombre es Abi, soy tu asistente virtual de Tellolac.\n\nEstoy aquí para ayudarte con información de productos, precios y pedidos 🥛✨\n\n¿Me regalas tu nombre para atenderte mejor?";
+    ? `¡Hola ${customerName}! 😊\nSoy Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`
+    : "Hola 😊\nSoy Abi, la asistente virtual de Tellolac.\nSi quieres, te ayudo con productos, precios y pedidos.\n\n¿Me compartes tu nombre para atenderte mejor?";
 }
 
 function construirLineasCatalogo(featuredProducts = []) {
@@ -101,12 +127,12 @@ function construirLineasCatalogo(featuredProducts = []) {
 }
 
 function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [] } = {}) {
-  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+  const saludo = construirSaludoNatural(customerName);
   const lines = construirLineasCatalogo(featuredProducts);
 
   return [
     saludo,
-    "Estos son algunos de nuestros productos más pedidos:",
+    "Estos son algunos de los productos que más nos piden:",
     lines.join("\n") || null,
     `También puedes ver el catálogo completo aquí:\n${CATALOG_URL}`,
     "¿Te gustaría pedir alguno? ✨"
@@ -117,20 +143,11 @@ function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [
   const lines = construirLineasCatalogo(featuredProducts);
   return [
     `Mucho gusto, ${customerName} 😊`,
-    "Te comparto nuestro portafolio para que conozcas los productos:",
+    "Te dejo una muestra rápida de nuestro portafolio:",
     lines.join("\n") || null,
     `Catálogo completo:\n${CATALOG_URL}`,
-    "Si quieres pedir, me escribes producto, dirección y método de pago ✨"
+    "Cuando quieras pedir, solo dime el producto y yo te voy guiando ✨"
   ].filter(Boolean).join("\n\n");
-}
-
-function formatearMoneda(valor) {
-  const numero = Number(valor);
-  if (!Number.isFinite(numero)) {
-    return null;
-  }
-
-  return `$${Math.round(numero).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".")}`;
 }
 
 function construirDetalleProductos(productos = []) {
@@ -195,21 +212,26 @@ function construirTituloAmbiguo(input) {
 }
 
 function construirRespuestaIdentidad() {
-  return "Soy Abi 😊, tu asistente virtual de Tellolac. Te puedo ayudar con productos, precios y pedidos.";
+  return "Soy Abi 😊, la asistente virtual de Tellolac. Te ayudo con productos, precios y pedidos.";
 }
 
 function construirRespuestaDespedida() {
-  return "Con mucho gusto 😊\nQuedamos atentos a tu pedido.\n¡Que tengas un excelente día! ✨";
+  return "Con gusto 😊\nQuedo atenta por aquí si quieres pedir algo más. ✨";
 }
 
 function construirRespuestaConfirmacion({ hasDraftContext = false } = {}) {
   return hasDraftContext
-    ? "Perfecto 😊 Cuando quieras seguimos con tu pedido."
-    : "Perfecto 😊 Cuando quieras te ayudo con productos, precios o pedidos.";
+    ? pickVariant("draft", ["Perfecto 😊 Seguimos con tu pedido cuando quieras.", "Listo 😊 Aquí sigo para terminar tu pedido."])
+    : pickVariant("general", ["Perfecto 😊 Cuando quieras te ayudo con productos o pedidos.", "Claro 😊 Si quieres te muestro productos o te ayudo a pedir."]);
 }
 
 function construirRespuestaCasual() {
-  return "Claro 😊 Estoy aquí para ayudarte con productos, precios o pedidos.";
+  return pickVariant("casual", [
+    "Claro 😊 Estoy aquí para ayudarte con productos, precios o pedidos.",
+    "Sí 😊 Cuéntame qué necesitas y lo revisamos juntas/os.",
+    "De una 😊 Si quieres, vemos productos o te ayudo a armar el pedido.",
+    "Perfecto 😊 Dime qué te provoca y te voy guiando."
+  ]);
 }
 
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
@@ -219,16 +241,16 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   const nombreCliente = String(pedido?.cliente || "").trim();
 
   if (evaluacion.modelError) {
-    return "Tuve un problema al procesar el mensaje 😕 ¿me lo puedes reenviar?";
+    return "Se me cruzó el mensaje un momento 😕 ¿me lo puedes reenviar?";
   }
 
   if (evaluacion.priceValidation === "missing_price") {
-    return "No pude confirmar el precio del producto. ¿Me ayudas enviándome el nombre exacto del catálogo?";
+    return "No alcancé a confirmar el precio exacto. ¿Me lo envías como aparece en el catálogo para dejarlo bien?";
   }
 
   if (evaluacion.catalogStatus === "not_found") {
     return [
-      "No encontré ese producto en el catálogo 😕",
+      "No encontré ese producto tal cual en el catálogo 😕",
       listaProductosDisponibles,
       `Si quieres, aquí puedes verlo completo: ${CATALOG_URL}`
     ].filter(Boolean).join("\n\n");
@@ -237,43 +259,70 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   if (evaluacion.catalogStatus === "ambiguous") {
     const firstAmbiguity = (evaluacion.ambiguousProducts || [])[0] || null;
     const titulo = construirTituloAmbiguo(firstAmbiguity?.input);
-    const options = (firstAmbiguity?.options || []).slice(0, 4);
-    const ambiguityLines = options
+    const ambiguityOptions = (firstAmbiguity?.options || []).slice(0, 4);
+    const ambiguityLines = ambiguityOptions
       .map((option, index) => construirLineaOpcionAmbigua(option, index))
       .filter(Boolean)
       .join("\n");
-    const optionNumbers = options.map((_, index) => index + 1).join(" o ");
+    const optionNumbers = ambiguityOptions.map((_, index) => index + 1).join(" o ");
 
     return [
-      `Encontré varias opciones para “${titulo}” 😊`,
+      pickVariant(titulo, [
+        `😊 Creo que te refieres a alguno de estos productos para “${titulo}”:`,
+        `😊 Puede que estés buscando alguno de estos productos para “${titulo}”:`,
+        `😊 Te encontré estas opciones parecidas para “${titulo}”:`
+      ]),
       ambiguityLines || null,
-      `Responde con el número de la opción: ${optionNumbers}.`
+      `¿Cuál deseas pedir? Puedes responder ${optionNumbers}.`
     ].filter(Boolean).join("\n\n");
   }
 
   if (!evaluacion.esValido) {
     if (evaluacion.faltantes?.includes("direccion") && productos.length) {
       return [
-        `¡Casi listo${nombreCliente ? `, ${nombreCliente}` : ""} 😊!`,
-        "Solo me falta tu dirección de entrega para completar el pedido.",
-        "Escríbela así:",
-        "Dirección: Calle 10 #20-30, Barrio Centro"
+        construirSaludoNatural(nombreCliente),
+        pickVariant(`${nombreCliente}-${productos[0]?.producto || "direccion"}`, [
+          "Ya te separé eso 😊 ¿Me compartes la dirección para enviártelo?",
+          "Perfecto, ya tengo el producto ✨ Ahora pásame la dirección para el envío.",
+          "Súper 😊 Solo me falta la dirección para dejarlo listo."
+        ]),
+        "Ejemplo: Calle 10 #20-30, Barrio Centro"
       ].join("\n");
+    }
+
+    if (evaluacion.faltantes?.includes("metodo_pago") && productos.length) {
+      return [
+        construirSaludoNatural(nombreCliente),
+        detalle,
+        pickVariant(`${nombreCliente}-${pedido.total || "pago"}`, [
+          "¿Cómo prefieres pagar: efectivo o transferencia?",
+          "¿Te queda mejor pagar en efectivo o por transferencia?",
+          "Cuéntame el método de pago y te lo dejo listo 😊"
+        ])
+      ].filter(Boolean).join("\n\n");
     }
 
     const faltantes = evaluacion.faltantes.map(formatearFaltante).join(", ");
 
     return [
-      "Voy bien con tu pedido 😊",
+      construirSaludoNatural(nombreCliente),
       detalle,
       pedido.metodo_pago ? `💳 Pago: ${pedido.metodo_pago}` : null,
       pedido.direccion ? `📍 Dirección: ${pedido.direccion}` : null,
-      `Solo me falta confirmar: ${faltantes}.`
+      pickVariant(`${nombreCliente}-${faltantes}`, [
+        `Para dejarlo listo solo me falta: ${faltantes}.`,
+        `Voy bien 😊 Solo necesito esto para terminarlo: ${faltantes}.`,
+        `Ya casi queda. Solo confírmame: ${faltantes}.`
+      ])
     ].filter(Boolean).join("\n");
   }
 
   return [
-    `Perfecto${nombreCliente ? ` ${nombreCliente}` : ""} 😊 Ya registré tu pedido:`,
+    pickVariant(`${nombreCliente}-${pedido.total || "pedido"}`, [
+      `${construirSaludoNatural(nombreCliente)} Ya te dejé el pedido registrado:`,
+      `${construirSaludoNatural(nombreCliente)} Tu pedido quedó listo en sistema:`,
+      `${construirSaludoNatural(nombreCliente)} Ya registré tu pedido:`
+    ]),
     null,
     detalle,
     null,
@@ -282,7 +331,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     null,
     pedido.total ? `Total: ${formatearMoneda(pedido.total)}` : null,
     null,
-    "En un momento te confirmamos el despacho 🚚"
+    pickVariant(`${nombreCliente}-${pedido.total}`, ["En un momento te confirmamos el despacho 🚚", "Ya te dejamos esto en curso 🚚", "Te confirmamos el despacho en un momento 🚚"])
   ].filter((line) => line !== null).join("\n");
 }
 

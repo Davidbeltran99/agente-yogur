@@ -4,6 +4,7 @@ const path = require("path");
 const { structuredLog } = require("./logger");
 
 const promptBase = fs.readFileSync(path.join(__dirname, "prompt.txt"), "utf-8");
+const OPENAI_PROVIDER = "openai";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 30000);
 const OPENAI_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS || 160);
@@ -42,7 +43,12 @@ function construirMensajes(mensaje) {
 }
 
 async function llamarOpenAI({ mensaje }) {
-  logEvent("model_used", { model: OPENAI_MODEL });
+  logEvent("MODEL_ACTIVE", {
+    provider: OPENAI_PROVIDER,
+    model: OPENAI_MODEL,
+    baseUrl: OPENAI_BASE_URL
+  });
+  logEvent("model_used", { provider: OPENAI_PROVIDER, model: OPENAI_MODEL, baseUrl: OPENAI_BASE_URL });
 
   const apiKey = (process.env.OPENAI_API_KEY || "").trim();
   if (!apiKey || apiKey === "tu_api_key") {
@@ -54,7 +60,7 @@ async function llamarOpenAI({ mensaje }) {
     {
       model: OPENAI_MODEL,
       temperature: OPENAI_TEMPERATURE,
-      max_tokens: OPENAI_MAX_TOKENS,
+      max_completion_tokens: OPENAI_MAX_TOKENS,
       response_format: { type: "json_object" },
       messages: construirMensajes(mensaje)
     },
@@ -76,11 +82,13 @@ async function procesarMensaje(mensaje) {
     return JSON.parse(limpiarRespuestaJSON(content));
   } catch (error) {
     const detalle = error.response?.data?.error?.message || error.response?.data?.error || error.message || "Error desconocido";
-    throw new Error(`Fallo procesando mensaje con openai/${OPENAI_MODEL}: ${detalle}`);
+    throw new Error(`Fallo procesando mensaje con ${OPENAI_PROVIDER}/${OPENAI_MODEL}: ${detalle}`);
   }
 }
 
 module.exports = {
   procesarMensaje,
-  OPENAI_MODEL
+  OPENAI_PROVIDER,
+  OPENAI_MODEL,
+  OPENAI_BASE_URL
 };

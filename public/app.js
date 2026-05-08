@@ -51,9 +51,9 @@ const sidebarToggle = document.getElementById("sidebarToggle");
 const sidebarBackdrop = document.getElementById("sidebarBackdrop");
 
 const STATUS_OPTIONS = [
-  { value: "pendiente", label: "Pendiente" },
-  { value: "en proceso", label: "En camino" },
-  { value: "entregado", label: "Entregado" },
+  { value: "pendiente", label: "🟡 Pendiente" },
+  { value: "en proceso", label: "🔵 En camino" },
+  { value: "entregado", label: "🟢 Entregado" },
   { value: "cancelado", label: "Cancelado" }
 ];
 
@@ -131,6 +131,40 @@ function formatCurrency(value) {
     currency: "COP",
     maximumFractionDigits: 0
   }).format(Number(value || 0));
+}
+
+function getStatusLabel(status) {
+  const labels = {
+    pendiente: "🟡 Pendiente",
+    "en proceso": "🔵 En camino",
+    entregado: "🟢 Entregado",
+    cancelado: "Cancelado"
+  };
+
+  return labels[status] || labels.pendiente;
+}
+
+function formatDateTimeStack(value) {
+  if (!value) {
+    return { date: "-", time: "-" };
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return { date: value, time: "-" };
+  }
+
+  return {
+    date: new Intl.DateTimeFormat("es-CO", { dateStyle: "medium" }).format(date),
+    time: new Intl.DateTimeFormat("es-CO", { hour: "2-digit", minute: "2-digit" }).format(date)
+  };
+}
+
+function getPaymentVariant(paymentMethod) {
+  const normalized = String(paymentMethod || "").toLowerCase();
+  if (normalized.includes("efectivo")) return "cash";
+  if (normalized.includes("transfer") || normalized.includes("nequi") || normalized.includes("davi")) return "digital";
+  return "neutral";
 }
 
 function escapeHtml(value) {
@@ -823,32 +857,62 @@ function renderOrders() {
     const badgeClass = order.estado.replace(/\s+/g, "-");
     const itemsSummary = formatOrderItemsSummary(order);
     const avatar = buildAvatarLabel(order);
+    const dateMeta = formatDateTimeStack(order.fechaRegistro);
+    const itemCount = Array.isArray(order.items) ? order.items.length : 0;
+    const statusLabel = getStatusLabel(order.estado);
+    const paymentVariant = getPaymentVariant(order.metodoPago);
 
     return `
       <tr data-order-id="${escapeHtml(order.id)}" class="${activeClass}">
         <td>
           <div class="customer-cell">
             <span class="customer-avatar">${escapeHtml(avatar)}</span>
-            <div>
+            <div class="order-cell-stack">
               <div class="customer-name">${escapeHtml(order.cliente || "Cliente sin nombre")}</div>
               <div class="customer-subline">${escapeHtml(order.telefono || "Sin teléfono")}</div>
+              <div class="inline-micro-meta">
+                <span class="mini-pill">${icon("message-circle", "ui-icon mini-icon")} Chat activo</span>
+              </div>
             </div>
           </div>
         </td>
         <td>
-          <div class="customer-name">${escapeHtml(itemsSummary)}</div>
-          <div class="customer-subline">${escapeHtml(order.direccion || "Sin dirección")}</div>
+          <div class="order-cell-stack order-main-cell">
+            <div class="cell-kicker">Producto</div>
+            <div class="customer-name">${escapeHtml(itemsSummary)}</div>
+            <div class="cell-inline-meta">
+              <span class="mini-pill">${icon("shopping-bag", "ui-icon mini-icon")} ${escapeHtml(String(itemCount || 1))} item(s)</span>
+            </div>
+            <div class="cell-kicker">Dirección</div>
+            <div class="customer-subline multiline-clamp">${escapeHtml(order.direccion || "Sin dirección")}</div>
+          </div>
         </td>
-        <td>${escapeHtml(formatDate(order.fechaRegistro))}</td>
-        <td><span class="payment-pill">${escapeHtml(order.metodoPago || "Sin definir")}</span></td>
-        <td><span class="total-pill">${escapeHtml(formatCurrency(order.total || 0))}</span></td>
-        <td><span class="badge ${badgeClass}">${escapeHtml(order.estadoLabel || order.estado)}</span></td>
+        <td>
+          <div class="order-cell-stack compact-gap">
+            <div class="cell-kicker">Ingreso</div>
+            <div class="customer-name">${escapeHtml(dateMeta.date)}</div>
+            <div class="customer-subline">${escapeHtml(dateMeta.time)}</div>
+          </div>
+        </td>
+        <td>
+          <div class="order-cell-stack compact-gap">
+            <div class="cell-kicker">Pago</div>
+            <span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "Sin definir")}</span>
+          </div>
+        </td>
+        <td>
+          <div class="order-cell-stack compact-gap">
+            <span class="total-pill">${icon("badge-check", "ui-icon mini-icon")} ${escapeHtml(formatCurrency(order.total || 0))}</span>
+            <div class="customer-subline">Pedido #${escapeHtml(order.id)}</div>
+          </div>
+        </td>
+        <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
         <td>
           <div class="row-actions">
-            <select data-status-select="${escapeHtml(order.id)}">
+            <select class="status-select" data-status-select="${escapeHtml(order.id)}">
               ${STATUS_OPTIONS.map((status) => `<option value="${status.value}" ${order.estado === status.value ? "selected" : ""}>${status.label}</option>`).join("")}
             </select>
-            <button class="primary" data-save-status="${escapeHtml(order.id)}">Guardar</button>
+            <button class="primary soft" data-save-status="${escapeHtml(order.id)}">Guardar</button>
           </div>
         </td>
       </tr>
@@ -866,41 +930,61 @@ function renderDetail() {
 
   const itemsHtml = (order.items || []).length
     ? order.items.map((item) => `
-        <div class="item-row">
-          <strong>${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))}</strong>
-          <div class="helper-text">Precio unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))}</div>
-          <div class="helper-text">Subtotal: ${escapeHtml(formatCurrency(item.subtotal || 0))}</div>
+        <div class="item-row premium-item-row">
+          <div>
+            <strong>${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))}</strong>
+            <div class="helper-text">Precio unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))}</div>
+          </div>
+          <span class="mini-total-pill">${escapeHtml(formatCurrency(item.subtotal || 0))}</span>
         </div>
       `).join("")
     : "<p class=\"helper-text\">No hay detalle de productos disponible.</p>";
 
+  const statusLabel = getStatusLabel(order.estado);
+  const paymentVariant = getPaymentVariant(order.metodoPago);
+
   orderDetail.innerHTML = `
     <div class="detail-grid">
+      <div class="detail-card detail-hero-card">
+        <div class="detail-hero-top">
+          <div>
+            <p class="eyebrow">Pedido activo</p>
+            <h3>${escapeHtml(order.cliente || "Cliente sin nombre")}</h3>
+            <p class="helper-text">${escapeHtml(order.telefono || "Sin teléfono registrado")}</p>
+          </div>
+          <div class="detail-total-highlight">
+            <span>Total</span>
+            <strong>${escapeHtml(formatCurrency(order.total || 0))}</strong>
+          </div>
+        </div>
+        <div class="detail-chip-row">
+          <span class="badge ${order.estado.replace(/\s+/g, "-")}">${escapeHtml(statusLabel)}</span>
+          <span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "Sin definir")}</span>
+          <span class="mini-pill">${icon("clock-3", "ui-icon mini-icon")} ${escapeHtml(formatDate(order.fechaRegistro))}</span>
+        </div>
+      </div>
       <div class="detail-card">
-        <h3>Resumen</h3>
-        <div class="meta-list">
-          <div class="meta-item"><span>Cliente</span>${escapeHtml(order.cliente || "Cliente sin nombre")}</div>
-          <div class="meta-item"><span>Teléfono</span>${escapeHtml(order.telefono || "-")}</div>
+        <h3>${icon("shopping-bag")} Resumen</h3>
+        <div class="meta-list premium-meta-list">
           <div class="meta-item"><span>Pedido</span>${escapeHtml(formatOrderItemsSummary(order))}</div>
-          <div class="meta-item"><span>Total</span>${escapeHtml(formatCurrency(order.total || 0))}</div>
-          <div class="meta-item"><span>Estado</span>${escapeHtml(order.estadoLabel || order.estado)}</div>
+          <div class="meta-item"><span>ID</span>${escapeHtml(order.id || "-")}</div>
+          <div class="meta-item"><span>Fecha entrega</span>${escapeHtml(order.fechaEntrega || "Sin definir")}</div>
         </div>
       </div>
       <div class="detail-card">
-        <h3>Entrega y pago</h3>
-        <div class="meta-list">
-          <div class="meta-item"><span>Dirección</span>${escapeHtml(order.direccion || "-")}</div>
-          <div class="meta-item"><span>Fecha</span>${escapeHtml(formatDate(order.fechaRegistro))}</div>
-          <div class="meta-item"><span>Fecha entrega</span>${escapeHtml(order.fechaEntrega || "-")}</div>
-          <div class="meta-item"><span>Método de pago</span>${escapeHtml(order.metodoPago || "-")}</div>
+        <h3>${icon("message-circle")} Entrega y pago</h3>
+        <div class="meta-list premium-meta-list">
+          <div class="meta-item detail-address-block"><span>Dirección</span>${escapeHtml(order.direccion || "-")}</div>
+          <div class="meta-item"><span>Método de pago</span><span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "-")}</span></div>
+          <div class="meta-item"><span>Registrado</span>${escapeHtml(formatDate(order.fechaRegistro))}</div>
         </div>
       </div>
       <div class="detail-card">
-        <h3>Productos</h3>
+        <h3>${icon("box")} Productos</h3>
         <div class="items-list">${itemsHtml}</div>
       </div>
       <div class="detail-card">
-        <h3>Notas</h3>
+        <h3>${icon("file-text")} Notas</h3>
         <p class="helper-text">${escapeHtml(order.observaciones || "Sin observaciones")}</p>
       </div>
     </div>

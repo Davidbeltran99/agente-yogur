@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { procesarMensaje, OPENAI_MODEL } = require("./ollama");
+const { procesarMensaje, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -188,6 +188,24 @@ const NON_NAME_TERMS = new Set([
   "quien", "eres", "abby", "abi", "precios", "precio", "portafolio", "productos", "producto",
   "venden", "catalogo", "menu", "pedido", "pedidos"
 ]);
+const CATALOG_TOKEN_STOPWORDS = new Set([
+  "quiero", "quisiera", "necesito", "pedido", "pedir", "ordeno", "encargo", "comprar", "me", "regalas",
+  "dame", "enviame", "enviarme", "por", "favor", "para", "llevo", "agregame", "agrégame", "de", "del",
+  "la", "el", "los", "las", "uno", "una", "un", "dos", "tres", "cuatro", "cinco", "seis", "siete",
+  "ocho", "nueve", "diez", "y", "con", "sin", "porfa", "porfis", "porfavor", "quiera", "favorcito",
+  "producto", "productos", "pedido", "pedidos", "favor", "envio", "domicilio"
+]);
+const GENERIC_CATALOG_TOKENS = new Set(["yogur", "yogurt", "yoghurt", "bebida", "sabor", "cosa", "detalle"]);
+const SIZE_SMALL_TOKENS = ["pequeno", "pequeño", "pequenito", "chico", "personal", "litro", "1000", "1000ml", "1000 ml"];
+const SIZE_LARGE_TOKENS = ["grande", "grandecito", "garrafa", "familiar", "1800", "1800ml", "1800 ml", "1 8", "1.8", "1.8ml", "1.8 ml"];
+const PRICE_VALUE_TOKENS = ["barato", "barata", "economico", "económico", "economica", "económica", "asequible"];
+const SAME_PRODUCT_TOKENS = ["lo mismo", "el mismo", "la misma", "ese", "esa", "el de siempre", "la de siempre", "como siempre"];
+const SEMANTIC_FAMILY_KEYWORDS = new Map([
+  ["aloe", ["aloe", "sabila", "sábila"]],
+  ["cafe", ["cafe", "café", "cafecito"]],
+  ["ancheta", ["ancheta", "regalo", "detalle", "combo", "combo regalo"]],
+  ["bandeja queso arequipe", ["bandeja", "queso", "arequipe", "tabla"]]
+]);
 
 function limpiarTexto(valor) {
   if (typeof valor !== "string") {
@@ -241,6 +259,21 @@ function extraerNombreExplícito(texto) {
 
 function esIntencionNombre(texto) {
   return Boolean(extraerNombreExplícito(texto));
+}
+
+function extraerNombreConversacional(texto) {
+  const explicit = extraerNombreExplícito(texto);
+  if (explicit) {
+    return explicit;
+  }
+
+  const raw = String(texto || "").trim();
+  const casualMatch = raw.match(/^(?:soy|habla)\s+([a-zA-ZÁÉÍÓÚáéíóúñÑ ]{2,40})$/i);
+  if (!casualMatch?.[1]) {
+    return null;
+  }
+
+  return esNombreHumanoValido(casualMatch[1]) ? capitalizarNombre(casualMatch[1]) : null;
 }
 
 function esMensajeBienvenida(texto) {
@@ -376,6 +409,170 @@ function normalizeCatalogFamilyName(value) {
     .trim();
 }
 
+function normalizeCatalogSemanticFamilyName(value) {
+  return normalizeCatalogFamilyName(value)
+    .replace(/\b(garrafa|litro)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizarCatalogo(valor, { keepGeneric = false } = {}) {
+  const normalized = normalizeCatalogText(valor);
+  if (!normalized) {
+    return [];
+  }
+
+  return normalized
+    .split(" ")
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !CATALOG_TOKEN_STOPWORDS.has(token))
+    .filter((token) => keepGeneric || !GENERIC_CATALOG_TOKENS.has(token));
+}
+
+function includesAnyToken(texto, tokens = []) {
+  const normalized = normalizeCatalogText(texto);
+  return tokens.some((token) => normalized.includes(normalizeCatalogText(token)));
+}
+
+function extractSemanticCatalogPreferences(texto) {
+  const normalized = normalizeCatalogText(texto);
+  const tokens = tokenizarCatalogo(normalized, { keepGeneric: false });
+  const rawTokens = tokenizarCatalogo(normalized, { keepGeneric: true });
+  const genericTokens = rawTokens.filter((token) => GENERIC_CATALOG_TOKENS.has(token));
+  const families = new Set();
+
+  for (const [family, aliases] of SEMANTIC_FAMILY_KEYWORDS.entries()) {
+    const familyMatched = aliases.some((alias) => {
+      const normalizedAlias = normalizeCatalogText(alias);
+      if (normalized.includes(normalizedAlias)) {
+        return true;
+      }
+
+      return rawTokens.some((token) => levenshteinDistance(token, normalizedAlias) <= 1);
+    });
+
+    if (familyMatched) {
+      families.add(family);
+    }
+  }
+
+  return {
+    normalized,
+    tokens,
+    rawTokens,
+    genericTokens,
+    families,
+    wantsSmall: includesAnyToken(normalized, SIZE_SMALL_TOKENS),
+    wantsLarge: includesAnyToken(normalized, SIZE_LARGE_TOKENS),
+    wantsValue: includesAnyToken(normalized, PRICE_VALUE_TOKENS),
+    wantsSame: includesAnyToken(normalized, SAME_PRODUCT_TOKENS),
+    hasFamilyCue: families.size > 0
+  };
+}
+
+function buildProductSemanticTokens(product) {
+  const tokens = new Set([
+    ...tokenizarCatalogo(product?.nombre, { keepGeneric: true }),
+    ...tokenizarCatalogo(product?.nombre_canonico, { keepGeneric: true }),
+    ...tokenizarCatalogo(product?.nombre_familia, { keepGeneric: true })
+  ]);
+
+  for (const alias of product?.aliases || []) {
+    for (const token of tokenizarCatalogo(alias, { keepGeneric: true })) {
+      tokens.add(token);
+    }
+  }
+
+  for (const [family, aliases] of SEMANTIC_FAMILY_KEYWORDS.entries()) {
+    if (family === product?.nombre_raiz_familia || family === product?.nombre_familia) {
+      aliases.forEach((alias) => tokens.add(normalizeCatalogText(alias)));
+    }
+  }
+
+  return Array.from(tokens).filter(Boolean);
+}
+
+function isSmallVariant(product) {
+  const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
+  return /\b1000 ml\b/.test(canonical);
+}
+
+function isStandardVariant(product) {
+  const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
+  return /\blitro\b/.test(canonical) && !/\b1000 ml\b/.test(canonical) && !/\b1800 ml\b/.test(canonical) && !/\bgarrafa\b/.test(canonical);
+}
+
+function isLargeVariant(product) {
+  const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
+  return /\b1800 ml\b/.test(canonical) || /\bgarrafa\b/.test(canonical);
+}
+
+function getFamilyPriceStats(familyName) {
+  const familyProducts = getCatalogProductsCache().filter((product) => (product?.nombre_raiz_familia || product?.nombre_familia) === familyName);
+  const prices = familyProducts
+    .map((product) => parseOptionalNumber(product?.precio))
+    .filter((price) => price !== null)
+    .sort((a, b) => a - b);
+
+  return {
+    min: prices[0] ?? null,
+    max: prices[prices.length - 1] ?? null
+  };
+}
+
+function puntuarCoincidenciaSemanticaCatalogo(texto, product) {
+  const preferences = extractSemanticCatalogPreferences(texto);
+  if (!preferences.tokens.length && !preferences.hasFamilyCue && !preferences.wantsSmall && !preferences.wantsLarge && !preferences.wantsValue) {
+    return 0;
+  }
+
+  const productTokens = buildProductSemanticTokens(product);
+  const overlap = preferences.tokens.filter((token) => productTokens.includes(token));
+  const familyKey = product?.nombre_raiz_familia || product?.nombre_familia;
+  const familyHit = preferences.families.has(familyKey);
+  const price = parseOptionalNumber(product?.precio);
+  const familyPriceStats = getFamilyPriceStats(familyKey);
+
+  let score = 0;
+
+  if (familyHit) {
+    score += 74;
+  }
+
+  if (overlap.length) {
+    score += Math.min(14, overlap.length * 8);
+  }
+
+  if (familyHit && !preferences.wantsSmall && !preferences.wantsLarge) {
+    score += isStandardVariant(product) ? 10 : 0;
+  }
+
+  if (preferences.wantsSmall) {
+    if (isSmallVariant(product)) {
+      score += 22;
+    } else if (isStandardVariant(product)) {
+      score += 6;
+    } else {
+      score -= 8;
+    }
+  }
+
+  if (preferences.wantsLarge) {
+    score += isLargeVariant(product) ? 18 : -6;
+  }
+
+  if (preferences.wantsValue && price !== null && familyPriceStats.min !== null) {
+    score += price === familyPriceStats.min ? 18 : -8;
+  }
+
+  if (preferences.wantsSame && preferences.hasFamilyCue && normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia) === Array.from(preferences.families)[0]) {
+    score += 8;
+  }
+
+  return Math.max(score, 0);
+}
+
 function extractRequestedPrice(texto) {
   const raw = String(texto || "");
   const match = raw.match(/\$?\s*(\d{2,3}(?:\.\d{3})+|\d{4,6})\b(?!\s*ml\b)/i);
@@ -399,6 +596,7 @@ function setCatalogProductsCache(products = []) {
           producto_original: productoOriginal,
           nombre_canonico: nombreCanonico,
           nombre_familia: nombreFamilia,
+          nombre_raiz_familia: normalizeCatalogSemanticFamilyName(productoOriginal),
           aliases: [...new Set([
             normalizeCatalogText(product?.nombre),
             nombreCanonico,
@@ -428,6 +626,73 @@ function limpiarTextoProductoSolicitado(valor) {
     .trim();
 }
 
+function levenshteinDistance(a = "", b = "") {
+  const source = String(a);
+  const target = String(b);
+
+  if (!source.length) {
+    return target.length;
+  }
+
+  if (!target.length) {
+    return source.length;
+  }
+
+  const matrix = Array.from({ length: source.length + 1 }, () => new Array(target.length + 1).fill(0));
+
+  for (let i = 0; i <= source.length; i += 1) {
+    matrix[i][0] = i;
+  }
+
+  for (let j = 0; j <= target.length; j += 1) {
+    matrix[0][j] = j;
+  }
+
+  for (let i = 1; i <= source.length; i += 1) {
+    for (let j = 1; j <= target.length; j += 1) {
+      const cost = source[i - 1] === target[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  return matrix[source.length][target.length];
+}
+
+function puntuarCoincidenciaTipografica(candidateTokens = [], aliasTokens = []) {
+  if (!candidateTokens.length || !aliasTokens.length) {
+    return 0;
+  }
+
+  let fuzzyHits = 0;
+
+  for (const candidateToken of candidateTokens) {
+    const found = aliasTokens.some((aliasToken) => {
+      if (candidateToken === aliasToken) {
+        return true;
+      }
+
+      const distance = levenshteinDistance(candidateToken, aliasToken);
+      const longest = Math.max(candidateToken.length, aliasToken.length);
+      return longest >= 4 && distance > 0 && distance <= 1;
+    });
+
+    if (found) {
+      fuzzyHits += 1;
+    }
+  }
+
+  if (!fuzzyHits) {
+    return 0;
+  }
+
+  const ratio = fuzzyHits / Math.max(candidateTokens.length, aliasTokens.length);
+  return ratio >= 0.5 ? 66 + ratio * 12 : 0;
+}
+
 function puntuarCoincidenciaCatalogo(candidate, alias) {
   if (!candidate || !alias) {
     return 0;
@@ -453,8 +718,9 @@ function puntuarCoincidenciaCatalogo(candidate, alias) {
   }
 
   const overlap = candidateTokens.filter((token) => aliasTokens.includes(token));
+  const typoScore = puntuarCoincidenciaTipografica(candidateTokens, aliasTokens);
   if (!overlap.length) {
-    return 0;
+    return typoScore;
   }
 
   const ratio = overlap.length / Math.max(candidateTokens.length, aliasTokens.length);
@@ -465,10 +731,10 @@ function puntuarCoincidenciaCatalogo(candidate, alias) {
   }
 
   if (ratio >= 0.66) {
-    return 72 + ratio * 10;
+    return Math.max(72 + ratio * 10, typoScore);
   }
 
-  return 0;
+  return typoScore;
 }
 
 function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}) {
@@ -486,12 +752,18 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
       bestScore = Math.max(bestScore, puntuarCoincidenciaCatalogo(candidate, alias));
     }
 
+    bestScore = Math.max(bestScore, puntuarCoincidenciaSemanticaCatalogo(texto, product));
+
     if (bestScore >= minScore) {
       matches.push({ product, score: bestScore });
     }
   }
 
-  return matches.sort((a, b) => b.score - a.score).slice(0, limit);
+  return matches
+    .sort((a, b) => (b.score - a.score)
+      || ((a.product?.nombre_canonico || a.product?.nombre || "").length - (b.product?.nombre_canonico || b.product?.nombre || "").length)
+      || ((parseOptionalNumber(a.product?.precio) ?? Number.MAX_SAFE_INTEGER) - (parseOptionalNumber(b.product?.precio) ?? Number.MAX_SAFE_INTEGER)))
+    .slice(0, limit);
 }
 
 function buildCanonicalCatalogEntries() {
@@ -516,17 +788,24 @@ function buildCanonicalCatalogEntries() {
 }
 
 function buildCatalogAmbiguityOptions(products = []) {
-  return products
-    .filter(Boolean)
-    .filter((product, index, list) => list.findIndex((entry) => entry.id === product.id) === index)
-    .map((product) => ({
-      id: product.id,
-      nombre: product.nombre,
-      precio: parseOptionalNumber(product.precio),
-      nombreCanonico: product.nombre_canonico || normalizeCanonicalCatalogName(product.nombre),
-      productoOriginal: product.producto_original || product.nombre,
-      aliases: product.aliases || []
-    }));
+  const grouped = new Map();
+
+  for (const product of products.filter(Boolean)) {
+    const key = product.nombre_canonico || normalizeCanonicalCatalogName(product.nombre);
+    const current = grouped.get(key);
+    if (!current || (parseOptionalNumber(product.precio) ?? Number.MAX_SAFE_INTEGER) < (parseOptionalNumber(current.precio) ?? Number.MAX_SAFE_INTEGER)) {
+      grouped.set(key, product);
+    }
+  }
+
+  return Array.from(grouped.values()).map((product) => ({
+    id: product.id,
+    nombre: product.nombre,
+    precio: parseOptionalNumber(product.precio),
+    nombreCanonico: product.nombre_canonico || normalizeCanonicalCatalogName(product.nombre),
+    productoOriginal: product.producto_original || product.nombre,
+    aliases: product.aliases || []
+  }));
 }
 
 function resolveCatalogProductByPrice(products = [], requestedPrice = null) {
@@ -544,6 +823,83 @@ function shouldAskFamilyClarificationForRootQuery(product, familyMatches, normal
   }
 
   return familyMatches.some((entry) => entry.id !== product.id && new RegExp(`^${escapeRegex(product.nombre_familia)}\\s+\\d+$`).test(entry.nombre_canonico || ""));
+}
+
+function pickPreferredFamilyProduct(products = [], preference = "default") {
+  const sorted = products.slice().sort((a, b) => {
+    const aPrice = parseOptionalNumber(a?.precio) ?? Number.MAX_SAFE_INTEGER;
+    const bPrice = parseOptionalNumber(b?.precio) ?? Number.MAX_SAFE_INTEGER;
+    return aPrice - bPrice;
+  });
+
+  if (!sorted.length) {
+    return null;
+  }
+
+  if (preference === "value") {
+    return sorted[0];
+  }
+
+  if (preference === "large") {
+    return sorted.find((product) => isLargeVariant(product)) || sorted[sorted.length - 1];
+  }
+
+  if (preference === "small") {
+    return sorted.find((product) => isSmallVariant(product)) || sorted.find((product) => isStandardVariant(product)) || sorted[0];
+  }
+
+  return sorted.find((product) => isStandardVariant(product)) || sorted.find((product) => isSmallVariant(product)) || sorted[0];
+}
+
+function resolverProductoSemanticoPorPreferencias(texto, catalog = getCatalogProductsCache()) {
+  const preferences = extractSemanticCatalogPreferences(texto);
+  if (!preferences.families.size) {
+    return null;
+  }
+
+  const families = Array.from(preferences.families)
+    .map((family) => ({ family, products: catalog.filter((product) => (product?.nombre_raiz_familia || product?.nombre_familia) === family) }))
+    .filter((entry) => entry.products.length);
+
+  if (!families.length) {
+    return null;
+  }
+
+  if (families.length > 1) {
+    return {
+      status: "ambiguous",
+      candidate: limpiarTexto(texto),
+      matches: buildCatalogAmbiguityOptions(families.flatMap((entry) => entry.products))
+    };
+  }
+
+  const familyProducts = families[0].products;
+  const shouldSuggestFamilyOptions = !preferences.wantsSmall
+    && !preferences.wantsLarge
+    && !preferences.wantsValue
+    && familyProducts.length > 1
+    && preferences.genericTokens.length > 0;
+
+  if (shouldSuggestFamilyOptions) {
+    return {
+      status: "ambiguous",
+      candidate: limpiarTexto(texto),
+      matches: buildCatalogAmbiguityOptions(familyProducts)
+    };
+  }
+
+  const preference = preferences.wantsValue ? "value" : (preferences.wantsLarge ? "large" : (preferences.wantsSmall ? "small" : "default"));
+  const preferred = pickPreferredFamilyProduct(familyProducts, preference);
+
+  if (!preferred) {
+    return null;
+  }
+
+  return {
+    status: "matched",
+    candidate: limpiarTexto(texto),
+    product: preferred
+  };
 }
 
 function resolverProductoCatalogo(texto) {
@@ -644,6 +1000,11 @@ function resolverProductoCatalogo(texto) {
     };
   }
 
+  const semanticResolution = resolverProductoSemanticoPorPreferencias(texto, catalog);
+  if (semanticResolution) {
+    return semanticResolution;
+  }
+
   const matches = encontrarCoincidenciasCatalogo(texto, { minScore: 70, limit: 3 });
 
   if (!matches.length) {
@@ -655,7 +1016,28 @@ function resolverProductoCatalogo(texto) {
 
   const [best, second] = matches;
   if (second && Math.abs(best.score - second.score) <= 6) {
+    const semanticPreferences = extractSemanticCatalogPreferences(texto);
     const sameFamilyMatches = matches.filter((entry) => entry.product?.nombre_familia === best.product?.nombre_familia);
+    const bestCanonical = best.product?.nombre_canonico || "";
+    const secondCanonical = second.product?.nombre_canonico || "";
+
+    if (
+      sameFamilyMatches.length >= 2
+      && best.score >= 84
+      && !semanticPreferences.wantsLarge
+      && !semanticPreferences.wantsSmall
+      && !semanticPreferences.wantsValue
+      && !/\b\d{3,4}\s*ml\b/.test(bestCanonical)
+      && /\b\d{3,4}\s*ml\b/.test(secondCanonical)
+      && best.product?.nombre_familia === second.product?.nombre_familia
+    ) {
+      return {
+        status: "matched",
+        candidate: limpiarTexto(texto),
+        product: best.product
+      };
+    }
+
     const ambiguityPool = sameFamilyMatches.length >= 2 ? sameFamilyMatches : matches;
 
     return {
@@ -1124,8 +1506,10 @@ function detectarIntencionPedido(texto) {
   const hasAddressCue = /\b(direccion|direccion:|entrega|enviar|envio|domicilio)\b/i.test(normalized) || ADDRESS_KEYWORDS.test(normalized);
   const hasProductCue = analysis.items.length > 0 || analysis.ambiguities.length > 0 || analysis.possibleMatch;
   const hasImplicitOrderReference = /\b(lo de siempre|lo mismo de ayer|lo mismo|de siempre|como siempre|lo otro|normal)\b/i.test(normalized);
+  const hasSemanticPreferenceCue = /\b(pequeno|pequeño|grande|barato|barata|economico|económica|garrafa|litro)\b/i.test(normalized);
+  const hasPureCatalogIntent = hasProductCue && normalized.split(" ").filter(Boolean).length <= 4;
 
-  return (hasProductCue && (hasPurchaseVerb || hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference))
+  return (hasProductCue && (hasPurchaseVerb || hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference || hasSemanticPreferenceCue || hasPureCatalogIntent))
     || (hasPurchaseVerb && (hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference))
     || hasImplicitOrderReference;
 }
@@ -1425,14 +1809,23 @@ function logEvent(event, details = {}, level = "info") {
 function logRuntimeConfigSnapshot(context = "runtime") {
   const rawApiKey = String(process.env.OPENAI_API_KEY || "").trim();
   const apiKeyPresent = Boolean(rawApiKey && rawApiKey !== "tu_api_key");
-  const aiProvider = limpiarTexto(process.env.AI_PROVIDER) || null;
+  const aiProvider = limpiarTexto(process.env.AI_PROVIDER) || OPENAI_PROVIDER;
 
   logEvent("runtime_config_snapshot", {
     context,
     whatsappEnabled: WHATSAPP_ENABLED,
     openaiApiKeyPresent: apiKeyPresent,
     aiProvider,
-    openaiModel: process.env.OPENAI_MODEL || OPENAI_MODEL
+    openaiModel: process.env.OPENAI_MODEL || OPENAI_MODEL,
+    openaiBaseUrl: OPENAI_BASE_URL
+  });
+
+  logEvent("MODEL_ACTIVE", {
+    context,
+    provider: OPENAI_PROVIDER,
+    model: process.env.OPENAI_MODEL || OPENAI_MODEL,
+    baseUrl: OPENAI_BASE_URL,
+    apiKeyPresent
   });
 
   if (aiProvider && aiProvider.toLowerCase() !== "openai") {
@@ -1944,17 +2337,104 @@ function inferirNombreDesdeConversacion(phone) {
   return null;
 }
 
+function buildProductReference(productName) {
+  const product = findCatalogProductByName(productName);
+  if (!product) {
+    return null;
+  }
+
+  return {
+    id: product.id,
+    nombre: product.nombre,
+    nombreCanonico: product.nombre_canonico,
+    familia: product.nombre_raiz_familia || product.nombre_familia,
+    variant: isLargeVariant(product) ? "large" : (isSmallVariant(product) ? "small" : null)
+  };
+}
+
+function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = null, intent = null } = {}) {
+  if (!state) {
+    return;
+  }
+
+  if (pedido?.cliente) {
+    state.customerName = pedido.cliente;
+  }
+
+  if (pedido?.metodo_pago) {
+    state.lastPaymentMethod = pedido.metodo_pago;
+  }
+
+  const productos = Array.isArray(pedido?.productos) ? pedido.productos : [];
+  const lastProduct = productos[productos.length - 1];
+  const lastReference = buildProductReference(lastProduct?.producto);
+  if (lastReference) {
+    state.lastProductReference = lastReference;
+  }
+
+  if (evaluacion?.catalogStatus === "ambiguous" && evaluacion.ambiguousProducts?.length) {
+    const firstOption = evaluacion.ambiguousProducts[0]?.options?.[0];
+    const ambiguityReference = buildProductReference(firstOption?.nombre);
+    if (ambiguityReference) {
+      state.lastProductReference = ambiguityReference;
+    }
+  }
+
+  if (intent) {
+    state.lastIntent = intent;
+  }
+}
+
+function aplicarContextoProductoAMensaje(texto, state) {
+  const raw = String(texto || "").trim();
+  if (!raw || !state?.lastProductReference?.familia) {
+    return { text: raw, used: false };
+  }
+
+  const normalized = normalizarTextoAnalisis(raw);
+  if (!normalized) {
+    return { text: raw, used: false };
+  }
+
+  const alreadyMentionsFamily = getCatalogProductsCache().some((product) => {
+    const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia);
+    return family && normalized.includes(family);
+  });
+
+  if (alreadyMentionsFamily) {
+    return { text: raw, used: false };
+  }
+
+  if (SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
+    return { text: state.lastProductReference.nombre, used: true, reason: "same_product_reference" };
+  }
+
+  const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
+  if (!hasVariantCue) {
+    return { text: raw, used: false };
+  }
+
+  return {
+    text: `${state.lastProductReference.familia} ${raw}`.trim(),
+    used: true,
+    reason: "family_context_reference"
+  };
+}
+
 function obtenerEstadoConversacion(phone) {
   const key = limpiarTexto(phone);
   if (!key) {
-    return { customerName: null, pendingPedido: null, pendingClarification: null };
+    return { customerName: null, pendingPedido: null, pendingClarification: null, lastPaymentMethod: null, lastProductReference: null, lastIntent: null };
   }
 
   if (!conversationMemoryState.has(key)) {
     conversationMemoryState.set(key, {
       customerName: inferirNombreDesdeConversacion(key),
       pendingPedido: null,
-      pendingClarification: null
+      pendingClarification: null,
+      lastPaymentMethod: null,
+      lastProductReference: null,
+      lastIntent: null
     });
   }
 
@@ -2099,6 +2579,8 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
   } else {
     state.pendingPedido = pedidoResuelto;
   }
+
+  actualizarMemoriaConversacional(state, { pedido: pedidoResuelto, evaluacion, intent });
 
   limpiarAclaracionPendiente(state);
 
@@ -2341,8 +2823,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const previousMessageCount = countMessagesByPhone(telefono);
   const activeOrderBefore = getActiveOrderByPhone(telefono);
   const state = obtenerEstadoConversacion(telefono);
+  const contextualizedMessage = aplicarContextoProductoAMensaje(mensaje, state);
   const hasDraftContext = tieneBorradorPedido(state);
-  const intent = detectarIntencionConversacional(mensaje, { hasDraftContext });
+  const intent = detectarIntencionConversacional(contextualizedMessage.text || mensaje, { hasDraftContext });
   const hasOrderIntent = intent === "pedido" || intent === "faltan_datos";
   const explicitName = intent === "nombre" ? extraerNombreExplícito(mensaje) : null;
 
@@ -2365,6 +2848,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     telefono,
     sourceMessageId,
     intent,
+    contextApplied: contextualizedMessage.used || false,
+    contextReason: contextualizedMessage.reason || null,
     explicitName: explicitName || null,
     customerNameBefore: state.customerName || null
   });
@@ -2382,6 +2867,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
 
   if (intent === "saludo") {
+    state.lastIntent = intent;
     const respuesta = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
 
@@ -2389,6 +2875,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
 
   if (intent === "identidad") {
+    state.lastIntent = intent;
     const respuesta = construirRespuestaIdentidad();
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
@@ -2396,6 +2883,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (intent === "despedida") {
     state.pendingPedido = null;
+    state.lastIntent = intent;
     limpiarAclaracionPendiente(state);
     const respuesta = construirRespuestaDespedida();
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
@@ -2404,6 +2892,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (intent === "nombre" && explicitName) {
     state.customerName = explicitName;
+    state.lastIntent = intent;
     const respuesta = construirRespuestaNombreRegistrado({
       customerName: explicitName,
       featuredProducts: buildCatalogFeaturedProducts()
@@ -2413,6 +2902,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
 
   if (intent === "info_catalogo") {
+    state.lastIntent = intent;
     const respuesta = construirRespuestaCatalogoInformativo({
       customerName: state.customerName || null,
       featuredProducts: buildCatalogFeaturedProducts()
@@ -2422,18 +2912,20 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
 
   if (intent === "confirmacion") {
+    state.lastIntent = intent;
     const respuesta = construirRespuestaConfirmacion({ hasDraftContext });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
   if (intent === "conversacion_general") {
+    state.lastIntent = intent;
     const respuesta = construirRespuestaCasual();
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent };
   }
 
-  const resultadoActual = await procesarPedidoDesdeTexto(mensaje, {
+  const resultadoActual = await procesarPedidoDesdeTexto(contextualizedMessage.text || mensaje, {
     telefono,
     mensajeOriginal: mensaje,
     sourceMessageId,
@@ -2461,6 +2953,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     intent: evaluacionCombinada.catalogStatus === "ambiguous" ? "aclaracion_producto" : (evaluacionCombinada.esValido ? "pedido" : "faltan_datos")
   };
 
+  actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: resultado.intent });
+
   if (evaluacionCombinada.esValido) {
     try {
       const persisted = await persistirPedidoFinal({
@@ -2473,6 +2967,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       resultado.sheets = persisted.sheets;
       state.pendingPedido = null;
       limpiarAclaracionPendiente(state);
+      actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: "pedido" });
     } catch (error) {
       throw error;
     }
@@ -2486,6 +2981,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     } else {
       limpiarAclaracionPendiente(state);
     }
+
+    actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: resultado.intent });
   }
 
   logEvent("resultado_procesamiento", {
@@ -2605,7 +3102,10 @@ app.get("/health", (_req, res) => {
     whatsappEnabled: WHATSAPP_ENABLED,
     panelAuthEnabled: PANEL_AUTH_ENABLED,
     sourceOfTruth: "sqlite",
-    sheetsRole: SHEETS_BACKUP_ENABLED ? "reporting_backup" : "disabled"
+    sheetsRole: SHEETS_BACKUP_ENABLED ? "reporting_backup" : "disabled",
+    aiProvider: OPENAI_PROVIDER,
+    aiModel: process.env.OPENAI_MODEL || OPENAI_MODEL,
+    aiBaseUrl: OPENAI_BASE_URL
   });
 });
 

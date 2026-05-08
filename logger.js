@@ -4,7 +4,12 @@ const ALLOWED_EVENTS = new Set([
   "order_saved",
   "order_rejected",
   "whatsapp_send_error",
-  "owner_notify_error"
+  "owner_notify_error",
+  "MODEL_ACTIVE",
+  "model_used",
+  "runtime_config_snapshot",
+  "runtime_config_warning",
+  "MODEL_ERROR"
 ]);
 
 const EVENT_ALIASES = {

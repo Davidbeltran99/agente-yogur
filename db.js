@@ -36,13 +36,13 @@ function normalizeStatus(value) {
 function humanizeStatus(value) {
   const status = normalizeStatus(value);
   const labels = {
-    pendiente: "Pendiente",
-    "en proceso": "En camino",
-    entregado: "Entregado",
+    pendiente: "🟡 Pendiente",
+    "en proceso": "🔵 En camino",
+    entregado: "🟢 Entregado",
     cancelado: "Cancelado"
   };
 
-  return labels[status] || "Pendiente";
+  return labels[status] || "🟡 Pendiente";
 }
 
 function parseOptionalNumber(value) {
