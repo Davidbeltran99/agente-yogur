@@ -300,6 +300,16 @@ function startOrdersAutoRefresh() {
   ordersRefreshMetaHandle = window.setInterval(updateOrdersRefreshMeta, 1000);
 }
 
+function handleOrdersAutoRefreshVisibility() {
+  if (document.hidden) {
+    stopOrdersAutoRefresh();
+    return;
+  }
+
+  startOrdersAutoRefresh();
+  loadOrders({ silent: true, source: "poll" });
+}
+
 function stopOrdersAutoRefresh() {
   if (ordersAutoRefreshHandle) {
     window.clearInterval(ordersAutoRefreshHandle);
@@ -1292,6 +1302,7 @@ logoutButton?.addEventListener("click", async () => {
 });
 
 window.addEventListener("beforeunload", stopOrdersAutoRefresh);
+document.addEventListener("visibilitychange", handleOrdersAutoRefreshVisibility);
 
 chatComposer.addEventListener("submit", sendChatMessage);
 
