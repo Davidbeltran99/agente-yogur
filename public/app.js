@@ -6,6 +6,10 @@ const orderDetail = document.getElementById("orderDetail");
 const tableMeta = document.getElementById("tableMeta");
 const feedback = document.getElementById("feedback");
 const ordersAutoRefreshMeta = document.getElementById("ordersAutoRefreshMeta");
+const appLoader = document.getElementById("appLoader");
+const soundToggleButton = document.getElementById("soundToggleButton");
+const soundToggleLabel = document.getElementById("soundToggleLabel");
+const soundToggleIcon = document.getElementById("soundToggleIcon");
 
 const conversationMeta = document.getElementById("conversationMeta");
 const conversationList = document.getElementById("conversationList");
@@ -53,8 +57,13 @@ const STATUS_OPTIONS = [
 const PANEL_LOGIN_PATH = window.__PANEL_LOGIN_PATH__ || "/portal";
 const SIDEBAR_STORAGE_KEY = "sidebarCollapsed";
 const ACTIVE_SECTION_STORAGE_KEY = "activeSection";
+const SOUNDS_STORAGE_KEY = "uiSoundsEnabled";
 const ORDERS_REFRESH_MS = 8000;
+const CONVERSATIONS_REFRESH_MS = 12000;
+const LOADER_MIN_VISIBLE_MS = 650;
 const MOBILE_LAYOUT = window.matchMedia("(max-width: 1100px)");
+const appBootStartedAt = performance.now();
+
 let orders = [];
 let dashboardSummary = null;
 let selectedOrderId = null;
@@ -70,13 +79,32 @@ let sidebarCollapsed = false;
 let mobileSidebarOpen = false;
 let activeSection = "dashboard";
 let lastOrdersSnapshot = new Map();
+let lastConversationSnapshot = new Map();
 let lastOrdersSyncAt = null;
 let ordersAutoRefreshHandle = null;
+let conversationsAutoRefreshHandle = null;
 let ordersRefreshMetaHandle = null;
 let ordersPollingInFlight = false;
+let conversationsPollingInFlight = false;
 let conversationSearchQuery = "";
 let conversationSearchDebounce = null;
 let visibleMessagesLimit = 60;
+let uiSoundsEnabled = getStoredSoundsPreference();
+let audioContext = null;
+
+function icon(name, className = "ui-icon") {
+  return `<svg class="${className}" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
+}
+
+function renderEmptyState({ iconName = "sparkles", title, copy, compact = false } = {}) {
+  return `
+    <div class="empty-state${compact ? " compact" : ""}">
+      <div class="empty-state-icon">${icon(iconName)}</div>
+      <div class="empty-state-title">${escapeHtml(title || "Sin información")}</div>
+      <p class="helper-text">${escapeHtml(copy || "Cuando haya datos disponibles, aparecerán aquí.")}</p>
+    </div>
+  `;
+}
 
 function formatDate(value) {
   if (!value) return "-";
@@ -163,6 +191,14 @@ function getStoredActiveSection() {
   }
 }
 
+function getStoredSoundsPreference() {
+  try {
+    return window.localStorage.getItem(SOUNDS_STORAGE_KEY) === "true";
+  } catch (_error) {
+    return false;
+  }
+}
+
 function storeSidebarPreference() {
   try {
     window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
@@ -173,9 +209,34 @@ function storeSidebarPreference() {
 
 function storeActiveSection() {
   try {
-    window.localStorage.setItem(ACTIVE_SECTION_STORAGE_KEY, activeSection);
+    window.localStorage.setItem(ACTIVE_SECTION_STORAGE_KEY, String(activeSection));
   } catch (_error) {
     // noop
+  }
+}
+
+function storeSoundsPreference() {
+  try {
+    window.localStorage.setItem(SOUNDS_STORAGE_KEY, String(uiSoundsEnabled));
+  } catch (_error) {
+    // noop
+  }
+}
+
+function syncSoundToggleState() {
+  if (!soundToggleButton) {
+    return;
+  }
+
+  soundToggleButton.setAttribute("aria-pressed", String(uiSoundsEnabled));
+  soundToggleButton.classList.toggle("active", uiSoundsEnabled);
+  if (soundToggleLabel) {
+    soundToggleLabel.textContent = uiSoundsEnabled ? "Sonidos suaves: activos" : "Sonidos suaves: apagados";
+  }
+
+  const useNode = soundToggleIcon?.querySelector("use");
+  if (useNode) {
+    useNode.setAttribute("href", uiSoundsEnabled ? "#icon-volume-2" : "#icon-volume-x");
   }
 }
 
@@ -274,6 +335,15 @@ function getOrderSnapshot(orderList) {
   })]));
 }
 
+function getConversationSnapshot(conversationListItems) {
+  return new Map((conversationListItems || []).map((conversation) => [conversation.phone, JSON.stringify({
+    lastMessage: conversation.lastMessage || "",
+    lastMessageAt: conversation.lastMessageAt || "",
+    lastMessageDirection: conversation.lastMessageDirection || "",
+    unread: getUnreadCount(conversation)
+  })]));
+}
+
 function captureTablePosition() {
   if (!tableWrap) {
     return null;
@@ -291,9 +361,54 @@ function restoreTablePosition(position) {
   tableWrap.scrollLeft = position.left;
 }
 
+function getOrCreateAudioContext() {
+  if (audioContext) {
+    return audioContext;
+  }
+
+  const Context = window.AudioContext || window.webkitAudioContext;
+  if (!Context) {
+    return null;
+  }
+
+  audioContext = new Context();
+  return audioContext;
+}
+
+function playSoftTone(type = "conversation") {
+  if (!uiSoundsEnabled) {
+    return;
+  }
+
+  const context = getOrCreateAudioContext();
+  if (!context) {
+    return;
+  }
+
+  const start = context.currentTime + 0.01;
+  const frequencies = type === "order" ? [587, 740] : [494, 659];
+  const gainNode = context.createGain();
+  gainNode.gain.setValueAtTime(0.0001, start);
+  gainNode.gain.exponentialRampToValueAtTime(0.02, start + 0.03);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, start + 0.34);
+  gainNode.connect(context.destination);
+
+  frequencies.forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, start + index * 0.04);
+    oscillator.connect(gainNode);
+    oscillator.start(start + index * 0.04);
+    oscillator.stop(start + 0.34 + index * 0.02);
+  });
+
+  if (context.state === "suspended") {
+    context.resume().catch(() => undefined);
+  }
+}
+
 function notifyOrderChanges(nextOrders, previousSnapshot) {
   const nextSnapshot = getOrderSnapshot(nextOrders);
-  const previousIds = new Set(previousSnapshot.keys());
   const newOrders = [];
   let statusChanged = false;
 
@@ -306,16 +421,47 @@ function notifyOrderChanges(nextOrders, previousSnapshot) {
     if (previousSnapshot.get(order.id) !== nextSnapshot.get(order.id)) {
       statusChanged = true;
     }
-
-    previousIds.delete(order.id);
   }
 
   lastOrdersSnapshot = nextSnapshot;
 
   if (newOrders.length) {
     showToast(newOrders.length === 1 ? "Nuevo pedido recibido" : `${newOrders.length} pedidos nuevos recibidos`, "success");
+    playSoftTone("order");
   } else if (statusChanged) {
     showToast("Pedidos actualizados automáticamente.", "info");
+  }
+}
+
+function notifyConversationChanges(nextConversations, previousSnapshot) {
+  const nextSnapshot = getConversationSnapshot(nextConversations);
+  let newConversationCount = 0;
+  let newInboundMessages = 0;
+
+  for (const conversation of nextConversations) {
+    if (!previousSnapshot.has(conversation.phone)) {
+      newConversationCount += 1;
+      continue;
+    }
+
+    const previousValue = previousSnapshot.get(conversation.phone);
+    const nextValue = nextSnapshot.get(conversation.phone);
+    if (previousValue !== nextValue && getUnreadCount(conversation)) {
+      newInboundMessages += 1;
+    }
+  }
+
+  lastConversationSnapshot = nextSnapshot;
+
+  if (newConversationCount) {
+    showToast(newConversationCount === 1 ? "Nueva conversación en Abi" : `${newConversationCount} conversaciones nuevas`, "info");
+    playSoftTone("conversation");
+    return;
+  }
+
+  if (newInboundMessages) {
+    showToast(newInboundMessages === 1 ? "Nuevo mensaje en Abi" : `${newInboundMessages} mensajes nuevos en Abi`, "info");
+    playSoftTone("conversation");
   }
 }
 
@@ -324,6 +470,9 @@ function startOrdersAutoRefresh() {
   ordersAutoRefreshHandle = window.setInterval(() => {
     loadOrders({ silent: true, source: "poll" });
   }, ORDERS_REFRESH_MS);
+  conversationsAutoRefreshHandle = window.setInterval(() => {
+    loadConversations({ silent: true, source: "poll" });
+  }, CONVERSATIONS_REFRESH_MS);
   ordersRefreshMetaHandle = window.setInterval(updateOrdersRefreshMeta, 1000);
 }
 
@@ -335,12 +484,17 @@ function handleOrdersAutoRefreshVisibility() {
 
   startOrdersAutoRefresh();
   loadOrders({ silent: true, source: "poll" });
+  loadConversations({ silent: true, source: "poll" });
 }
 
 function stopOrdersAutoRefresh() {
   if (ordersAutoRefreshHandle) {
     window.clearInterval(ordersAutoRefreshHandle);
     ordersAutoRefreshHandle = null;
+  }
+  if (conversationsAutoRefreshHandle) {
+    window.clearInterval(conversationsAutoRefreshHandle);
+    conversationsAutoRefreshHandle = null;
   }
   if (ordersRefreshMetaHandle) {
     window.clearInterval(ordersRefreshMetaHandle);
@@ -414,6 +568,21 @@ function showToast(message, type = "info") {
   toast.textContent = message;
   toastContainer.appendChild(toast);
   window.setTimeout(() => toast.remove(), 3200);
+}
+
+function hideAppLoader() {
+  if (!appLoader) {
+    return;
+  }
+
+  const elapsed = performance.now() - appBootStartedAt;
+  const delay = Math.max(LOADER_MIN_VISIBLE_MS - elapsed, 0);
+  window.setTimeout(() => {
+    appLoader.classList.add("is-hidden");
+    window.setTimeout(() => {
+      appLoader.hidden = true;
+    }, 260);
+  }, delay);
 }
 
 function setLoadingState() {
@@ -511,7 +680,7 @@ function renderReports() {
       <div class="report-stack">
         ${payments.length
           ? payments.map((item) => `<span class="helper-text"><strong>${escapeHtml(item.label)}</strong> · ${item.count} pedido(s) · ${formatCurrency(item.total)}</span>`).join("")
-          : '<span class="helper-text">Sin pagos registrados todavía.</span>'}
+          : `<span class="helper-text">Sin pagos registrados todavía.</span>`}
       </div>
     </article>
     <article class="report-card">
@@ -536,8 +705,8 @@ function renderReports() {
       </div>
     </article>
     <article class="report-card">
-      <h3>Último cierre</h3>
-      <p class="report-copy">Consulta rápida del último archivo histórico.</p>
+      <h3>Branding final</h3>
+      <p class="report-copy">Tellolac AI · Powered by Abi listo para demo comercial.</p>
       <div class="report-stack">
         <span class="metric-pill">${escapeHtml(latestClosure?.title || "Sin cierres todavía")}</span>
         <span class="helper-text">${escapeHtml(latestClosure ? formatDate(latestClosure.createdAt) : "Aún no hay historial")}</span>
@@ -555,7 +724,7 @@ function renderSettings() {
     </article>
     <article class="setting-card">
       <h3>Negocio</h3>
-      <p class="setting-copy">Tellolac AI · Panel comercial</p>
+      <p class="setting-copy">Tellolac AI · Powered by Abi</p>
     </article>
     <article class="setting-card">
       <h3>Versión del sistema</h3>
@@ -585,6 +754,13 @@ function renderSettings() {
       <h3>Catálogo activo</h3>
       <p class="setting-copy">${healthState?.catalogProducts || 0} producto(s) sincronizados</p>
     </article>
+    <article class="setting-card setting-card-action">
+      <div>
+        <h3>Sonidos premium</h3>
+        <p class="setting-copy">${uiSoundsEnabled ? "Activos para nuevos pedidos y conversaciones." : "Apagados. Puedes activarlos cuando quieras."}</p>
+      </div>
+      <button type="button" class="secondary small-action" data-toggle-sounds>${uiSoundsEnabled ? "Desactivar" : "Activar"}</button>
+    </article>
     <article class="setting-card">
       <h3>Pedidos visibles</h3>
       <p class="setting-copy">${summary.totalOrders || 0} pedido(s) activos hoy</p>
@@ -594,7 +770,7 @@ function renderSettings() {
 
 function renderOrders() {
   if (!orders.length) {
-    ordersTableBody.innerHTML = '<tr><td colspan="7" class="empty">No hay pedidos activos para este filtro.</td></tr>';
+    ordersTableBody.innerHTML = `<tr><td colspan="7">${renderEmptyState({ iconName: "box", title: "No hay pedidos aún", copy: "Cuando entren nuevos pedidos, aparecerán aquí listos para gestionar.", compact: true })}</td></tr>`;
     return;
   }
 
@@ -640,7 +816,7 @@ function renderDetail() {
   const order = getOrderById(selectedOrderId);
 
   if (!order) {
-    orderDetail.innerHTML = '<div class="detail-empty"><p>No hay ningún pedido seleccionado.</p></div>';
+    orderDetail.innerHTML = renderEmptyState({ iconName: "clipboard-list", title: "No hay pedido seleccionado", copy: "Elige un pedido de la tabla para ver su detalle completo." });
     return;
   }
 
@@ -652,7 +828,7 @@ function renderDetail() {
           <div class="helper-text">Subtotal: ${escapeHtml(formatCurrency(item.subtotal || 0))}</div>
         </div>
       `).join("")
-    : '<p class="helper-text">No hay detalle de productos disponible.</p>';
+    : "<p class=\"helper-text\">No hay detalle de productos disponible.</p>";
 
   orderDetail.innerHTML = `
     <div class="detail-grid">
@@ -689,7 +865,7 @@ function renderDetail() {
 
 function renderConversationList() {
   if (!conversations.length) {
-    conversationList.innerHTML = '<div class="conversation-empty modern-empty-state"><p class="modal-empty-title">No hay conversaciones</p><p class="helper-text">Cuando entren mensajes, aparecerán aquí.</p></div>';
+    conversationList.innerHTML = renderEmptyState({ iconName: "inbox", title: "Sin conversaciones", copy: "Cuando entren mensajes nuevos, Abi los mostrará aquí." });
     return;
   }
 
@@ -744,8 +920,8 @@ function renderChatHeader() {
   chatTitle.textContent = customerName;
   chatSubtitle.textContent = `${conversation.phone} · ${conversation.lastMessageDirection === "in" ? "Cliente activo" : "Abi respondió"}`;
   chatOrderSummary.innerHTML = `
-    <span class="badge light">Pedido: ${escapeHtml(conversation.lastOrderId || "ninguno")}</span>
-    <span class="badge light">${healthState?.whatsappEnabled ? "WhatsApp online" : "Envío simulado"}</span>
+    <span class="badge light">${icon("clipboard-list")} Pedido: ${escapeHtml(conversation.lastOrderId || "ninguno")}</span>
+    <span class="badge light">${icon("circle-dot")} ${healthState?.whatsappEnabled ? "WhatsApp online" : "Envío simulado"}</span>
   `;
   chatMessageInput.disabled = false;
   sendMessageButton.disabled = false;
@@ -755,35 +931,45 @@ function renderChatHeader() {
 function renderMessages() {
   if (!selectedPhone) {
     chatMessages.className = "chat-messages empty-chat";
-    chatMessages.innerHTML = '<div class="modern-empty-state"><p class="modal-empty-title">Chat de Abi</p><p class="helper-text">Selecciona una conversación de la izquierda para comenzar.</p></div>';
+    chatMessages.innerHTML = renderEmptyState({ iconName: "bot", title: "Chat de Abi", copy: "Selecciona una conversación de la izquierda para comenzar." });
     syncChatWorkspaceState();
     return;
   }
 
   if (!activeMessages.length) {
     chatMessages.className = "chat-messages empty-chat";
-    chatMessages.innerHTML = '<div class="modern-empty-state"><p class="modal-empty-title">Sin mensajes</p><p class="helper-text">Esta conversación todavía no tiene historial.</p></div>';
+    chatMessages.innerHTML = renderEmptyState({ iconName: "message-circle", title: "Sin mensajes", copy: "Esta conversación todavía no tiene historial." });
     syncChatWorkspaceState();
     return;
   }
 
   const hasMore = activeMessages.length > visibleMessagesLimit;
   const visibleMessages = hasMore ? activeMessages.slice(-visibleMessagesLimit) : activeMessages;
+  const conversation = getConversationByPhone(selectedPhone);
+  const customerName = buildConversationLabel(conversation);
+  const customerAvatar = buildAvatarLabel({ cliente: customerName, telefono: selectedPhone });
 
   chatMessages.className = "chat-messages";
   chatMessages.innerHTML = `
     ${hasMore ? `<button type="button" class="secondary ghost load-older-button" id="loadOlderMessagesButton">Cargar mensajes anteriores</button>` : ""}
-    ${visibleMessages.map((message) => `
-      <div class="message-row ${escapeHtml(message.direction)}">
-        <article class="message-bubble">
-          <div class="message-text">${escapeHtml(message.messageText || "")}</div>
-          <div class="message-meta compact-message-meta">
-            <span>${escapeHtml(formatTime(message.createdAt))}</span>
-            <span>${escapeHtml(message.direction === "in" ? "Cliente" : "Abi")}</span>
+    ${visibleMessages.map((message) => {
+      const isInbound = message.direction === "in";
+      const actorLabel = isInbound ? customerAvatar : "AB";
+      return `
+        <div class="message-row ${escapeHtml(message.direction)}">
+          <div class="message-cluster">
+            <span class="message-avatar">${escapeHtml(actorLabel)}</span>
+            <article class="message-bubble">
+              <div class="message-text">${escapeHtml(message.messageText || "")}</div>
+              <div class="message-meta compact-message-meta">
+                <span>${escapeHtml(formatTime(message.createdAt))}</span>
+                <span>${escapeHtml(isInbound ? "Cliente" : "Abi")}</span>
+              </div>
+            </article>
           </div>
-        </article>
-      </div>
-    `).join("")}
+        </div>
+      `;
+    }).join("")}
   `;
 
   const loadOlderButton = document.getElementById("loadOlderMessagesButton");
@@ -798,8 +984,8 @@ function renderMessages() {
 
 function renderHistory() {
   if (!historyClosures.length) {
-    historyList.innerHTML = '<div class="detail-empty"><p>No hay cierres guardados todavía.</p></div>';
-    historyDetail.innerHTML = '<div class="detail-empty"><p>Aquí verás el resumen del cierre seleccionado.</p></div>';
+    historyList.innerHTML = renderEmptyState({ iconName: "history", title: "No hay historial", copy: "Cuando cierres días operativos, se guardarán aquí para consulta y descarga." });
+    historyDetail.innerHTML = renderEmptyState({ iconName: "file-search", title: "Sin detalle histórico", copy: "Selecciona un cierre guardado para revisar ventas, pagos y PDF." });
     return;
   }
 
@@ -830,7 +1016,7 @@ function renderHistoryDetail() {
   const closure = getClosureById(selectedClosureId);
 
   if (!closure) {
-    historyDetail.innerHTML = '<div class="detail-empty"><p>Aquí verás el resumen del cierre seleccionado.</p></div>';
+    historyDetail.innerHTML = renderEmptyState({ iconName: "file-search", title: "Sin detalle histórico", copy: "Selecciona un cierre guardado para revisar ventas, pagos y PDF." });
     return;
   }
 
@@ -846,8 +1032,9 @@ function renderHistoryDetail() {
           <div class="meta-item"><span>Fecha</span>${escapeHtml(formatDate(closure.createdAt))}</div>
           <div class="meta-item"><span>Pedidos archivados</span>${escapeHtml(String(stats.totalOrders || closure.archivedOrdersCount || 0))}</div>
           <div class="meta-item"><span>Ventas</span>${escapeHtml(formatCurrency(stats.totalSales || closure.totalSales || 0))}</div>
+          <div class="meta-item"><span>Branding</span>Tellolac AI · Powered by Abi</div>
         </div>
-        ${closure.downloadUrl ? `<div style="margin-top:12px;"><a class="primary" style="display:inline-flex;padding:12px 16px;text-decoration:none;" href="${escapeHtml(closure.downloadUrl)}">Descargar PDF</a></div>` : ""}
+        ${closure.downloadUrl ? `<div style="margin-top:12px;"><a class="primary" style="display:inline-flex;align-items:center;gap:8px;padding:12px 16px;text-decoration:none;" href="${escapeHtml(closure.downloadUrl)}">${icon("file-text")}Descargar PDF</a></div>` : ""}
       </div>
       <div class="detail-card">
         <h3>Métodos de pago</h3>
@@ -911,8 +1098,7 @@ function renderCloseDaySummary() {
   if (!hasOrders) {
     closeDaySummary.innerHTML = `
       <div class="modal-empty-state">
-        <p class="modal-empty-title">No hay pedidos activos para cerrar hoy.</p>
-        <p class="helper-text">Cuando existan pedidos del día, aquí verás el resumen antes de confirmar el cierre.</p>
+        ${renderEmptyState({ iconName: "file-text", title: "No hay pedidos activos para cerrar hoy", copy: "Cuando existan pedidos del día, aquí verás el resumen antes de confirmar el cierre." })}
       </div>
     `;
     return;
@@ -933,7 +1119,7 @@ function renderCloseDaySummary() {
           : '<p class="helper-text">No hay pagos registrados todavía.</p>'}
       </div>
     </div>
-    <p class="helper-text modal-note">Se generará un PDF del día, se archivarán los pedidos visibles y el panel operativo quedará limpio.</p>
+    <p class="helper-text modal-note">Se generará un PDF Tellolac AI, se archivarán los pedidos visibles y el panel operativo quedará limpio.</p>
   `;
 }
 
@@ -1024,8 +1210,8 @@ async function loadOrders(options = {}) {
       orders = [];
       selectedOrderId = null;
       tableMeta.textContent = "No se pudieron cargar pedidos";
-      ordersTableBody.innerHTML = '<tr><td colspan="7" class="empty">No fue posible cargar los pedidos.</td></tr>';
-      orderDetail.innerHTML = `<div class="detail-empty"><p>${escapeHtml(error.message)}</p></div>`;
+      ordersTableBody.innerHTML = `<tr><td colspan="7">${renderEmptyState({ iconName: "box", title: "No fue posible cargar los pedidos", copy: error.message, compact: true })}</td></tr>`;
+      orderDetail.innerHTML = renderEmptyState({ iconName: "file-search", title: "Sin detalle disponible", copy: error.message });
       showFeedback(error.message, "error");
     }
   } finally {
@@ -1035,10 +1221,23 @@ async function loadOrders(options = {}) {
   }
 }
 
-async function loadConversations() {
-  conversationMeta.textContent = "Cargando conversaciones...";
+async function loadConversations(options = {}) {
+  const { silent = false, source = "manual" } = options;
   const query = conversationSearchQuery.trim();
   const requestQuery = query ? `?q=${encodeURIComponent(query)}` : "";
+  const previousSnapshot = lastConversationSnapshot;
+
+  if (source === "poll" && conversationsPollingInFlight) {
+    return;
+  }
+
+  if (source === "poll") {
+    conversationsPollingInFlight = true;
+  }
+
+  if (!silent) {
+    conversationMeta.textContent = "Cargando conversaciones...";
+  }
 
   try {
     const response = await fetch(`/conversations${requestQuery}`, { cache: "no-store" });
@@ -1063,25 +1262,38 @@ async function loadConversations() {
     renderConversationList();
 
     if (selectedPhone) {
-      await loadMessages(selectedPhone);
+      await loadMessages(selectedPhone, { silent });
     } else {
       activeMessages = [];
       renderChatHeader();
       renderMessages();
     }
+
+    if (silent && previousSnapshot.size) {
+      notifyConversationChanges(conversations, previousSnapshot);
+    } else {
+      lastConversationSnapshot = getConversationSnapshot(conversations);
+    }
   } catch (error) {
-    conversations = [];
-    selectedPhone = null;
-    activeMessages = [];
-    conversationMeta.textContent = "No se pudieron cargar conversaciones";
-    conversationList.innerHTML = `<div class="conversation-empty modern-empty-state"><p class="modal-empty-title">No fue posible cargar la bandeja</p><p class="helper-text">${escapeHtml(error.message)}</p></div>`;
-    renderChatHeader();
-    renderMessages();
-    showChatFeedback(error.message, "error");
+    if (!silent) {
+      conversations = [];
+      selectedPhone = null;
+      activeMessages = [];
+      conversationMeta.textContent = "No se pudieron cargar conversaciones";
+      conversationList.innerHTML = renderEmptyState({ iconName: "message-circle", title: "No fue posible cargar la bandeja", copy: error.message });
+      renderChatHeader();
+      renderMessages();
+      showChatFeedback(error.message, "error");
+    }
+  } finally {
+    if (source === "poll") {
+      conversationsPollingInFlight = false;
+    }
   }
 }
 
-async function loadMessages(phone) {
+async function loadMessages(phone, options = {}) {
+  const { silent = false } = options;
   visibleMessagesLimit = 60;
   chatMessages.className = "chat-messages";
   chatMessages.innerHTML = Array.from({ length: 3 }).map((_, index) => `
@@ -1109,7 +1321,9 @@ async function loadMessages(phone) {
     activeMessages = [];
     renderChatHeader();
     renderMessages();
-    showChatFeedback(error.message, "error");
+    if (!silent) {
+      showChatFeedback(error.message, "error");
+    }
   }
 }
 
@@ -1132,8 +1346,8 @@ async function loadHistory() {
     renderReports();
   } catch (error) {
     historyClosures = [];
-    historyList.innerHTML = `<div class="detail-empty"><p>${escapeHtml(error.message)}</p></div>`;
-    historyDetail.innerHTML = '<div class="detail-empty"><p>No fue posible cargar el historial.</p></div>';
+    historyList.innerHTML = renderEmptyState({ iconName: "history", title: "No existe historial", copy: error.message });
+    historyDetail.innerHTML = renderEmptyState({ iconName: "file-search", title: "Historial no disponible", copy: "No fue posible cargar el historial." });
   }
 }
 
@@ -1219,6 +1433,7 @@ async function sendChatMessage(event) {
     }
 
     chatMessageInput.value = "";
+    chatMessageInput.style.height = "auto";
     showChatFeedback(payload.delivery?.simulated ? "Mensaje guardado y envío simulado correctamente." : "Mensaje enviado correctamente.", "success");
     showToast("Mensaje enviado desde Chat de Abi.", "success");
     await loadConversations();
@@ -1279,6 +1494,7 @@ async function loadDashboard() {
     await Promise.all([loadOrders(), loadConversations(), loadHistory(), loadHealth()]);
   } finally {
     closeDayButton.disabled = false;
+    hideAppLoader();
   }
 }
 
@@ -1327,6 +1543,15 @@ document.addEventListener("click", (event) => {
   if (navLink) {
     showSection(navLink.dataset.section);
     closeMobileSidebar();
+    return;
+  }
+
+  if (event.target.closest("[data-toggle-sounds]")) {
+    uiSoundsEnabled = !uiSoundsEnabled;
+    storeSoundsPreference();
+    syncSoundToggleState();
+    renderSettings();
+    showToast(uiSoundsEnabled ? "Sonidos suaves activados." : "Sonidos suaves desactivados.", "info");
   }
 });
 
@@ -1360,6 +1585,14 @@ chatBackButton?.addEventListener("click", () => {
   syncChatWorkspaceState();
 });
 
+soundToggleButton?.addEventListener("click", () => {
+  uiSoundsEnabled = !uiSoundsEnabled;
+  storeSoundsPreference();
+  syncSoundToggleState();
+  renderSettings();
+  showToast(uiSoundsEnabled ? "Sonidos suaves activados." : "Sonidos suaves desactivados.", "info");
+});
+
 closeDayButton?.addEventListener("click", openFinalizeModal);
 closeModalButton?.addEventListener("click", closeFinalizeModal);
 cancelCloseDayButton?.addEventListener("click", closeFinalizeModal);
@@ -1369,6 +1602,7 @@ closeDayModal?.addEventListener("click", (event) => {
     closeFinalizeModal();
   }
 });
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") {
     return;
@@ -1412,6 +1646,7 @@ chatComposer.addEventListener("submit", sendChatMessage);
 
 initSidebarState();
 initSectionState();
+syncSoundToggleState();
 updateOrdersRefreshMeta();
 
 (async () => {

@@ -8,6 +8,14 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
+  <svg width="0" height="0" class="icon-sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="icon-bot" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 3v4M9 12h.01M15 12h.01M8.5 16h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-circle-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></symbol>
+      <symbol id="icon-sparkles" viewBox="0 0 24 24"><path d="m12 3 1.9 4.6L18.5 9l-4.6 1.4L12 15l-1.9-4.6L5.5 9l4.6-1.4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    </defs>
+  </svg>
+
   <main class="auth-shell premium-login-shell">
     <div class="auth-video-layer" aria-hidden="true">
       <video class="auth-background-video" autoplay muted loop playsinline preload="metadata">
@@ -20,31 +28,38 @@
       <div class="auth-brand">
         <img src="/assets/logo-tellolac.jpg" alt="Logo Tellolac" class="auth-logo" />
         <div>
-          <p class="eyebrow">Tellolac AI · Abi</p>
+          <p class="eyebrow">Tellolac AI</p>
           <h1>Acceso premium</h1>
-          <p class="subtitle">Ingresa al panel comercial con una experiencia moderna, segura y enfocada en ventas.</p>
+          <p class="subtitle">Ingresa al panel comercial con una experiencia moderna, segura y lista para demo.</p>
         </div>
       </div>
 
       <div class="auth-copy-box">
-        <span class="status-pill status-online">🟢 Abi Online</span>
-        <p>Pedidos, historial, cierres del día y conversaciones en una sola bandeja premium.</p>
+        <div class="auth-copy-row">
+          <span class="status-pill status-online"><svg class="ui-icon" aria-hidden="true"><use href="#icon-circle-dot"></use></svg>Abi assistant online</span>
+          <span class="glass-tag"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>Powered by Abi</span>
+        </div>
+        <p>Pedidos, historial, cierres del día y conversaciones en una sola bandeja elegante, enfocada en ventas.</p>
+        <div class="auth-highlight">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-bot"></use></svg>
+          <span>Abi acompaña la operación comercial de Tellolac con contexto, seguimiento y respuesta rápida.</span>
+        </div>
       </div>
 
       <form id="loginForm">
         <label>
           <span>Usuario</span>
-          <input id="username" name="username" type="text" autocomplete="username" required />
+          <input id="username" name="username" type="text" autocomplete="username" placeholder="Ingresa tu usuario" required />
         </label>
         <label>
           <span>Contraseña</span>
-          <input id="password" name="password" type="password" autocomplete="current-password" required />
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Ingresa tu contraseña" required />
         </label>
         <p id="loginError" class="auth-error"></p>
         <button type="submit" class="primary">Ingresar al panel</button>
       </form>
 
-      <p class="auth-note">Powered by Tellolac AI + Abi · Solo personal autorizado.</p>
+      <p class="auth-note">Tellolac AI · Powered by Abi · Solo personal autorizado.</p>
     </section>
   </main>
 
@@ -59,6 +74,8 @@
       errorNode.textContent = '';
       const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
+      const submitButton = form.querySelector('button[type="submit"]');
+      submitButton.disabled = true;
 
       try {
         const response = await fetch('/auth/login', {
@@ -80,6 +97,8 @@
         window.location.href = next.startsWith('/') ? next : '/';
       } catch (error) {
         errorNode.textContent = error.message;
+      } finally {
+        submitButton.disabled = false;
       }
     });
   </script>

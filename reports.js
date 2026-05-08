@@ -38,10 +38,11 @@ async function generateDailyClosurePdf({ closureId, summary }) {
     const stream = fs.createWriteStream(filePath);
     doc.pipe(stream);
 
-    doc.fontSize(22).fillColor("#19324d").text("Tellolac AI", { align: "left" });
+    doc.roundedRect(40, 36, 515, 78, 18).fillAndStroke("#eef4ff", "#dbe7fb");
+    doc.fillColor("#4078e1").fontSize(22).text("Tellolac AI", 58, 56, { align: "left" });
     doc.moveDown(0.2);
-    doc.fontSize(12).fillColor("#4b647f").text("Cierre de día · Powered by Abi AI");
-    doc.moveDown();
+    doc.fillColor("#5c6f8a").fontSize(12).text("Cierre de día · Powered by Abi", 58, 84);
+    doc.moveDown(2.2);
 
     doc.fontSize(14).fillColor("#10243e").text(safeText(summary?.title || "Resumen operativo"));
     doc.fontSize(10).fillColor("#6b7b8d").text(`Generado: ${formatDate(summary?.generatedAt || new Date().toISOString())}`);
@@ -89,6 +90,9 @@ async function generateDailyClosurePdf({ closureId, summary }) {
         doc.moveDown(0.6);
       });
     }
+
+    doc.moveDown();
+    doc.fontSize(9).fillColor("#8a99ad").text("Tellolac AI · Powered by Abi", 40, doc.page.height - 44, { align: "center", width: doc.page.width - 80 });
 
     doc.end();
     stream.on("finish", resolve);
