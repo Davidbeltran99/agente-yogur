@@ -197,8 +197,8 @@ const CATALOG_TOKEN_STOPWORDS = new Set([
   "producto", "productos", "pedido", "pedidos", "favor", "envio", "domicilio"
 ]);
 const GENERIC_CATALOG_TOKENS = new Set(["yogur", "yogurt", "yoghurt", "bebida", "sabor", "cosa", "detalle"]);
-const SIZE_SMALL_TOKENS = ["pequeno", "pequeño", "pequenito", "chico", "personal", "litro", "1000", "1000ml", "1000 ml"];
-const SIZE_LARGE_TOKENS = ["grande", "grandecito", "garrafa", "familiar", "1800", "1800ml", "1800 ml", "1 8", "1.8", "1.8ml", "1.8 ml"];
+const SIZE_SMALL_TOKENS = ["pequeno", "pequeño", "pequenito", "chico", "personal", "litro", "1000", "1000ml", "1000 ml", "500g", "500 g", "medio kilo", "media libra"];
+const SIZE_LARGE_TOKENS = ["grande", "grandecito", "garrafa", "familiar", "1800", "1800ml", "1800 ml", "1 8", "1.8", "1.8ml", "1.8 ml", "kilo", "1 kilo", "1kg", "kg", "1000g", "1000 g", "de kilo"];
 const PRICE_VALUE_TOKENS = ["barato", "barata", "baratos", "baratas", "economico", "económico", "economica", "económica", "economicos", "económicos", "economicas", "económicas", "asequible", "asequibles"];
 const SAME_PRODUCT_TOKENS = ["lo mismo", "el mismo", "la misma", "ese", "esa", "el de siempre", "la de siempre", "como siempre"];
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
@@ -206,6 +206,7 @@ const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
   ["aloe", ["aloe", "sabila", "sábila"]],
   ["cafe", ["cafe", "café", "cafecito"]],
+  ["griego", ["griego", "yogur griego", "yogurt griego", "griego de kilo", "griego grande"]],
   ["ancheta", ["ancheta", "regalo", "detalle", "combo", "combo regalo"]],
   ["bandeja queso arequipe", ["bandeja", "queso", "arequipe", "tabla"]]
 ]);
@@ -458,6 +459,8 @@ function normalizeCanonicalCatalogName(value) {
     .replace(/\b1\s*[.,]\s*8\s*ml\b/g, "1800 ml")
     .replace(/\b1800ml\b/g, "1800 ml")
     .replace(/\b1000ml\b/g, "1000 ml")
+    .replace(/\b1000g\b/g, "1000 g")
+    .replace(/\b1kg\b/g, "1 kg")
     .replace(/\./g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -465,7 +468,7 @@ function normalizeCanonicalCatalogName(value) {
 
 function normalizeCatalogFamilyName(value) {
   return normalizeCanonicalCatalogName(value)
-    .replace(/\b(1800 ml|1000 ml)\b/g, " ")
+    .replace(/\b(1800 ml|1000 ml|1000 g|1 kg|500 g|250 g)\b/g, " ")
     .replace(/\b\d+\b$/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -473,7 +476,7 @@ function normalizeCatalogFamilyName(value) {
 
 function normalizeCatalogSemanticFamilyName(value) {
   return normalizeCatalogFamilyName(value)
-    .replace(/\b(garrafa|litro)\b/g, " ")
+    .replace(/\b(garrafa|litro|kilo|kg|gramos?|gr)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -557,17 +560,17 @@ function buildProductSemanticTokens(product) {
 
 function isSmallVariant(product) {
   const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
-  return /\b1000 ml\b/.test(canonical);
+  return /\b(1000 ml|500 g|250 g)\b/.test(canonical);
 }
 
 function isStandardVariant(product) {
   const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
-  return /\blitro\b/.test(canonical) && !/\b1000 ml\b/.test(canonical) && !/\b1800 ml\b/.test(canonical) && !/\bgarrafa\b/.test(canonical);
+  return /\b(litro|griego|yogurt|yogur)\b/.test(canonical) && !/\b(1000 ml|1800 ml|1000 g|1 kg|500 g|250 g)\b/.test(canonical) && !/\bgarrafa\b/.test(canonical);
 }
 
 function isLargeVariant(product) {
   const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
-  return /\b1800 ml\b/.test(canonical) || /\bgarrafa\b/.test(canonical);
+  return /\b(1800 ml|1000 g|1 kg)\b/.test(canonical) || /\b(garrafa|kilo)\b/.test(canonical);
 }
 
 function getFamilyPriceStats(familyName) {

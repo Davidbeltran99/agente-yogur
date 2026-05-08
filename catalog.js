@@ -68,6 +68,56 @@ function normalizeVolumeAliases(name) {
   return new Set(Array.from(aliases).map((alias) => alias.trim()).filter(Boolean));
 }
 
+function buildSizeSemanticAliases(name) {
+  const aliases = new Set();
+  const normalized = normalizeCatalogText(name);
+
+  if (!normalized) {
+    return aliases;
+  }
+
+  const familyBase = normalized
+    .replace(/\b(1800\s*ml|1800ml|1000\s*ml|1000ml|1000\s*g|1000g|500\s*g|500g|250\s*g|250g|1\s*kg|1kg|kilo|kg|gramos?|gr|ml|lt|litro|garrafa)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!familyBase) {
+    return aliases;
+  }
+
+  if (/\b(1800\s*ml|1800ml|1\s*[.,]?\s*8\s*ml|garrafa)\b/.test(normalized)) {
+    aliases.add(`${familyBase} grande`);
+    aliases.add(`${familyBase} garrafa`);
+    aliases.add(`${familyBase} familiar`);
+  }
+
+  if (/\b(1000\s*ml|1000ml|litro)\b/.test(normalized)) {
+    aliases.add(`${familyBase} litro`);
+    aliases.add(`${familyBase} 1000 ml`);
+    aliases.add(`${familyBase} 1000ml`);
+    aliases.add(`${familyBase} pequeno`);
+  }
+
+  if (/\b(1000\s*g|1000g|1\s*kg|1kg|kilo|kg)\b/.test(normalized)) {
+    aliases.add(`${familyBase} grande`);
+    aliases.add(`${familyBase} de kilo`);
+    aliases.add(`${familyBase} kilo`);
+    aliases.add(`${familyBase} 1 kilo`);
+    aliases.add(`${familyBase} 1kg`);
+    aliases.add(`${familyBase} 1000 g`);
+    aliases.add(`${familyBase} 1000g`);
+  }
+
+  if (/\b(500\s*g|500g|medio\s*kilo)\b/.test(normalized)) {
+    aliases.add(`${familyBase} pequeno`);
+    aliases.add(`${familyBase} medio kilo`);
+    aliases.add(`${familyBase} 500 g`);
+    aliases.add(`${familyBase} 500g`);
+  }
+
+  return new Set(Array.from(aliases).map((alias) => alias.trim()).filter(Boolean));
+}
+
 function buildAliases(product) {
   const aliases = new Set();
   const explicitAliases = Array.isArray(product?.aliases) ? product.aliases : [];
@@ -80,6 +130,10 @@ function buildAliases(product) {
   }
 
   for (const alias of normalizeVolumeAliases(product?.nombre)) {
+    aliases.add(alias);
+  }
+
+  for (const alias of buildSizeSemanticAliases(product?.nombre)) {
     aliases.add(alias);
   }
 
