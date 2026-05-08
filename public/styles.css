@@ -1162,7 +1162,7 @@ tr.active td {
 }
 
 .chat-workspace-fullscreen {
-  grid-template-columns: minmax(240px, 18%) minmax(0, 82%);
+  grid-template-columns: minmax(220px, 15%) minmax(0, 85%);
 }
 
 .crm-layout {
@@ -1181,7 +1181,7 @@ tr.active td {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   border-right: 1px solid rgba(143, 164, 191, 0.14);
-  background: linear-gradient(180deg, rgba(248, 251, 255, 0.92), rgba(244, 248, 253, 0.9));
+  background: linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(244, 248, 253, 0.92));
   min-height: 0;
 }
 
@@ -1190,7 +1190,7 @@ tr.active td {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  padding: 18px 18px 12px;
+  padding: 14px 14px 10px;
 }
 
 .compact-status {
@@ -1199,14 +1199,14 @@ tr.active td {
 }
 
 .chat-search {
-  margin: 0 18px 12px;
+  margin: 0 14px 10px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 14px;
+  padding: 0 12px;
   border-radius: 18px;
   border: 1px solid rgba(143, 164, 191, 0.18);
-  background: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.88);
 }
 
 .chat-search input {
@@ -1222,8 +1222,8 @@ tr.active td {
 
 .conversation-list {
   display: grid;
-  gap: 10px;
-  padding: 0 12px 14px;
+  gap: 8px;
+  padding: 0 10px 12px;
   overflow-y: auto;
   min-height: 0;
 }
@@ -1231,12 +1231,12 @@ tr.active td {
 .conversation-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   align-items: start;
-  padding: 14px;
+  padding: 12px;
   border: 1px solid rgba(143, 164, 191, 0.14);
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.86);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.9);
   cursor: pointer;
 }
 
@@ -1313,7 +1313,7 @@ tr.active td {
 
 .chat-header,
 .chat-composer {
-  padding: 16px 18px;
+  padding: 14px 18px;
 }
 
 .chat-header {
@@ -1380,7 +1380,7 @@ tr.active td {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 28px 28px 24px;
+  padding: 30px 34px 26px;
   overflow-y: auto;
   background:
     linear-gradient(180deg, rgba(95, 141, 247, 0.04), rgba(255,255,255,0)),
@@ -1450,7 +1450,7 @@ tr.active td {
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  max-width: min(92%, 1080px);
+  max-width: min(96%, 1280px);
 }
 
 .message-row.out .message-cluster {
