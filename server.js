@@ -201,6 +201,8 @@ const SIZE_SMALL_TOKENS = ["pequeno", "pequeño", "pequenito", "chico", "persona
 const SIZE_LARGE_TOKENS = ["grande", "grandecito", "garrafa", "familiar", "1800", "1800ml", "1800 ml", "1 8", "1.8", "1.8ml", "1.8 ml"];
 const PRICE_VALUE_TOKENS = ["barato", "barata", "baratos", "baratas", "economico", "económico", "economica", "económica", "economicos", "económicos", "economicas", "económicas", "asequible", "asequibles"];
 const SAME_PRODUCT_TOKENS = ["lo mismo", "el mismo", "la misma", "ese", "esa", "el de siempre", "la de siempre", "como siempre"];
+const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
+const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
   ["aloe", ["aloe", "sabila", "sábila"]],
   ["cafe", ["cafe", "café", "cafecito"]],
@@ -336,7 +338,7 @@ function esConfirmacionCasual(texto) {
   return /^(listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
 }
 
-function detectarIntencionConversacional(texto, { hasDraftContext = false, customerName = null, awaitingName = false } = {}) {
+function detectarIntencionConversacional(texto, { hasDraftContext = false, hasActiveContext = false, customerName = null, awaitingName = false } = {}) {
   if (esPreguntaIdentidad(texto)) {
     return "identity";
   }
@@ -366,10 +368,10 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, custo
   }
 
   if (esConfirmacionCasual(texto)) {
-    return hasDraftContext ? "order_missing_data" : "general_chat";
+    return (hasDraftContext || hasActiveContext) ? "order_missing_data" : "general_chat";
   }
 
-  if (hasDraftContext) {
+  if (hasDraftContext || hasActiveContext) {
     return "order_missing_data";
   }
 
@@ -726,7 +728,44 @@ function normalizeFuzzyCatalogToken(token = "") {
   return String(token || "")
     .trim()
     .toLowerCase()
+    .replace(/^yogur(?:t|th)?$/i, "yogurt")
+    .replace(/^griegos?$/i, "griego")
     .replace(/(es|s)$/i, "");
+}
+
+function buildCharacterNgrams(value = "", size = 3) {
+  const normalized = normalizeCatalogText(value).replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const source = normalized.length < size ? normalized : normalized;
+  const grams = new Set();
+  for (let index = 0; index <= Math.max(0, source.length - size); index += 1) {
+    grams.add(source.slice(index, index + size));
+  }
+
+  if (!grams.size) {
+    grams.add(source);
+  }
+
+  return Array.from(grams);
+}
+
+function puntuarCoincidenciaSimilaridad(candidate, alias) {
+  const candidateGrams = buildCharacterNgrams(candidate);
+  const aliasGrams = buildCharacterNgrams(alias);
+  if (!candidateGrams.length || !aliasGrams.length) {
+    return 0;
+  }
+
+  const overlap = candidateGrams.filter((gram) => aliasGrams.includes(gram)).length;
+  if (!overlap) {
+    return 0;
+  }
+
+  const ratio = overlap / Math.max(candidateGrams.length, aliasGrams.length);
+  return ratio >= 0.45 ? 58 + ratio * 18 : 0;
 }
 
 function puntuarCoincidenciaTipografica(candidateTokens = [], aliasTokens = []) {
@@ -807,7 +846,7 @@ function puntuarCoincidenciaCatalogo(candidate, alias) {
     return Math.max(72 + ratio * 10, typoScore);
   }
 
-  return typoScore;
+  return Math.max(typoScore, puntuarCoincidenciaSimilaridad(candidate, alias));
 }
 
 function normalizarScoreAConfianza(score = 0) {
@@ -1507,7 +1546,7 @@ function extraerFechaEntregaDesdeTexto(texto) {
 }
 
 function encontrarCantidadEnSegmento(segmentoNormalizado) {
-  const match = String(segmentoNormalizado || "").match(new RegExp(`(?:^|\\b(?:quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|llevo|dame|enviame|enviarme)\\s+)(${QUANTITY_TOKEN_PATTERN})\\b`, "i"));
+  const match = String(segmentoNormalizado || "").match(new RegExp(`(?:^|\\b(?:quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|llevo|dame|enviame|enviarme|agrega|agregame|agregale|suma|sumale|ponme|mandame)\\s+)(${QUANTITY_TOKEN_PATTERN})\\b`, "i"));
   return obtenerNumeroDesdeToken(match?.[1] || null);
 }
 
@@ -1557,7 +1596,7 @@ function esSegmentoNoProducto(segmento) {
     return true;
   }
 
-  const hasPurchaseIntent = /\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme)\b/i.test(normalized);
+  const hasPurchaseIntent = /\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme|agrega|agregame|agregale|suma|sumale|ponme|mandame)\b/i.test(normalized);
   const hasQuantity = /\b(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i.test(normalized);
 
   if (hasPurchaseIntent || hasQuantity) {
@@ -1587,6 +1626,12 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
 
     const resolution = resolverProductoCatalogo(segment);
     if (resolution.status === "matched") {
+      logEvent("PRODUCT_MATCH_CONFIDENCE", {
+        input: segment,
+        status: resolution.status,
+        confidence: resolution.confidence || 100,
+        product: resolution.product?.nombre || null
+      });
       const cantidad = encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
       const precioUnitario = parseOptionalNumber(resolution.product.precio);
 
@@ -1601,6 +1646,12 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
     }
 
     if (resolution.status === "ambiguous" || resolution.status === "suggested") {
+      logEvent("PRODUCT_MATCH_CONFIDENCE", {
+        input: segment,
+        status: resolution.status,
+        confidence: resolution.confidence || null,
+        options: (resolution.matches || []).map((option) => option?.nombre).filter(Boolean)
+      });
       ambiguities.push({
         input: segment,
         options: (resolution.matches || (resolution.product ? [resolution.product] : [])).slice(0, 3),
@@ -1633,6 +1684,12 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
     }
 
     if (hasQuantity || quickMatches.length) {
+      logEvent("PRODUCT_MATCH_CONFIDENCE", {
+        input: segment,
+        status: "not_found",
+        confidence: 0,
+        options: quickMatches.map((entry) => entry.product?.nombre).filter(Boolean)
+      });
       unmatched.push(segment);
     }
   }
@@ -1722,7 +1779,7 @@ function detectarIntencionPedido(texto) {
   }
 
   const analysis = analizarProductosCatalogoDesdeTexto(texto);
-  const hasPurchaseVerb = /\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme)\b/i.test(normalized);
+  const hasPurchaseVerb = /\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme|agrega|agregame|agregale|suma|sumale|ponme|mandame)\b/i.test(normalized);
   const hasQuantity = /\b(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i.test(normalized);
   const hasPaymentCue = Array.from(PAYMENT_ALIASES.keys()).some((alias) => normalized.includes(normalizarTextoAnalisis(alias)));
   const hasAddressCue = /\b(direccion|direccion:|entrega|enviar|envio|domicilio)\b/i.test(normalized) || ADDRESS_KEYWORDS.test(normalized);
@@ -1793,6 +1850,11 @@ function buildPriceRequestProducts(texto, limit = 4) {
 }
 
 async function generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context }) {
+  if (["order_request", "order_missing_data", "ambiguous_product"].includes(routingIntent)) {
+    logEvent("RESPONSE_SOURCE", { telefono, sourceMessageId, intent: routingIntent, source: "template_locked" });
+    return fallback;
+  }
+
   try {
     const respuesta = await generarRespuestaAbi({ intent: routingIntent, ...context, fallback });
     if (respuesta) {
@@ -2604,6 +2666,223 @@ function buildProductReference(productName) {
   };
 }
 
+function buildSuggestedProductEntry(option, index = 0) {
+  if (!option) {
+    return null;
+  }
+
+  const reference = buildProductReference(option?.nombre || option?.productoOriginal || option);
+  if (!reference) {
+    return null;
+  }
+
+  return {
+    indice: index + 1,
+    id: reference.id,
+    nombre: reference.nombre,
+    nombreCanonico: reference.nombreCanonico,
+    familia: reference.familia,
+    variant: reference.variant,
+    precio: parseOptionalNumber(option?.precio),
+    aliases: Array.isArray(option?.aliases) ? option.aliases : []
+  };
+}
+
+function limpiarSuggestionMemory(state) {
+  if (state) {
+    state.lastSuggestedProducts = null;
+  }
+}
+
+function obtenerSuggestionMemoryActiva(state, now = Date.now()) {
+  if (!state?.lastSuggestedProducts) {
+    return null;
+  }
+
+  if (Number(state.lastSuggestedProducts.expires_at) <= now) {
+    limpiarSuggestionMemory(state);
+    return null;
+  }
+
+  return state.lastSuggestedProducts;
+}
+
+function guardarSuggestionMemory(state, products = [], meta = {}) {
+  if (!state) {
+    return null;
+  }
+
+  const options = products
+    .map((product, index) => buildSuggestedProductEntry(product, index))
+    .filter(Boolean);
+
+  if (!options.length) {
+    limpiarSuggestionMemory(state);
+    return null;
+  }
+
+  const createdAt = Date.now();
+  state.lastSuggestedProducts = {
+    tipo: meta.type || "suggested_products",
+    reason: meta.reason || null,
+    options,
+    created_at: createdAt,
+    expires_at: createdAt + SUGGESTION_MEMORY_TTL_MS
+  };
+
+  logEvent("SUGGESTION_MEMORY", {
+    type: state.lastSuggestedProducts.tipo,
+    reason: state.lastSuggestedProducts.reason,
+    count: options.length,
+    options: options.map((option) => option.nombre)
+  });
+
+  return state.lastSuggestedProducts;
+}
+
+function actualizarActiveOrderContext(state, { pedido = null, intent = null } = {}) {
+  if (!state) {
+    return;
+  }
+
+  const suggestionMemory = obtenerSuggestionMemoryActiva(state);
+  const productos = Array.isArray(pedido?.productos)
+    ? pedido.productos.filter((item) => item?.producto)
+    : (Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.filter((item) => item?.producto) : []);
+
+  const updatedAt = Date.now();
+  state.activeOrderContext = {
+    products: productos.map((item) => ({
+      producto: item.producto,
+      cantidad: Number(item.cantidad) || 1
+    })),
+    suggestions: suggestionMemory?.options?.map((option) => option.nombre) || [],
+    direccion: pedido?.direccion || state.pendingPedido?.direccion || state.activeOrderContext?.direccion || null,
+    metodo_pago: pedido?.metodo_pago || state.lastPaymentMethod || state.pendingPedido?.metodo_pago || null,
+    customerName: pedido?.cliente || state.customerName || null,
+    intent: intent || state.lastIntent || null,
+    updated_at: updatedAt,
+    expires_at: updatedAt + ACTIVE_ORDER_CONTEXT_TTL_MS
+  };
+
+  logEvent("ACTIVE_CONTEXT", {
+    intent: state.activeOrderContext.intent,
+    products: state.activeOrderContext.products.map((item) => `${item.cantidad} ${item.producto}`),
+    suggestions: state.activeOrderContext.suggestions,
+    hasAddress: Boolean(state.activeOrderContext.direccion),
+    hasPayment: Boolean(state.activeOrderContext.metodo_pago)
+  });
+}
+
+function obtenerActiveOrderContext(state, now = Date.now()) {
+  if (!state?.activeOrderContext) {
+    return null;
+  }
+
+  if (Number(state.activeOrderContext.expires_at) <= now) {
+    state.activeOrderContext = null;
+    return null;
+  }
+
+  return state.activeOrderContext;
+}
+
+function esIntencionAgregarMas(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return /\b(agrega|agregame|agregale|suma|sumale|ponme|mandame|dame)\b/.test(normalized)
+    && /\b(mas|más|otro|otra|otros|otras)\b/.test(normalized);
+}
+
+function resolverReferenciaProductoEnOpciones(texto, options = []) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized || !options.length) {
+    return null;
+  }
+
+  const selectedIndex = extraerIndiceOpcionAclaracion(texto, options.length);
+  const sameReference = SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)));
+  const explicitQuantity = encontrarCantidadEnSegmento(normalized);
+  if (selectedIndex !== null && selectedIndex >= 0 && options[selectedIndex] && !(sameReference && explicitQuantity !== null)) {
+    return { option: options[selectedIndex], index: selectedIndex, reason: "ordinal_reference", confidence: 96 };
+  }
+  if (sameReference && options.length === 1) {
+    return { option: options[0], index: 0, reason: "same_reference_single_option", confidence: 94 };
+  }
+
+  const familyMatches = options.filter((option) => {
+    const family = normalizeCatalogSemanticFamilyName(option?.familia || option?.nombreCanonico || option?.nombre);
+    return family && normalized.includes(family);
+  });
+  const wantsLarge = includesAnyToken(normalized, SIZE_LARGE_TOKENS);
+  const wantsSmall = includesAnyToken(normalized, SIZE_SMALL_TOKENS);
+  const wantsValue = includesAnyToken(normalized, PRICE_VALUE_TOKENS);
+
+  if (familyMatches.length === 1) {
+    const option = familyMatches[0];
+    return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "family_reference", confidence: 90 };
+  }
+
+  if (familyMatches.length > 1 && !wantsLarge && !wantsSmall && !wantsValue) {
+    const option = familyMatches[0];
+    return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "family_reference_ranked", confidence: 78 };
+  }
+
+  const matchingPool = familyMatches.length ? familyMatches : options;
+
+  if (wantsLarge) {
+    const option = matchingPool.find((entry) => entry.variant === "large") || matchingPool[matchingPool.length - 1] || null;
+    if (option) {
+      return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "variant_large_reference", confidence: 88 };
+    }
+  }
+
+  if (wantsSmall) {
+    const option = matchingPool.find((entry) => entry.variant === "small") || matchingPool[0] || null;
+    if (option) {
+      return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "variant_small_reference", confidence: 88 };
+    }
+  }
+
+  if (wantsValue) {
+    const option = matchingPool.slice().sort((a, b) => (a.precio ?? Number.MAX_SAFE_INTEGER) - (b.precio ?? Number.MAX_SAFE_INTEGER))[0] || null;
+    if (option) {
+      return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "value_reference", confidence: 86 };
+    }
+  }
+
+  if (sameReference) {
+    const option = matchingPool[0] || options[0] || null;
+    if (option) {
+      return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "same_reference_ranked", confidence: 82 };
+    }
+  }
+
+  const aliasMatches = options
+    .map((option, index) => {
+      const candidates = [option?.nombre, option?.nombreCanonico, ...(option?.aliases || [])].filter(Boolean);
+      let bestScore = 0;
+      for (const candidate of candidates) {
+        bestScore = Math.max(bestScore, puntuarCoincidenciaCatalogo(limpiarTextoProductoSolicitado(texto), normalizeCatalogText(candidate)));
+      }
+      return { option, index, score: bestScore };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  if (aliasMatches[0]?.score >= 72) {
+    return { option: aliasMatches[0].option, index: aliasMatches[0].index, reason: "fuzzy_option_reference", confidence: normalizarScoreAConfianza(aliasMatches[0].score) };
+  }
+
+  if (sameReference && options.length > 0) {
+    return { option: options[0], index: 0, reason: "same_reference_fallback", confidence: 74 };
+  }
+
+  return null;
+}
+
 function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = null, intent = null } = {}) {
   if (!state) {
     return;
@@ -2626,7 +2905,13 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
   }
 
   if (evaluacion?.catalogStatus === "ambiguous" && evaluacion.ambiguousProducts?.length) {
-    const firstOption = evaluacion.ambiguousProducts[0]?.options?.[0];
+    const firstAmbiguity = evaluacion.ambiguousProducts[0];
+    guardarSuggestionMemory(state, firstAmbiguity?.options || [], {
+      type: firstAmbiguity?.soft ? "soft_suggestion" : "ambiguity_suggestion",
+      reason: firstAmbiguity?.input || null
+    });
+
+    const firstOption = firstAmbiguity?.options?.[0];
     const ambiguityReference = buildProductReference(firstOption?.nombre);
     if (ambiguityReference) {
       state.lastProductReference = ambiguityReference;
@@ -2641,16 +2926,63 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
       state.awaitingName = false;
     }
   }
+
+  actualizarActiveOrderContext(state, { pedido, intent });
+
+  logEvent("CONVERSATION_STATE", {
+    customerName: state.customerName || null,
+    lastIntent: state.lastIntent || null,
+    awaitingName: state.awaitingName || false,
+    pendingItems: Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0,
+    hasSuggestionMemory: Boolean(obtenerSuggestionMemoryActiva(state)),
+    lastProduct: state.lastProductReference?.nombre || null
+  });
 }
 
 function aplicarContextoProductoAMensaje(texto, state) {
   const raw = String(texto || "").trim();
-  if (!raw || !state?.lastProductReference?.familia) {
+  if (!raw) {
     return { text: raw, used: false };
   }
 
   const normalized = normalizarTextoAnalisis(raw);
   if (!normalized) {
+    return { text: raw, used: false };
+  }
+
+  const activeContext = obtenerActiveOrderContext(state);
+  const lastActiveProduct = activeContext?.products?.[activeContext.products.length - 1]?.producto || state?.lastProductReference?.nombre || null;
+  if (esIntencionAgregarMas(raw) && lastActiveProduct) {
+    return {
+      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${lastActiveProduct}`,
+      used: true,
+      reason: "active_order_append_reference",
+      selectedProduct: lastActiveProduct,
+      appendProducts: true
+    };
+  }
+
+  const suggestionMemory = obtenerSuggestionMemoryActiva(state);
+  const suggestionResolution = resolverReferenciaProductoEnOpciones(raw, suggestionMemory?.options || []);
+  if (suggestionResolution?.option?.nombre) {
+    logEvent("PRODUCT_MATCH_CONFIDENCE", {
+      input: raw,
+      status: "suggestion_resolved",
+      confidence: suggestionResolution.confidence,
+      product: suggestionResolution.option.nombre,
+      reason: suggestionResolution.reason
+    });
+
+    return {
+      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${suggestionResolution.option.nombre}`,
+      used: true,
+      reason: suggestionResolution.reason,
+      selectedProduct: suggestionResolution.option.nombre,
+      appendProducts: esIntencionAgregarMas(raw)
+    };
+  }
+
+  if (!state?.lastProductReference?.familia) {
     return { text: raw, used: false };
   }
 
@@ -2664,7 +2996,13 @@ function aplicarContextoProductoAMensaje(texto, state) {
   }
 
   if (SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
-    return { text: state.lastProductReference.nombre, used: true, reason: "same_product_reference" };
+    return {
+      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${state.lastProductReference.nombre}`,
+      used: true,
+      reason: "same_product_reference",
+      selectedProduct: state.lastProductReference.nombre,
+      appendProducts: esIntencionAgregarMas(raw)
+    };
   }
 
   const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
@@ -2675,14 +3013,15 @@ function aplicarContextoProductoAMensaje(texto, state) {
   return {
     text: `${state.lastProductReference.familia} ${raw}`.trim(),
     used: true,
-    reason: "family_context_reference"
+    reason: "family_context_reference",
+    appendProducts: esIntencionAgregarMas(raw)
   };
 }
 
 function obtenerEstadoConversacion(phone) {
   const key = limpiarTexto(phone);
   if (!key) {
-    return { customerName: null, pendingPedido: null, pendingClarification: null, lastPaymentMethod: null, lastProductReference: null, lastIntent: null, awaitingName: false };
+    return { customerName: null, pendingPedido: null, pendingClarification: null, lastPaymentMethod: null, lastProductReference: null, lastIntent: null, awaitingName: false, lastSuggestedProducts: null, activeOrderContext: null };
   }
 
   if (!conversationMemoryState.has(key)) {
@@ -2693,7 +3032,9 @@ function obtenerEstadoConversacion(phone) {
       lastPaymentMethod: null,
       lastProductReference: null,
       lastIntent: null,
-      awaitingName: false
+      awaitingName: false,
+      lastSuggestedProducts: null,
+      activeOrderContext: null
     });
   }
 
@@ -2783,7 +3124,8 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
     return null;
   }
 
-  const selectedIndex = extraerIndiceOpcionAclaracion(mensaje, clarification.opciones.length);
+  const resolution = resolverReferenciaProductoEnOpciones(mensaje, clarification.opciones);
+  const selectedIndex = resolution?.index ?? null;
   if (selectedIndex === null || selectedIndex < 0) {
     const respuesta = `Por favor responde con el número de la opción: ${clarification.opciones.map((option) => option.indice).join(" o ")}.`;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
@@ -2799,7 +3141,7 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
     };
   }
 
-  const selectedOption = clarification.opciones[selectedIndex];
+  const selectedOption = resolution?.option || clarification.opciones[selectedIndex];
   if (!selectedOption) {
     return null;
   }
@@ -2822,7 +3164,9 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
     telefono,
     sourceMessageId,
     selectedIndex: selectedIndex + 1,
-    selectedProduct: selectedOption.nombre
+    selectedProduct: selectedOption.nombre,
+    reason: resolution?.reason || "numeric_choice",
+    confidence: resolution?.confidence || null
   });
 
   if (evaluacion.esValido) {
@@ -2875,12 +3219,19 @@ function tieneBorradorPedido(state) {
 }
 
 function combinarPedidoParcial(base = {}, incoming = {}) {
+  return combinarPedidoParcialConOpciones(base, incoming, { appendProducts: false });
+}
+
+function combinarPedidoParcialConOpciones(base = {}, incoming = {}, { appendProducts = false } = {}) {
   const incomingProducts = Array.isArray(incoming.productos) ? incoming.productos.filter((item) => item?.producto || item?.cantidad) : [];
   const baseProducts = Array.isArray(base.productos) ? base.productos.filter((item) => item?.producto || item?.cantidad) : [];
+  const mergedProducts = appendProducts
+    ? consolidarItemsPedido([...baseProducts, ...incomingProducts])
+    : (incomingProducts.length ? incomingProducts : baseProducts);
 
   return calcularTotalesPedido({
     cliente: incoming.cliente || base.cliente || null,
-    productos: incomingProducts.length ? incomingProducts : baseProducts,
+    productos: mergedProducts,
     direccion: incoming.direccion || base.direccion || null,
     fecha_entrega: incoming.fecha_entrega || base.fecha_entrega || null,
     metodo_pago: incoming.metodo_pago || base.metodo_pago || null,
@@ -3084,8 +3435,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const state = obtenerEstadoConversacion(telefono);
   const contextualizedMessage = aplicarContextoProductoAMensaje(mensaje, state);
   const hasDraftContext = tieneBorradorPedido(state);
+  const hasSuggestionContext = Boolean(obtenerSuggestionMemoryActiva(state));
+  const hasActiveOrderContext = Boolean(obtenerActiveOrderContext(state));
   const routingIntent = detectarIntencionConversacional(contextualizedMessage.text || mensaje, {
     hasDraftContext,
+    hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used),
     customerName: state.customerName || null,
     awaitingName: state.awaitingName || false
   });
@@ -3120,6 +3474,16 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     awaitingName: state.awaitingName || false
   });
 
+  logEvent("CONVERSATION_STATE", {
+    telefono,
+    intent: routingIntent,
+    hasDraftContext,
+    hasSuggestionContext,
+    hasActiveOrderContext,
+    contextReason: contextualizedMessage.reason || null,
+    selectedProduct: contextualizedMessage.selectedProduct || null
+  });
+
   const aclaracionResuelta = await intentarResolverAclaracionPendiente({
     state,
     mensaje,
@@ -3135,6 +3499,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntent === "greeting") {
     state.lastIntent = routingIntent;
     state.awaitingName = !state.customerName;
+    actualizarActiveOrderContext(state, { intent: routingIntent });
     const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
     const respuesta = await generarRespuestaConversacional({
       telefono,
@@ -3149,6 +3514,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (routingIntent === "identity") {
     state.lastIntent = routingIntent;
+    actualizarActiveOrderContext(state, { intent: routingIntent });
     const fallback = construirRespuestaIdentidad();
     const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { userMessage: mensaje } });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
@@ -3160,6 +3526,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.lastIntent = routingIntent;
     state.awaitingName = false;
     limpiarAclaracionPendiente(state);
+    limpiarSuggestionMemory(state);
+    actualizarActiveOrderContext(state, { intent: routingIntent });
     const fallback = construirRespuestaDespedida();
     const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
@@ -3170,6 +3538,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.customerName = explicitName;
     state.awaitingName = false;
     state.lastIntent = routingIntent;
+    actualizarActiveOrderContext(state, { intent: routingIntent });
     const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts() });
     const respuesta = await generarRespuestaConversacional({
       telefono,
@@ -3186,6 +3555,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.lastIntent = routingIntent;
     state.awaitingName = false;
     const featuredProducts = buildCatalogFeaturedProducts();
+    guardarSuggestionMemory(state, featuredProducts.map((product) => ({ nombre: product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
+    actualizarActiveOrderContext(state, { intent: routingIntent });
     const fallback = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts });
     const respuesta = await generarRespuestaConversacional({
       telefono,
@@ -3202,6 +3573,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.lastIntent = routingIntent;
     state.awaitingName = false;
     const featuredProducts = buildPriceRequestProducts(contextualizedMessage.text || mensaje);
+    guardarSuggestionMemory(state, (featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts()).map((product) => ({ nombre: product.label || product })), { type: "price_suggestion", reason: "price_request" });
+    actualizarActiveOrderContext(state, { intent: routingIntent });
     const queryLabel = limpiarTextoProductoSolicitado(contextualizedMessage.text || mensaje) || "ese producto";
     const fallback = construirRespuestaPreciosInformativo({
       customerName: state.customerName || null,
@@ -3222,7 +3595,24 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntent === "general_chat") {
     state.lastIntent = routingIntent;
     state.awaitingName = false;
-    const fallback = construirRespuestaCasual();
+    const activeContext = obtenerActiveOrderContext(state);
+    const fallback = activeContext?.products?.length
+      ? construirRespuestaPedido(state.pendingPedido || {
+          cliente: state.customerName || null,
+          productos: activeContext.products,
+          direccion: activeContext.direccion || null,
+          metodo_pago: activeContext.metodo_pago || null,
+          total: null
+        }, {
+          esValido: false,
+          faltantes: [!activeContext.direccion ? "direccion" : null, !activeContext.metodo_pago ? "metodo_pago" : null].filter(Boolean),
+          productosInvalidos: [],
+          priceValidation: "ok",
+          catalogStatus: "ok",
+          ambiguousProducts: [],
+          unmatchedProducts: []
+        }, { availableProducts: buildCatalogShortList(5) })
+      : construirRespuestaCasual();
     const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
@@ -3235,7 +3625,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     guardar: false
   });
 
-  const pedidoCombinado = combinarPedidoParcial(state.pendingPedido || { cliente: state.customerName || null }, resultadoActual.pedido || {});
+  const pedidoCombinado = combinarPedidoParcialConOpciones(state.pendingPedido || { cliente: state.customerName || null }, resultadoActual.pedido || {}, {
+    appendProducts: Boolean(contextualizedMessage.appendProducts)
+  });
   if (!pedidoCombinado.cliente && state.customerName) {
     pedidoCombinado.cliente = state.customerName;
   }
@@ -3280,6 +3672,10 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       state.pendingClarification = construirEstadoAclaracionProducto({
         ambiguity: evaluacionCombinada.ambiguousProducts[0],
         pedidoParcial: pedidoCombinado
+      });
+      guardarSuggestionMemory(state, evaluacionCombinada.ambiguousProducts[0]?.options || [], {
+        type: evaluacionCombinada.ambiguousProducts[0]?.soft ? "soft_suggestion" : "ambiguity_suggestion",
+        reason: evaluacionCombinada.ambiguousProducts[0]?.input || null
       });
     } else {
       limpiarAclaracionPendiente(state);
