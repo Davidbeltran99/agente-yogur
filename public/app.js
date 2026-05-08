@@ -170,7 +170,7 @@ function syncChatWorkspaceState() {
     return;
   }
 
-  const mobileChatOpen = MOBILE_LAYOUT.matches && Boolean(selectedPhone) && activeSection === "dashboard";
+  const mobileChatOpen = MOBILE_LAYOUT.matches && Boolean(selectedPhone) && activeSection === "chat";
   chatWorkspace.classList.toggle("chat-mobile-active", mobileChatOpen);
 }
 
@@ -952,7 +952,15 @@ function renderChatHeader() {
     chatContactAvatar.textContent = "AB";
     chatTitle.textContent = "Selecciona una conversación";
     chatSubtitle.textContent = "Cuando un cliente escriba, aparecerá aquí.";
-    chatOrderSummary.innerHTML = "";
+    chatOrderSummary.innerHTML = `
+      <div class="chat-header-side">
+        <span class="badge light">${icon("circle-dot")} Abi online</span>
+        <div class="chat-header-actions">
+          <button type="button" class="secondary ghost icon-button" aria-label="Información futura">${icon("file-search")}</button>
+          <button type="button" class="secondary ghost icon-button" aria-label="Acciones futuras">${icon("settings")}</button>
+        </div>
+      </div>
+    `;
     chatMessageInput.disabled = true;
     sendMessageButton.disabled = true;
     syncChatWorkspaceState();
@@ -962,10 +970,19 @@ function renderChatHeader() {
   const customerName = buildConversationLabel(conversation);
   chatContactAvatar.textContent = buildAvatarLabel({ cliente: customerName, telefono: conversation.phone });
   chatTitle.textContent = customerName;
-  chatSubtitle.textContent = `${conversation.phone} · ${conversation.lastMessageDirection === "in" ? "Cliente activo" : "Abi respondió"}`;
+  chatSubtitle.textContent = healthState?.whatsappEnabled ? "En línea ahora" : "Seguimiento desde Abi";
   chatOrderSummary.innerHTML = `
-    <span class="badge light">${icon("clipboard-list")} Pedido: ${escapeHtml(conversation.lastOrderId || "ninguno")}</span>
-    <span class="badge light">${icon("circle-dot")} ${healthState?.whatsappEnabled ? "WhatsApp online" : "Envío simulado"}</span>
+    <div class="chat-header-side">
+      <div class="chat-contact-meta">
+        <span class="badge light">${icon("message-circle")} ${escapeHtml(conversation.phone || "Sin teléfono")}</span>
+        <span class="badge light">${icon("circle-dot")} ${conversation.lastMessageDirection === "in" ? "Cliente activo" : "Abi respondió"}</span>
+        <span class="badge light">${icon("clipboard-list")} Pedido: ${escapeHtml(conversation.lastOrderId || "ninguno")}</span>
+      </div>
+      <div class="chat-header-actions">
+        <button type="button" class="secondary ghost icon-button" aria-label="Información futura">${icon("file-search")}</button>
+        <button type="button" class="secondary ghost icon-button" aria-label="Acciones futuras">${icon("settings")}</button>
+      </div>
+    </div>
   `;
   chatMessageInput.disabled = false;
   sendMessageButton.disabled = false;
@@ -1303,6 +1320,10 @@ async function loadConversations(options = {}) {
       selectedPhone = MOBILE_LAYOUT.matches ? null : (conversations[0]?.phone || null);
     }
 
+    if (activeSection !== "chat" && !MOBILE_LAYOUT.matches && !selectedPhone && conversations[0]?.phone) {
+      selectedPhone = conversations[0].phone;
+    }
+
     renderConversationList();
 
     if (selectedPhone) {
@@ -1557,6 +1578,9 @@ document.addEventListener("click", (event) => {
     hideChatFeedback();
     loadMessages(selectedPhone);
     renderConversationList();
+    if (activeSection !== "chat") {
+      showSection("chat");
+    }
     syncChatWorkspaceState();
     return;
   }

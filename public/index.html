@@ -84,6 +84,10 @@
           <svg class="nav-icon ui-icon" aria-hidden="true"><use href="#icon-clipboard-list"></use></svg>
           <span class="nav-label">Pedidos</span>
         </button>
+        <button class="nav-link" data-section="chat" title="Chat de Abi" aria-label="Chat de Abi">
+          <svg class="nav-icon ui-icon" aria-hidden="true"><use href="#icon-message-circle"></use></svg>
+          <span class="nav-label">Chat de Abi</span>
+        </button>
         <button class="nav-link" data-section="history" title="Historial" aria-label="Historial">
           <svg class="nav-icon ui-icon" aria-hidden="true"><use href="#icon-history"></use></svg>
           <span class="nav-label">Historial</span>
@@ -142,7 +146,7 @@
           <div>
             <p class="eyebrow">Dashboard</p>
             <h3>Resumen del día</h3>
-            <p class="section-copy">Vista operativa con métricas, pedidos y Chat de Abi en un solo lugar.</p>
+            <p class="section-copy">Vista operativa con métricas clave y lectura rápida del día.</p>
           </div>
         </div>
 
@@ -238,24 +242,17 @@
         </div>
       </section>
 
-      <section class="section-block panel-view" data-view="dashboard">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Chat</p>
-            <h3>Chat de Abi</h3>
-            <p id="conversationMeta" class="section-copy">Cargando conversaciones...</p>
-          </div>
-        </div>
-
+      <section id="chatSection" class="section-block panel-view chat-section-fullscreen" data-view="chat">
         <div id="chatFeedback" class="feedback" hidden></div>
 
-        <section class="surface crm-panel chat-shell-panel">
-          <div id="chatWorkspace" class="crm-layout chat-workspace">
+        <section class="surface crm-panel chat-shell-panel chat-shell-fullscreen">
+          <div id="chatWorkspace" class="crm-layout chat-workspace chat-workspace-fullscreen">
             <aside class="conversation-sidebar chat-list-panel">
               <div class="chat-list-header">
                 <div>
-                  <p class="eyebrow">Chat</p>
+                  <p class="eyebrow">Chat de Abi</p>
                   <h3>Bandeja de conversaciones</h3>
+                  <p id="conversationMeta" class="helper-text">Cargando conversaciones...</p>
                 </div>
                 <span class="status-pill status-online compact-status"><svg class="ui-icon" aria-hidden="true"><use href="#icon-message-circle"></use></svg>WhatsApp</span>
               </div>
@@ -275,9 +272,9 @@
                 <div class="chat-header-main">
                   <button type="button" id="chatBackButton" class="secondary ghost chat-back-button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-left"></use></svg>Volver</button>
                   <div class="chat-contact-avatar" id="chatContactAvatar">AB</div>
-                  <div>
+                  <div class="chat-contact-copy">
                     <h3 id="chatTitle">Selecciona una conversación</h3>
-                    <p id="chatSubtitle" class="helper-text">Aquí verás el historial del cliente.</p>
+                    <p id="chatSubtitle" class="helper-text">Cuando un cliente escriba, aparecerá aquí.</p>
                   </div>
                 </div>
                 <div id="chatOrderSummary" class="chat-order-summary"></div>
@@ -295,7 +292,7 @@
                     <button type="button" class="secondary ghost icon-button" aria-label="Emoji"><svg class="ui-icon" aria-hidden="true"><use href="#icon-smile"></use></svg></button>
                     <button type="button" class="secondary ghost icon-button" aria-label="Adjuntar" title="Próximamente"><svg class="ui-icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg></button>
                   </div>
-                  <p class="helper-text">Si WhatsApp está desactivado, el envío queda simulado y se guarda igual en DB.</p>
+                  <p class="helper-text">Input fijo tipo app real. El envío simulado sigue guardando en DB si WhatsApp está apagado.</p>
                 </div>
                 <div class="chat-composer-input-row">
                   <textarea id="chatMessageInput" rows="1" placeholder="Escribe una respuesta cálida y comercial..."></textarea>
