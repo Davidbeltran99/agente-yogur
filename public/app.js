@@ -7,6 +7,9 @@ const tableMeta = document.getElementById("tableMeta");
 const feedback = document.getElementById("feedback");
 const ordersAutoRefreshMeta = document.getElementById("ordersAutoRefreshMeta");
 const appLoader = document.getElementById("appLoader");
+const themeToggleButton = document.getElementById("themeToggleButton");
+const themeToggleLabel = document.getElementById("themeToggleLabel");
+const themeToggleIcon = document.getElementById("themeToggleIcon");
 const soundToggleButton = document.getElementById("soundToggleButton");
 const soundToggleLabel = document.getElementById("soundToggleLabel");
 const soundToggleIcon = document.getElementById("soundToggleIcon");
@@ -57,6 +60,7 @@ const STATUS_OPTIONS = [
 const PANEL_LOGIN_PATH = window.__PANEL_LOGIN_PATH__ || "/portal";
 const SIDEBAR_STORAGE_KEY = "sidebarCollapsed";
 const ACTIVE_SECTION_STORAGE_KEY = "activeSection";
+const THEME_STORAGE_KEY = "theme";
 const SOUNDS_STORAGE_KEY = "uiSoundsEnabled";
 const ORDERS_REFRESH_MS = 8000;
 const CONVERSATIONS_REFRESH_MS = 12000;
@@ -89,6 +93,7 @@ let conversationsPollingInFlight = false;
 let conversationSearchQuery = "";
 let conversationSearchDebounce = null;
 let visibleMessagesLimit = 60;
+let currentTheme = getStoredThemePreference();
 let uiSoundsEnabled = getStoredSoundsPreference();
 let audioContext = null;
 
@@ -191,6 +196,15 @@ function getStoredActiveSection() {
   }
 }
 
+function getStoredThemePreference() {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return stored === "dark" ? "dark" : "light";
+  } catch (_error) {
+    return "light";
+  }
+}
+
 function getStoredSoundsPreference() {
   try {
     return window.localStorage.getItem(SOUNDS_STORAGE_KEY) === "true";
@@ -215,11 +229,41 @@ function storeActiveSection() {
   }
 }
 
+function storeThemePreference() {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, currentTheme);
+  } catch (_error) {
+    // noop
+  }
+}
+
 function storeSoundsPreference() {
   try {
     window.localStorage.setItem(SOUNDS_STORAGE_KEY, String(uiSoundsEnabled));
   } catch (_error) {
     // noop
+  }
+}
+
+function applyTheme(theme) {
+  currentTheme = theme === "dark" ? "dark" : "light";
+  document.documentElement.classList.remove("theme-light", "theme-dark");
+  document.documentElement.classList.add(`theme-${currentTheme}`);
+}
+
+function syncThemeToggleState() {
+  if (!themeToggleButton) {
+    return;
+  }
+
+  themeToggleButton.setAttribute("aria-pressed", String(currentTheme === "dark"));
+  if (themeToggleLabel) {
+    themeToggleLabel.textContent = currentTheme === "dark" ? "Tema oscuro" : "Tema claro";
+  }
+
+  const useNode = themeToggleIcon?.querySelector("use");
+  if (useNode) {
+    useNode.setAttribute("href", currentTheme === "dark" ? "#icon-sun" : "#icon-moon");
   }
 }
 
@@ -770,7 +814,7 @@ function renderSettings() {
 
 function renderOrders() {
   if (!orders.length) {
-    ordersTableBody.innerHTML = `<tr><td colspan="7">${renderEmptyState({ iconName: "box", title: "No hay pedidos aún", copy: "Cuando entren nuevos pedidos, aparecerán aquí listos para gestionar.", compact: true })}</td></tr>`;
+    ordersTableBody.innerHTML = `<tr><td colspan="7">${renderEmptyState({ iconName: "box", title: "Todo tranquilo por ahora 😊", copy: "Abi mostrará aquí los nuevos pedidos cuando lleguen.", compact: true })}</td></tr>`;
     return;
   }
 
@@ -865,7 +909,7 @@ function renderDetail() {
 
 function renderConversationList() {
   if (!conversations.length) {
-    conversationList.innerHTML = renderEmptyState({ iconName: "inbox", title: "Sin conversaciones", copy: "Cuando entren mensajes nuevos, Abi los mostrará aquí." });
+    conversationList.innerHTML = renderEmptyState({ iconName: "inbox", title: "Sin conversaciones todavía", copy: "Cuando un cliente escriba, aparecerá aquí." });
     return;
   }
 
@@ -907,7 +951,7 @@ function renderChatHeader() {
   if (!conversation) {
     chatContactAvatar.textContent = "AB";
     chatTitle.textContent = "Selecciona una conversación";
-    chatSubtitle.textContent = "Abre un chat para ver el historial completo.";
+    chatSubtitle.textContent = "Cuando un cliente escriba, aparecerá aquí.";
     chatOrderSummary.innerHTML = "";
     chatMessageInput.disabled = true;
     sendMessageButton.disabled = true;
@@ -931,7 +975,7 @@ function renderChatHeader() {
 function renderMessages() {
   if (!selectedPhone) {
     chatMessages.className = "chat-messages empty-chat";
-    chatMessages.innerHTML = renderEmptyState({ iconName: "bot", title: "Chat de Abi", copy: "Selecciona una conversación de la izquierda para comenzar." });
+    chatMessages.innerHTML = renderEmptyState({ iconName: "bot", title: "Sin conversaciones todavía", copy: "Cuando un cliente escriba, aparecerá aquí." });
     syncChatWorkspaceState();
     return;
   }
@@ -1119,7 +1163,7 @@ function renderCloseDaySummary() {
           : '<p class="helper-text">No hay pagos registrados todavía.</p>'}
       </div>
     </div>
-    <p class="helper-text modal-note">Se generará un PDF Tellolac AI, se archivarán los pedidos visibles y el panel operativo quedará limpio.</p>
+    <p class="helper-text modal-note">Generaremos el reporte PDF y limpiaremos el panel operativo.</p>
   `;
 }
 
@@ -1585,6 +1629,13 @@ chatBackButton?.addEventListener("click", () => {
   syncChatWorkspaceState();
 });
 
+themeToggleButton?.addEventListener("click", () => {
+  applyTheme(currentTheme === "dark" ? "light" : "dark");
+  storeThemePreference();
+  syncThemeToggleState();
+  showToast(currentTheme === "dark" ? "Tema oscuro activado." : "Tema claro activado.", "info");
+});
+
 soundToggleButton?.addEventListener("click", () => {
   uiSoundsEnabled = !uiSoundsEnabled;
   storeSoundsPreference();
@@ -1644,8 +1695,10 @@ chatMessageInput?.addEventListener("input", () => {
 
 chatComposer.addEventListener("submit", sendChatMessage);
 
+applyTheme(currentTheme);
 initSidebarState();
 initSectionState();
+syncThemeToggleState();
 syncSoundToggleState();
 updateOrdersRefreshMeta();
 

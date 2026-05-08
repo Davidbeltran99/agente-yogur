@@ -4,6 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tellolac AI | Acceso premium</title>
+  <script>
+    (() => {
+      try {
+        const theme = localStorage.getItem('theme') || 'light';
+        document.documentElement.classList.remove('theme-light', 'theme-dark');
+        document.documentElement.classList.add(`theme-${theme}`);
+      } catch (_error) {
+        document.documentElement.classList.add('theme-light');
+      }
+    })();
+  </script>
   <link rel="icon" type="image/jpeg" href="/assets/logo-tellolac.jpg" />
   <link rel="stylesheet" href="/styles.css" />
 </head>

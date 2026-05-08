@@ -32,6 +32,36 @@
   --transition-base: 220ms cubic-bezier(.2,.8,.2,1);
 }
 
+html.theme-light {
+  color-scheme: light;
+}
+
+html.theme-dark {
+  color-scheme: dark;
+  --bg: #0f1726;
+  --bg-strong: #131d2e;
+  --surface: rgba(18, 27, 40, 0.88);
+  --surface-strong: rgba(21, 31, 46, 0.96);
+  --surface-alt: #162235;
+  --surface-dark: rgba(9, 15, 26, 0.86);
+  --line: rgba(120, 142, 173, 0.24);
+  --line-strong: rgba(120, 142, 173, 0.4);
+  --text: #edf3ff;
+  --muted: #97a8c2;
+  --primary: #77a1ff;
+  --primary-strong: #5f8df7;
+  --primary-soft: rgba(119, 161, 255, 0.16);
+  --success: #5cc79a;
+  --success-soft: rgba(92, 199, 154, 0.16);
+  --warning: #e2b458;
+  --warning-soft: rgba(226, 180, 88, 0.16);
+  --danger: #ea8181;
+  --danger-soft: rgba(234, 129, 129, 0.16);
+  --shadow-sm: 0 12px 28px rgba(0, 0, 0, 0.24);
+  --shadow: 0 22px 54px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 36px 96px rgba(0, 0, 0, 0.36);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -77,6 +107,23 @@ body::after {
     linear-gradient(90deg, rgba(95, 141, 247, 0.03) 1px, transparent 1px);
   background-size: 32px 32px;
   mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.2), transparent 90%);
+}
+
+html.theme-dark body {
+  background:
+    radial-gradient(circle at top left, rgba(119, 161, 255, 0.14), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(92, 199, 154, 0.08), transparent 24%),
+    linear-gradient(180deg, #0b1320 0%, #131c2d 100%);
+}
+
+html.theme-dark body::before {
+  background: linear-gradient(180deg, rgba(8, 14, 24, 0.68), rgba(11, 18, 31, 0.92));
+}
+
+html.theme-dark body::after {
+  background-image:
+    linear-gradient(rgba(119, 161, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(119, 161, 255, 0.04) 1px, transparent 1px);
 }
 
 button,
@@ -128,6 +175,10 @@ button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 
+button:active:not(:disabled) {
+  transform: translateY(0) scale(0.99);
+}
+
 button:disabled {
   cursor: wait;
   opacity: 0.7;
@@ -167,6 +218,18 @@ select:focus,
 textarea:focus {
   border-color: rgba(95, 141, 247, 0.65);
   box-shadow: 0 0 0 4px rgba(95, 141, 247, 0.12);
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.nav-link:focus-visible,
+.conversation-item:focus-visible,
+.history-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(95, 141, 247, 0.18);
 }
 
 h1, h2, h3, p {
@@ -243,6 +306,10 @@ strong {
 .ghost {
   background: transparent;
   color: var(--muted);
+}
+
+.theme-toggle-button {
+  min-width: 122px;
 }
 
 button:hover:not(:disabled),
@@ -469,6 +536,113 @@ button:hover:not(:disabled),
 .header-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+html.theme-dark .sidebar {
+  border-right-color: rgba(120, 142, 173, 0.18);
+  background: linear-gradient(180deg, rgba(15, 23, 36, 0.92), rgba(18, 28, 42, 0.88));
+}
+
+html.theme-dark .sidebar-footer,
+html.theme-dark .nav-link:hover,
+html.theme-dark .nav-link.active,
+html.theme-dark .nav-link.is-active,
+html.theme-dark .badge.light,
+html.theme-dark .metric-pill {
+  background: rgba(119, 161, 255, 0.14);
+  color: #dce7ff;
+  border-color: rgba(119, 161, 255, 0.18);
+}
+
+html.theme-dark .app-header,
+html.theme-dark .surface,
+html.theme-dark .kpi-card,
+html.theme-dark .auth-card,
+html.theme-dark .app-footer,
+html.theme-dark .detail-card,
+html.theme-dark .history-card,
+html.theme-dark .report-card,
+html.theme-dark .setting-card,
+html.theme-dark .modal-card,
+html.theme-dark .conversation-item,
+html.theme-dark .chat-search,
+html.theme-dark .app-loader-card {
+  background: var(--surface);
+  border-color: rgba(120, 142, 173, 0.18);
+  box-shadow: var(--shadow-sm);
+}
+
+html.theme-dark .chat-list-panel,
+html.theme-dark .chat-panel,
+html.theme-dark .modern-chat-composer,
+html.theme-dark .kpi-card,
+html.theme-dark .modal-summary-card {
+  background: linear-gradient(180deg, rgba(18, 27, 40, 0.96), rgba(15, 23, 36, 0.96));
+}
+
+html.theme-dark input,
+html.theme-dark select,
+html.theme-dark textarea,
+html.theme-dark .secondary,
+html.theme-dark .status-pill,
+html.theme-dark .icon-button {
+  background: rgba(18, 27, 40, 0.92);
+  color: var(--text);
+  border-color: rgba(120, 142, 173, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+html.theme-dark .message-row.in .message-bubble {
+  background: rgba(18, 27, 40, 0.98);
+  border-color: rgba(120, 142, 173, 0.18);
+}
+
+html.theme-dark .message-row.out .message-bubble {
+  background: linear-gradient(135deg, rgba(95, 141, 247, 0.96), rgba(74, 118, 223, 0.94));
+}
+
+html.theme-dark .payment-pill {
+  color: #f3cb71;
+}
+
+html.theme-dark .badge.pendiente { color: #f3cb71; }
+html.theme-dark .badge.entregado,
+html.theme-dark .total-pill,
+html.theme-dark .status-online { color: #74d2aa; }
+html.theme-dark .badge.cancelado { color: #f0a0a0; }
+html.theme-dark .conversation-item:hover,
+html.theme-dark .conversation-item.active,
+html.theme-dark tr[data-order-id]:hover,
+html.theme-dark tr.active {
+  background: rgba(119, 161, 255, 0.08);
+}
+
+html.theme-dark .auth-copy-box,
+html.theme-dark .auth-highlight,
+html.theme-dark .glass-tag {
+  background: rgba(17, 28, 44, 0.34);
+}
+
+html.theme-dark .chat-messages,
+html.theme-dark .table-wrap,
+html.theme-dark .modal-body {
+  background-color: rgba(13, 20, 32, 0.24);
+}
+
+html.theme-dark .kpi-icon,
+html.theme-dark .customer-avatar,
+html.theme-dark .conversation-avatar,
+html.theme-dark .chat-contact-avatar,
+html.theme-dark .message-avatar,
+html.theme-dark .empty-state-icon {
+  background: linear-gradient(135deg, rgba(119, 161, 255, 0.2), rgba(95, 141, 247, 0.34));
+}
+
+html.theme-dark .app-loader {
+  background:
+    radial-gradient(circle at top left, rgba(119, 161, 255, 0.16), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(92, 199, 154, 0.1), transparent 24%),
+    linear-gradient(180deg, rgba(12, 19, 31, 0.98), rgba(16, 24, 38, 0.98));
 }
 
 .icon-label-button {
@@ -1707,6 +1881,17 @@ tr.active {
     gap: 8px;
   }
 
+  #soundToggleLabel,
+  #themeToggleLabel {
+    display: none;
+  }
+
+  .theme-toggle-button,
+  #soundToggleButton {
+    min-width: 44px;
+    padding-inline: 12px;
+  }
+
   .header-brand h2 {
     font-size: 1.15rem;
   }
@@ -1715,7 +1900,10 @@ tr.active {
     font-size: 0.9rem;
   }
 
-  .kpi-grid,
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .reports-grid,
   .modal-summary {
     grid-template-columns: 1fr;
