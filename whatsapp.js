@@ -194,9 +194,10 @@ function construirLineaOpcionAmbigua(option, index) {
     return null;
   }
 
-  const nombre = option.nombre || option.productoOriginal || `Opción ${index + 1}`;
+  const showNumber = Number.isInteger(index) && index >= 0;
+  const nombre = option.nombre || option.productoOriginal || (showNumber ? `Opción ${index + 1}` : "Opción sugerida");
   const precio = formatearMoneda(option.precio);
-  return `${index + 1}. ${nombre}${precio ? ` — ${precio}` : ""}`;
+  return `${showNumber ? `${index + 1}. ` : ""}${nombre}${precio ? ` — ${precio}` : ""}`;
 }
 
 function construirDetalleProductosAmable(productos = []) {
@@ -262,9 +263,9 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
 
   if (evaluacion.catalogStatus === "not_found") {
     return [
-      "No encontré ese producto en el catálogo 😕",
+      "Quiero ayudarte a pedirlo bien 😊",
       listaProductosDisponibles,
-      `Si quieres, aquí puedes verlo completo: ${CATALOG_URL}`
+      "¿Cuál de estos te gustaría llevar?"
     ].filter(Boolean).join("\n\n");
   }
 
@@ -273,19 +274,36 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     const titulo = construirTituloAmbiguo(firstAmbiguity?.input);
     const ambiguityOptions = (firstAmbiguity?.options || []).slice(0, 4);
     const ambiguityLines = ambiguityOptions
-      .map((option, index) => construirLineaOpcionAmbigua(option, index))
+      .map((option, index) => construirLineaOpcionAmbigua(option, ambiguityOptions.length === 1 ? -1 : index))
       .filter(Boolean)
       .join("\n");
     const optionNumbers = ambiguityOptions.map((_, index) => index + 1).join(" o ");
 
+    if (productos.length) {
+      return [
+        construirSaludoNatural(nombreCliente),
+        "Te entendí esto:",
+        detalle,
+        pedido.total ? `Subtotal parcial: ${formatearMoneda(pedido.total)}` : null,
+        firstAmbiguity?.soft && ambiguityOptions.length === 1
+          ? `Sobre “${titulo}” quiero confirmar algo 😊`
+          : `Para dejarlo perfecto, ayúdame con este punto 😊`,
+        firstAmbiguity?.soft && ambiguityOptions.length === 1
+          ? `¿Te refieres a:\n${ambiguityLines}`
+          : ambiguityLines,
+        evaluacion.faltantes?.includes("direccion") ? "Y también me compartes la dirección para enviarte el pedido ✨" : null,
+        !firstAmbiguity?.soft || ambiguityOptions.length > 1 ? `Puedes responder ${optionNumbers}.` : null
+      ].filter(Boolean).join("\n\n");
+    }
+
     return [
-      pickVariant(titulo, [
-        `😊 Creo que te refieres a alguno de estos productos para “${titulo}”:`,
-        `😊 Puede que estés buscando alguno de estos productos para “${titulo}”:`,
-        `😊 Te encontré estas opciones parecidas para “${titulo}”:`
-      ]),
-      ambiguityLines || null,
-      `¿Cuál deseas pedir? Puedes responder ${optionNumbers}.`
+      firstAmbiguity?.soft && ambiguityOptions.length === 1
+        ? `Sobre “${titulo}” quiero confirmar algo 😊`
+        : `Quiero confirmar este producto contigo 😊`,
+      firstAmbiguity?.soft && ambiguityOptions.length === 1
+        ? `¿Te refieres a:\n${ambiguityLines}`
+        : ambiguityLines,
+      !firstAmbiguity?.soft || ambiguityOptions.length > 1 ? `Puedes responder ${optionNumbers}.` : null
     ].filter(Boolean).join("\n\n");
   }
 
@@ -301,10 +319,11 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
       ].filter(Boolean).join("\n\n");
     }
 
-    if (evaluacion.faltantes?.includes("metodo_pago") && productos.length) {
+    if (evaluacion.faltantes?.includes("metodo_pago") && productos.length && !evaluacion.faltantes?.includes("direccion")) {
       return [
         construirSaludoNatural(nombreCliente),
         detalle,
+        pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
         "Listo, ¿pagas por Nequi, efectivo o transferencia?"
       ].filter(Boolean).join("\n\n");
     }

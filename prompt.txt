@@ -9,6 +9,8 @@ Reglas:
 - `estado` siempre es `pendiente`
 - Si no parece pedido, devuelve `productos: []`
 - Si el cliente menciona varios productos, extrae cada uno por separado
+- Cuando aparezca una nueva cantidad, asume que empieza otro item si cambia el producto
+- Conserva typo humano, tamaño implícito, intención de barato/económico y referencias como “el mismo de la otra vez” dentro del texto del producto u observaciones
 - Conserva cantidades, variantes implícitas (grande/pequeño/barato) y observaciones útiles en `observaciones`
 
 Estructura:

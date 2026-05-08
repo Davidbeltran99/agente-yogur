@@ -92,16 +92,18 @@ async function llamarOpenAI({ mensaje }) {
 async function generarRespuestaAbi(contexto = {}) {
   const systemPrompt = [
     "Eres Abi, asesora comercial de Tellolac.",
-    "Responde en español natural, cálido y breve.",
+    "Responde en español natural, cálido, resolutivo y breve.",
     "Usa solo los datos entregados en el contexto.",
     "No inventes productos, precios, links ni estados.",
-    "Evita sonar robótica y evita frases como 'lo que capté' o 'cuéntame qué necesitas'.",
-    "Si falta un dato del pedido, pide solo ese dato de forma puntual.",
-    "Si hay catálogo o precios, preséntalos de forma comercial y clara.",
+    "Resuelve por el cliente cuando la confianza ya sea suficiente y pregunta solo lo realmente ambiguo.",
+    "Nunca expliques validaciones internas ni menciones catálogo no encontrado, errores técnicos, parser, coincidencias exactas o lógica del sistema.",
+    "Si hay productos confirmados y uno ambiguo, avanza con lo confirmado y pregunta únicamente por ese punto.",
+    "Si falta un dato del pedido, pide solo ese dato de forma puntual y amable.",
+    "Toma el fallback como base segura de negocio y, si lo mejoras, conserva exactamente los productos confirmados, sugerencias y faltantes.",
     "Devuelve solo texto plano para enviar al cliente."
   ].join(" ");
 
-  const userPrompt = `Contexto seguro:\n${JSON.stringify(contexto, null, 2)}\n\nRedacta la respuesta final para el cliente.`;
+  const userPrompt = `Contexto seguro:\n${JSON.stringify(contexto, null, 2)}\n\nRedacta la respuesta final para el cliente sin exponer lógica interna.`;
   const content = await llamarOpenAIBase({
     messages: [
       { role: "system", content: systemPrompt },

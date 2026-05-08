@@ -391,6 +391,33 @@ function escapeRegex(value) {
 }
 
 const QUANTITY_TOKEN_PATTERN = "(?:\\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)";
+const SEGMENT_START_TOKENS_PATTERN = Array.from(new Set([
+  ...SEMANTIC_FAMILY_KEYWORDS.keys(),
+  ...Array.from(SEMANTIC_FAMILY_KEYWORDS.values()).flat(),
+  ...GENERIC_CATALOG_TOKENS,
+  "yogur",
+  "yogurt",
+  "yoghurt"
+].flatMap((alias) => {
+  const value = String(alias || "").trim();
+  if (!value) {
+    return [];
+  }
+
+  const variants = [value];
+  if (!/s$/i.test(value) && value.length >= 4) {
+    variants.push(`${value}s`);
+  }
+  if (!/es$/i.test(value) && /z$/i.test(value)) {
+    variants.push(`${value.slice(0, -1)}ces`);
+  }
+  return variants;
+})))
+  .map((alias) => String(alias || "").trim())
+  .filter(Boolean)
+  .sort((a, b) => b.length - a.length)
+  .map((alias) => escapeRegex(alias).replace(/\s+/g, "\\s+"))
+  .join("|");
 const SEMANTIC_FAMILY_ALIAS_PATTERN = Array.from(new Set([
   ...SEMANTIC_FAMILY_KEYWORDS.keys(),
   ...Array.from(SEMANTIC_FAMILY_KEYWORDS.values()).flat()
@@ -783,6 +810,18 @@ function puntuarCoincidenciaCatalogo(candidate, alias) {
   return typoScore;
 }
 
+function normalizarScoreAConfianza(score = 0) {
+  if (score >= 130) return 98;
+  if (score >= 115) return 92;
+  if (score >= 100) return 86;
+  if (score >= 90) return 80;
+  if (score >= 80) return 72;
+  if (score >= 70) return 62;
+  if (score >= 60) return 54;
+  if (score >= 50) return 50;
+  return 32;
+}
+
 function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}) {
   const candidate = limpiarTextoProductoSolicitado(texto);
   if (!candidate) {
@@ -801,7 +840,7 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
     bestScore = Math.max(bestScore, puntuarCoincidenciaSemanticaCatalogo(texto, product));
 
     if (bestScore >= minScore) {
-      matches.push({ product, score: bestScore });
+      matches.push({ product, score: bestScore, confidence: normalizarScoreAConfianza(bestScore) });
     }
   }
 
@@ -913,6 +952,8 @@ function resolverProductoSemanticoPorPreferencias(texto, catalog = getCatalogPro
     return null;
   }
 
+  const hasGenericProductCue = preferences.genericTokens.some((token) => ["yogur", "yogurt", "yoghurt", "bebida"].includes(token));
+
   const families = Array.from(preferences.families)
     .map((family) => ({ family, products: catalog.filter((product) => (product?.nombre_raiz_familia || product?.nombre_familia) === family) }))
     .filter((entry) => entry.products.length);
@@ -951,11 +992,20 @@ function resolverProductoSemanticoPorPreferencias(texto, catalog = getCatalogPro
     return null;
   }
 
-  return {
-    status: "matched",
-    candidate: limpiarTexto(texto),
-    product: preferred
-  };
+  return hasGenericProductCue
+    ? {
+        status: "suggested",
+        candidate: limpiarTexto(texto),
+        matches: buildCatalogAmbiguityOptions([preferred]),
+        confidence: 68,
+        soft: true
+      }
+    : {
+        status: "matched",
+        candidate: limpiarTexto(texto),
+        product: preferred,
+        confidence: preferences.wantsLarge || preferences.wantsSmall || preferences.wantsValue ? 84 : 80
+      };
 }
 
 function resolverProductoCatalogo(texto) {
@@ -1047,7 +1097,8 @@ function resolverProductoCatalogo(texto) {
     return {
       status: "matched",
       candidate: limpiarTexto(texto),
-      product: exactMatch
+      product: exactMatch,
+      confidence: 98
     };
   }
 
@@ -1080,7 +1131,8 @@ function resolverProductoCatalogo(texto) {
     return {
       status: "matched",
       candidate: limpiarTexto(texto),
-      product: familyMatches[0]
+      product: familyMatches[0],
+      confidence: 90
     };
   }
 
@@ -1092,6 +1144,17 @@ function resolverProductoCatalogo(texto) {
   const matches = encontrarCoincidenciasCatalogo(texto, { minScore: 70, limit: 3 });
 
   if (!matches.length) {
+    const suggestionMatches = encontrarCoincidenciasCatalogo(texto, { minScore: 50, limit: 3 });
+    if (suggestionMatches.length) {
+      return {
+        status: "suggested",
+        candidate: limpiarTexto(texto),
+        matches: buildCatalogAmbiguityOptions(suggestionMatches.map((entry) => entry.product)),
+        confidence: suggestionMatches[0].confidence,
+        soft: true
+      };
+    }
+
     return {
       status: "not_found",
       candidate: limpiarTexto(texto)
@@ -1129,23 +1192,38 @@ function resolverProductoCatalogo(texto) {
       return {
         status: "matched",
         candidate: limpiarTexto(texto),
-        product: best.product
+        product: best.product,
+        confidence: best.confidence
       };
     }
 
     const ambiguityPool = sameFamilyMatches.length >= 2 ? sameFamilyMatches : matches;
 
+    if (best.confidence >= 80 && (best.score - second.score) >= 4) {
+      return {
+        status: "matched",
+        candidate: limpiarTexto(texto),
+        product: best.product,
+        confidence: best.confidence
+      };
+    }
+
     return {
       status: "ambiguous",
       candidate: limpiarTexto(texto),
-      matches: buildCatalogAmbiguityOptions(ambiguityPool.map((entry) => entry.product))
+      matches: buildCatalogAmbiguityOptions(ambiguityPool.map((entry) => entry.product)),
+      confidence: best.confidence,
+      soft: best.confidence >= 50
     };
   }
 
   return {
-    status: "matched",
+    status: best.confidence >= 80 ? "matched" : "suggested",
     candidate: limpiarTexto(texto),
-    product: best.product
+    product: best.confidence >= 80 ? best.product : undefined,
+    matches: best.confidence >= 80 ? undefined : buildCatalogAmbiguityOptions([best.product]),
+    confidence: best.confidence,
+    soft: best.confidence < 80
   };
 }
 
@@ -1456,7 +1534,7 @@ function expandirSegmentoMultiProducto(segmento) {
     return [];
   }
 
-  const itemStartPattern = new RegExp(`(?:^|\\s)(${QUANTITY_TOKEN_PATTERN})\\s+(?=(?:${SEMANTIC_FAMILY_ALIAS_PATTERN})\\b)`, "gi");
+  const itemStartPattern = new RegExp(`(?:^|\\s)(${QUANTITY_TOKEN_PATTERN})\\s+(?=(?:${SEGMENT_START_TOKENS_PATTERN})\\b)`, "gi");
   const starts = Array.from(raw.matchAll(itemStartPattern)).map((match) => {
     const token = match[1] || "";
     return (match.index || 0) + match[0].lastIndexOf(token);
@@ -1522,10 +1600,12 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
       continue;
     }
 
-    if (resolution.status === "ambiguous") {
+    if (resolution.status === "ambiguous" || resolution.status === "suggested") {
       ambiguities.push({
         input: segment,
-        options: resolution.matches.slice(0, 3)
+        options: (resolution.matches || (resolution.product ? [resolution.product] : [])).slice(0, 3),
+        soft: Boolean(resolution.soft || resolution.status === "suggested"),
+        confidence: resolution.confidence || null
       });
       continue;
     }
@@ -1560,13 +1640,15 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
   if (Array.isArray(aiProducts) && aiProducts.length && (!items.length || ambiguities.length || unmatched.length || items.length < aiProducts.length)) {
     for (const aiItem of aiProducts) {
       let resolved = false;
+      const candidateSegments = [...new Set(construirCandidatosProductoIA(aiItem).flatMap((candidate) => expandirSegmentoMultiProducto(candidate)).map((candidate) => limpiarTexto(candidate)).filter(Boolean))];
 
-      for (const candidate of construirCandidatosProductoIA(aiItem)) {
+      for (const candidate of candidateSegments) {
         const resolution = resolverProductoCatalogo(candidate);
         if (resolution.status === "matched") {
-          const cantidad = Number.isFinite(Number(aiItem?.cantidad)) && Number(aiItem.cantidad) > 0
+          const cantidadDetectada = encontrarCantidadEnSegmento(normalizarTextoAnalisis(candidate));
+          const cantidad = cantidadDetectada || (Number.isFinite(Number(aiItem?.cantidad)) && Number(aiItem.cantidad) > 0
             ? Number(aiItem.cantidad)
-            : 1;
+            : 1);
           const precioUnitario = parseOptionalNumber(resolution.product.precio);
           const alreadyPresent = items.some((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(resolution.product.nombre));
 
@@ -1587,25 +1669,27 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
           }
 
           resolved = true;
-          break;
+          continue;
         }
 
-        if (resolution.status === "ambiguous") {
-          const ambiguityAlreadyCovered = resolution.matches.some((option) => items.some((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(option?.nombre)));
+        if (resolution.status === "ambiguous" || resolution.status === "suggested") {
+          const resolutionOptions = (resolution.matches || (resolution.product ? [resolution.product] : [])).slice(0, 3);
+          const ambiguityAlreadyCovered = resolutionOptions.some((option) => items.some((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(option?.nombre))) && !/\b(?:y|,|;|\n)\b/i.test(candidate);
           const alreadyAmbiguous = ambiguities.some((entry) => normalizeCatalogText(entry?.input) === normalizeCatalogText(candidate));
           if (!ambiguityAlreadyCovered && !alreadyAmbiguous) {
             ambiguities.push({
               input: candidate,
-              options: resolution.matches.slice(0, 3)
+              options: resolutionOptions,
+              soft: Boolean(resolution.soft || resolution.status === "suggested"),
+              confidence: resolution.confidence || null
             });
           }
           resolved = true;
-          break;
         }
       }
 
       if (!resolved) {
-        const fallbackCandidate = construirCandidatosProductoIA(aiItem)[0];
+        const fallbackCandidate = candidateSegments[0] || construirCandidatosProductoIA(aiItem)[0];
         if (fallbackCandidate && !unmatched.some((entry) => normalizeCatalogText(entry) === normalizeCatalogText(fallbackCandidate))) {
           unmatched.push(fallbackCandidate);
         }
@@ -1615,7 +1699,13 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
 
   return {
     items: consolidarItemsPedido(items),
-    ambiguities: ambiguities.filter((entry, index, list) => list.findIndex((candidate) => candidate.input === entry.input) === index),
+    ambiguities: ambiguities.filter((entry, index, list) => {
+      const currentKey = `${String(entry?.input || "").replace(new RegExp(`^${QUANTITY_TOKEN_PATTERN}\\s+`, "i"), "").trim()}|${(entry?.options || []).map((option) => option?.nombreCanonico || option?.nombre || "").join("|")}`;
+      return list.findIndex((candidate) => {
+        const candidateKey = `${String(candidate?.input || "").replace(new RegExp(`^${QUANTITY_TOKEN_PATTERN}\\s+`, "i"), "").trim()}|${(candidate?.options || []).map((option) => option?.nombreCanonico || option?.nombre || "").join("|")}`;
+        return candidateKey === currentKey;
+      }) === index;
+    }),
     unmatched: [...new Set(unmatched.map((value) => limpiarTexto(value)).filter(Boolean))],
     possibleMatch: encontrarCoincidenciasCatalogo(texto, { minScore: 60, limit: 1 }).length > 0
   };
@@ -2342,24 +2432,10 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
     } catch (error) {
       logEvent("MODEL_ERROR", {
         model: OPENAI_MODEL,
-        error: error.message
+        error: error.message,
+        fallback: "catalog_analysis"
       }, "error");
-
-      return {
-        pedido: fallbackPedidoIA,
-        evaluacion: {
-          esValido: false,
-          faltantes: [],
-          productosInvalidos: [],
-          priceValidation: "ok",
-          catalogStatus: "model_error",
-          ambiguousProducts: [],
-          unmatchedProducts: [],
-          modelError: true
-        },
-        order: null,
-        sheets: { saved: false, skipped: true, reason: "model_error" }
-      };
+      pedidoIA = fallbackPedidoIA;
     }
   }
 
