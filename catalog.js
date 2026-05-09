@@ -204,6 +204,77 @@ function cleanCategory(value) {
   return normalized;
 }
 
+function buildCatalogGroupingKey(name) {
+  return normalizeCatalogText(name)
+    .replace(/\b(publico|public|distribuidor|distributor)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pickPreferredProduct(products = []) {
+  return [...products].sort((a, b) => {
+    const aScore = String(a?.nombre || "").includes(".") ? 0 : 1;
+    const bScore = String(b?.nombre || "").includes(".") ? 0 : 1;
+    if (aScore !== bScore) {
+      return bScore - aScore;
+    }
+
+    return String(b?.nombre || "").length - String(a?.nombre || "").length;
+  })[0] || products[0] || null;
+}
+
+function mergeCatalogProductsByPriceTier(products = []) {
+  const grouped = new Map();
+
+  for (const product of products) {
+    const key = buildCatalogGroupingKey(product?.nombre);
+    if (!key) {
+      continue;
+    }
+
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+
+    grouped.get(key).push(product);
+  }
+
+  return Array.from(grouped.values()).map((group) => {
+    const preferred = pickPreferredProduct(group);
+    const prices = group
+      .map((item) => Number(item?.precio))
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => a - b);
+    const aliases = new Set();
+
+    for (const item of group) {
+      for (const alias of buildAliases(item)) {
+        aliases.add(alias);
+      }
+
+      const normalizedName = normalizeCatalogText(item?.nombre);
+      if (normalizedName) {
+        aliases.add(normalizedName);
+      }
+    }
+
+    const precioDistribuidor = prices.length > 1 ? prices[0] : null;
+    const precioPublico = prices.length ? prices[prices.length - 1] : null;
+
+    return {
+      id: preferred?.id,
+      nombre: preferred?.nombre,
+      precio: precioPublico,
+      precio_publico: precioPublico,
+      precio_distribuidor: precioDistribuidor,
+      categoria: cleanCategory(preferred?.categoria),
+      aliases: Array.from(aliases),
+      activo: group.some((item) => item?.activo !== false),
+      stock: preferred?.stock ?? null
+    };
+  }).filter((product) => product.id && product.nombre);
+}
+
 function parseCatalogProductsFromHtml(html) {
   const products = [];
   const seen = new Set();
@@ -230,10 +301,10 @@ function parseCatalogProductsFromHtml(html) {
     });
   }
 
-  return products.map((product) => ({
+  return mergeCatalogProductsByPriceTier(products.map((product) => ({
     ...product,
     aliases: buildAliases(product)
-  }));
+  })));
 }
 
 async function fetchCatalogProducts(catalogUrl = DEFAULT_CATALOG_URL) {

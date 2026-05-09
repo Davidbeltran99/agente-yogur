@@ -83,6 +83,7 @@ async function generateDailyClosurePdf({ closureId, summary }) {
 
         doc.fontSize(11).fillColor("#10243e").text(`${index + 1}. ${safeText(order.cliente || "Cliente sin nombre")} · ${formatCurrency(order.total || 0)}`);
         doc.fontSize(9).fillColor("#4b647f").text(`Estado: ${safeText(order.estadoLabel || order.estado || "Pendiente")}`);
+        doc.text(`Tipo de precio: ${safeText(order.customerTypeLabel || order.priceTierLabel || "Público")}`);
         doc.text(`Pago: ${safeText(order.metodoPago || "Sin definir")}`);
         doc.text(`Detalle: ${safeText(order.resumenItems || "Sin detalle")}`);
         doc.text(`Teléfono: ${safeText(order.telefono || "-")}`);

@@ -107,9 +107,11 @@ function construirSaludoNatural(nombreCliente = "") {
     : pickVariant("sin-nombre", ["Perfecto 😊", "Claro 😊", "Listo 😊"]);
 }
 
-function construirRespuestaCatalogoInicial({ customerName = null } = {}) {
+function construirRespuestaCatalogoInicial({ customerName = null, isDistributor = false } = {}) {
   return customerName
-    ? `¡Hola ${customerName}! 😊\nMi nombre es Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`
+    ? (isDistributor
+      ? `¡Hola ${customerName}! 😊\nSoy Abi. Si quieres, te muestro precios de distribuidor o te ayudo con tu pedido.`
+      : `¡Hola ${customerName}! 😊\nMi nombre es Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`)
     : "Hola 😊\nMi nombre es Abi, la asistente virtual de Tellolac.\nSi quieres, te ayudo con productos, precios y pedidos.\n\n¿Me compartes tu nombre para atenderte mejor?";
 }
 
@@ -130,12 +132,13 @@ function construirLineasCatalogo(featuredProducts = []) {
     : [];
 }
 
-function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [] } = {}) {
+function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [], priceLabel = "público", isDistributor = false } = {}) {
   const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
   const lines = construirLineasCatalogo(featuredProducts);
 
   return [
     saludo,
+    isDistributor ? `Te muestro precios de ${priceLabel}.` : `Te comparto algunos productos con precio ${priceLabel}.`,
     "En Tellolac manejamos productos lácteos, aloe, café y anchetas.",
     "Algunos productos son:",
     lines.join("\n") || null,
@@ -144,10 +147,11 @@ function construirRespuestaCatalogoInformativo({ customerName = null, featuredPr
   ].filter(Boolean).join("\n\n");
 }
 
-function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [] } = {}) {
+function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [], priceLabel = "público", isDistributor = false } = {}) {
   const lines = construirLineasCatalogo(featuredProducts);
   return [
     `Mucho gusto, ${customerName} 😊`,
+    isDistributor ? `Te muestro tus precios de ${priceLabel}.` : `Te comparto algunos productos con precio ${priceLabel}.`,
     "En Tellolac manejamos productos lácteos, aloe, café y anchetas.",
     "Algunos productos son:",
     lines.join("\n") || null,
@@ -156,12 +160,12 @@ function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [
   ].filter(Boolean).join("\n\n");
 }
 
-function construirRespuestaPreciosInformativo({ customerName = null, featuredProducts = [], queryLabel = "ese producto" } = {}) {
+function construirRespuestaPreciosInformativo({ customerName = null, featuredProducts = [], queryLabel = "ese producto", priceLabel = "público", isDistributor = false } = {}) {
   const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
   const lines = construirLineasCatalogo(featuredProducts);
   return [
     saludo,
-    `Estos son los precios que encontré para ${queryLabel}:`,
+    isDistributor ? `Estos son los precios de ${priceLabel} que encontré para ${queryLabel}:` : `Estos son los precios que encontré para ${queryLabel}:`,
     lines.join("\n") || null,
     `Catálogo completo:\n${CATALOG_URL}`
   ].filter(Boolean).join("\n\n");
@@ -240,9 +244,15 @@ function construirRespuestaDespedida({ customerName = null } = {}) {
     : "Con gusto 😊\nQuedamos atentos. ¡Que tengas un excelente día!";
 }
 
-function construirRespuestaConfirmacion({ hasDraftContext = false } = {}) {
-  return hasDraftContext
-    ? pickVariant("draft", ["Perfecto 😊 Seguimos con tu pedido cuando quieras.", "Listo 😊 Aquí sigo para terminar tu pedido."])
+function construirRespuestaConfirmacion({ hasDraftContext = false, isDistributor = false } = {}) {
+  if (hasDraftContext) {
+    return isDistributor
+      ? pickVariant("draft-distributor", ["Perfecto 😊 Seguimos con tu pedido y te aplico precio distribuidor.", "Listo 😊 Aquí sigo para terminar tu pedido con precio distribuidor."])
+      : pickVariant("draft", ["Perfecto 😊 Seguimos con tu pedido cuando quieras.", "Listo 😊 Aquí sigo para terminar tu pedido."]);
+  }
+
+  return isDistributor
+    ? pickVariant("general-distributor", ["Perfecto 😊 Si quieres te muestro precios de distribuidor o te ayudo a pedir.", "Claro 😊 Te ayudo con productos y precios de distribuidor."])
     : pickVariant("general", ["Perfecto 😊 Cuando quieras te ayudo con productos o pedidos.", "Claro 😊 Si quieres te muestro productos o te ayudo a pedir."]);
 }
 
@@ -290,6 +300,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   const detalle = construirDetalleProductosAmable(productos);
   const listaProductosDisponibles = construirListaProductosDisponibles(options.availableProducts);
   const nombreCliente = String(pedido?.cliente || "").trim();
+  const isDistributor = String(pedido?.customer_type_applied || pedido?.customerTypeApplied || pedido?.price_tier_applied || pedido?.priceTierApplied || "public").trim().toLowerCase() === "distributor";
 
   if (evaluacion.modelError) {
     return "Se me cruzó el mensaje un momento 😕 ¿me lo puedes reenviar?";
@@ -426,6 +437,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     `📍 Dirección: ${pedido.direccion || "pendiente por confirmar"}`,
     `💳 Pago: ${pedido.metodo_pago || "pendiente por confirmar"}`,
     null,
+    isDistributor ? "Te aplico precio distribuidor." : null,
     pedido.total ? `Total: ${formatearMoneda(pedido.total)}` : null,
     null,
     pickVariant(`${nombreCliente}-${pedido.total}`, ["En un momento te confirmamos el despacho 🚚", "Ya te dejamos esto en curso 🚚", "Te confirmamos el despacho en un momento 🚚"]),

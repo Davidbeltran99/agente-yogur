@@ -1,6 +1,8 @@
-function createDefaultConversationState({ customerName = null } = {}) {
+function createDefaultConversationState({ customerName = null, customerType = "public", registeredCustomerId = null } = {}) {
   return {
     customerName,
+    customerType,
+    registeredCustomerId,
     pendingPedido: null,
     pendingClarification: null,
     lastPaymentMethod: null,
@@ -14,13 +16,13 @@ function createDefaultConversationState({ customerName = null } = {}) {
   };
 }
 
-function getConversationState(store, key, { customerName = null } = {}) {
+function getConversationState(store, key, { customerName = null, customerType = "public", registeredCustomerId = null } = {}) {
   if (!key) {
-    return createDefaultConversationState({ customerName });
+    return createDefaultConversationState({ customerName, customerType, registeredCustomerId });
   }
 
   if (!store.has(key)) {
-    store.set(key, createDefaultConversationState({ customerName }));
+    store.set(key, createDefaultConversationState({ customerName, customerType, registeredCustomerId }));
   }
 
   return store.get(key);

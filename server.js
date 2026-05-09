@@ -15,6 +15,8 @@ const {
 const {
   databasePath,
   ESTADOS_VALIDOS,
+  normalizeCustomerType,
+  normalizePhone,
   saveOrder,
   listOrders,
   listOrdersIncludingArchived,
@@ -33,6 +35,13 @@ const {
   listMessagesByPhone,
   countMessagesByPhone,
   conversationExists,
+  listCustomers,
+  getCustomerById,
+  getCustomerByPhone,
+  createCustomer,
+  updateCustomer,
+  setCustomerStatus,
+  deleteCustomer,
   createDailyClosure,
   listDailyClosures,
   getDailyClosureById
@@ -812,6 +821,47 @@ function getCatalogProductsCache() {
   }
 
   return catalogProductsCache;
+}
+
+function resolveCustomerProfile(phone) {
+  const customer = getCustomerByPhone(phone);
+  const customerType = customer?.isActive ? normalizeCustomerType(customer.customerType, "public") : "public";
+  return {
+    customer,
+    customerName: customer?.isActive ? customer.name : null,
+    customerType,
+    isDistributor: customerType === "distributor",
+    priceLabel: customerType === "distributor" ? "distribuidor" : "público"
+  };
+}
+
+function resolveCatalogPriceForCustomer(product, customerType = "public") {
+  const normalizedType = normalizeCustomerType(customerType, "public");
+  const publicPrice = parseOptionalNumber(product?.precio_publico ?? product?.precio);
+  const distributorPrice = parseOptionalNumber(product?.precio_distribuidor);
+
+  if (normalizedType === "distributor" && distributorPrice !== null) {
+    return { unitPrice: distributorPrice, priceSource: "distributor", priceTierApplied: "distributor" };
+  }
+
+  if (normalizedType === "distributor" && distributorPrice === null) {
+    logEvent("missing_distributor_price", {
+      productId: product?.id || null,
+      productName: product?.nombre || null,
+      fallback: "public"
+    });
+  }
+
+  return { unitPrice: publicPrice, priceSource: "public", priceTierApplied: distributorPrice !== null && normalizedType === "distributor" ? "distributor" : "public" };
+}
+
+function buildCatalogPricingContext(customerType = "public") {
+  const normalizedType = normalizeCustomerType(customerType, "public");
+  return {
+    customerType: normalizedType,
+    isDistributor: normalizedType === "distributor",
+    priceLabel: normalizedType === "distributor" ? "distribuidor" : "público"
+  };
 }
 
 function limpiarTextoProductoSolicitado(valor) {
@@ -1981,7 +2031,7 @@ function esSegmentoNoProducto(segmento) {
   return /\b(direccion|dirección|pago|nequi|daviplata|efectivo|transferencia|calle|carrera|cra|barrio|entrega|hoy|manana|mañana|pm|am)\b/i.test(normalized);
 }
 
-function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
+function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerType = "public") {
   const segments = segmentarPosiblesProductos(texto).flatMap((segment) => expandirSegmentoMultiProducto(segment));
   const items = [];
   const ambiguities = [];
@@ -2020,14 +2070,16 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
       });
       logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 100, input: resolutionInput });
       const cantidad = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
-      const precioUnitario = parseOptionalNumber(resolution.product.precio);
+      const resolvedPrice = resolveCatalogPriceForCustomer(resolution.product, customerType);
+      const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
 
       items.push({
         producto: resolution.product.nombre,
         sabor: null,
         cantidad,
         precio_unitario: precioUnitario,
-        subtotal: precioUnitario !== null ? precioUnitario * cantidad : null
+        subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
+        price_source: resolvedPrice.priceSource
       });
       continue;
     }
@@ -2062,14 +2114,16 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
         continue;
       }
 
-      const precioUnitario = parseOptionalNumber(catalogProduct?.precio);
+      const resolvedPrice = resolveCatalogPriceForCustomer(catalogProduct, customerType);
+      const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
 
       items.push({
         producto: catalogProduct.nombre,
         sabor: null,
         cantidad,
         precio_unitario: precioUnitario,
-        subtotal: precioUnitario !== null ? precioUnitario * cantidad : null
+        subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
+        price_source: resolvedPrice.priceSource
       });
       continue;
     }
@@ -2101,7 +2155,8 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
           const cantidad = cantidadDetectada || (Number.isFinite(Number(aiItem?.cantidad)) && Number(aiItem.cantidad) > 0
             ? Number(aiItem.cantidad)
             : 1);
-          const precioUnitario = parseOptionalNumber(resolution.product.precio);
+          const resolvedPrice = resolveCatalogPriceForCustomer(resolution.product, customerType);
+          const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
           const alreadyPresent = items.some((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(resolution.product.nombre));
 
           if (!alreadyPresent) {
@@ -2110,7 +2165,8 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
               sabor: null,
               cantidad,
               precio_unitario: precioUnitario,
-              subtotal: precioUnitario !== null ? precioUnitario * cantidad : null
+              subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
+              price_source: resolvedPrice.priceSource
             });
           }
 
@@ -2238,7 +2294,7 @@ function buildCatalogShortList(limit = 5) {
     .slice(0, limit);
 }
 
-function buildCatalogFeaturedProducts() {
+function buildCatalogFeaturedProducts(customerType = "public") {
   const catalog = getCatalogProductsCache();
   const specs = [
     { emoji: "🥛", label: "Aloe Litro", exactName: "aloe litro" },
@@ -2258,7 +2314,7 @@ function buildCatalogFeaturedProducts() {
     }
 
     const prices = matches
-      .map((product) => parseOptionalNumber(product.precio))
+      .map((product) => resolveCatalogPriceForCustomer(product, customerType).unitPrice)
       .filter((price) => price !== null)
       .sort((a, b) => a - b);
 
@@ -2271,7 +2327,7 @@ function buildCatalogFeaturedProducts() {
   }).filter(Boolean);
 }
 
-function buildPriceRequestProducts(texto, limit = 4) {
+function buildPriceRequestProducts(texto, limit = 4, customerType = "public") {
   const catalog = getCatalogProductsCache();
   const preferences = extractSemanticCatalogPreferences(texto);
   const familyMatches = catalog.filter((product) => preferences.families.has(product?.nombre_raiz_familia || product?.nombre_familia));
@@ -2281,7 +2337,7 @@ function buildPriceRequestProducts(texto, limit = 4) {
   return buildCatalogAmbiguityOptions(matches).slice(0, limit).map((product) => ({
     emoji: product.nombreCanonico?.includes("cafe") ? "☕" : (product.nombreCanonico?.includes("ancheta") ? "🎁" : "🥛"),
     label: product.nombre,
-    price: parseOptionalNumber(product.precio),
+    price: resolveCatalogPriceForCustomer(product, customerType).unitPrice,
     pricePrefix: null
   }));
 }
@@ -2312,6 +2368,8 @@ function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { ite
 
   return {
     ...pedido,
+    customer_type_applied: normalizeCustomerType(pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public"),
+    price_tier_applied: normalizeCustomerType(pedido?.price_tier_applied ?? pedido?.priceTierApplied ?? pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public"),
     cliente: pedido?.cliente || extraerClienteDesdeTexto(textoCliente),
     productos: Array.isArray(catalogAnalysis.items) ? catalogAnalysis.items : [],
     direccion: pedido?.direccion || extraerDireccionDesdeTexto(textoCliente),
@@ -2471,25 +2529,29 @@ function findCatalogProductByName(nombre) {
 }
 
 function calcularTotalesPedido(pedido = {}) {
+  const customerType = normalizeCustomerType(pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public");
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const productosConTotales = productos.map((item) => {
     const catalogProduct = findCatalogProductByName(item?.producto);
     const cantidad = Number.isFinite(Number(item?.cantidad)) && Number(item.cantidad) > 0
       ? Number(item.cantidad)
       : null;
+    const resolvedPrice = resolveCatalogPriceForCustomer(catalogProduct, customerType);
     const precioUnitario = parseOptionalNumber(item?.precio_unitario)
       ?? parseOptionalNumber(item?.precioUnitario)
-      ?? parseOptionalNumber(catalogProduct?.precio);
+      ?? resolvedPrice.unitPrice;
     const subtotal = cantidad && precioUnitario !== null
       ? cantidad * precioUnitario
       : null;
+    const priceSource = limpiarTexto(item?.price_source) || (parseOptionalNumber(item?.precio_unitario ?? item?.precioUnitario) !== null ? (resolvedPrice.priceSource || "public") : resolvedPrice.priceSource);
 
     return {
       producto: normalizarProducto(catalogProduct?.nombre || item?.producto),
       sabor: limpiarTexto(item?.sabor),
       cantidad,
       precio_unitario: precioUnitario,
-      subtotal
+      subtotal,
+      price_source: priceSource || "public"
     };
   }).filter((item) => item.producto || item.sabor || item.cantidad);
 
@@ -2500,6 +2562,8 @@ function calcularTotalesPedido(pedido = {}) {
 
   return {
     ...pedido,
+    customer_type_applied: customerType,
+    price_tier_applied: customerType,
     productos: productosConTotales,
     total: total > 0 ? total : null
   };
@@ -2707,6 +2771,8 @@ function buildOperationalSummary(orders = [], dateKey = new Date().toISOString()
     paymentBreakdown: Array.from(paymentMap.values()).sort((a, b) => b.total - a.total),
     orders: orders.map((order) => ({
       ...order,
+      customerTypeLabel: normalizeCustomerType(order.customerTypeApplied ?? order.customer_type_applied, "public") === "distributor" ? "Distribuidor" : "Público",
+      priceTierLabel: normalizeCustomerType(order.priceTierApplied ?? order.price_tier_applied, "public") === "distributor" ? "Distribuidor" : "Público",
       avatarLabel: buildOrderAvatarLabel(order),
       totalLabel: formatCurrency(order.total || 0)
     }))
@@ -2867,6 +2933,22 @@ function sendError(res, statusCode, errorMessage) {
   return res.status(statusCode).json({ ok: false, error: errorMessage });
 }
 
+function handleCustomerApiError(res, error, { fallbackMessage = "No se pudo procesar el cliente" } = {}) {
+  if (error?.code === "INVALID_CUSTOMER_PHONE" || error?.code === "INVALID_CUSTOMER_NAME" || error?.code === "INVALID_CUSTOMER_TYPE") {
+    return res.status(400).json({ ok: false, error: error.message, code: error.code });
+  }
+
+  if (error?.code === "CUSTOMER_NOT_FOUND") {
+    return res.status(404).json({ ok: false, error: error.message, code: error.code });
+  }
+
+  if (String(error?.message || "").includes("UNIQUE constraint failed: customers.phone")) {
+    return res.status(409).json({ ok: false, error: "Ya existe un cliente con ese teléfono", code: "CUSTOMER_PHONE_DUPLICATE" });
+  }
+
+  return res.status(500).json({ ok: false, error: fallbackMessage, detalle: error?.message || null });
+}
+
 function parseNonNegativeInteger(value, { defaultValue = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (value === undefined || value === null || value === "") {
     return defaultValue;
@@ -2958,7 +3040,8 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
     estado: "pendiente",
     total: null
   };
-  const initialCatalogAnalysis = analizarProductosCatalogoDesdeTexto(textoCliente, []);
+  const initialCatalogAnalysis = analizarProductosCatalogoDesdeTexto(textoCliente, [], opciones.customerType || "public");
+  const pricingContext = buildCatalogPricingContext(opciones.customerType || "public");
   let pedidoIA = fallbackPedidoIA;
   let catalogAnalysis = initialCatalogAnalysis;
 
@@ -2996,8 +3079,12 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
   }
 
   const pedidoNormalizado = normalizarPedido(pedidoIA);
-  catalogAnalysis = analizarProductosCatalogoDesdeTexto(textoCliente, pedidoNormalizado.productos);
-  const pedido = calcularTotalesPedido(enriquecerPedidoDetectado(pedidoNormalizado, textoCliente, catalogAnalysis));
+  catalogAnalysis = analizarProductosCatalogoDesdeTexto(textoCliente, pedidoNormalizado.productos, opciones.customerType || "public");
+  const pedido = calcularTotalesPedido({
+    ...enriquecerPedidoDetectado(pedidoNormalizado, textoCliente, catalogAnalysis),
+    customer_type_applied: pricingContext.customerType,
+    price_tier_applied: pricingContext.customerType
+  });
   const evaluacion = evaluarPedido(pedido, catalogAnalysis);
   let order = null;
   let sheets = { saved: false, skipped: true, reason: "order_not_persisted" };
@@ -3657,12 +3744,15 @@ function construirPedidoDesdeEstado(state) {
   }
 
   const activeContext = obtenerActiveOrderContext(state);
+  const customerType = normalizeCustomerType(state?.customerType, "public");
   if (!activeContext?.products?.length) {
-    return normalizarPedido({ cliente: state?.customerName || null });
+    return normalizarPedido({ cliente: state?.customerName || null, customer_type_applied: customerType, price_tier_applied: customerType });
   }
 
   return calcularTotalesPedido({
     cliente: state?.customerName || activeContext.customerName || null,
+    customer_type_applied: customerType,
+    price_tier_applied: customerType,
     productos: activeContext.products.map((item) => ({
       producto: item.producto,
       cantidad: item.cantidad || 1
@@ -3686,12 +3776,15 @@ function construirPedidoDesdeOrder(order) {
 
   return calcularTotalesPedido({
     cliente: order.cliente || null,
+    customer_type_applied: normalizeCustomerType(order.customerTypeApplied ?? order.customer_type_applied, "public"),
+    price_tier_applied: normalizeCustomerType(order.priceTierApplied ?? order.price_tier_applied, "public"),
     productos: (order.items || []).map((item) => ({
       producto: item.producto,
       sabor: item.sabor || null,
       cantidad: item.cantidad || 1,
       precio_unitario: item.precioUnitario,
-      subtotal: item.subtotal
+      subtotal: item.subtotal,
+      price_source: item.priceSource || item.price_source || "public"
     })),
     direccion: order.direccion || null,
     metodo_pago: order.metodoPago || null,
@@ -4103,6 +4196,13 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const previousMessageCount = countMessagesByPhone(telefono);
   const activeOrderBefore = getActiveOrderByPhone(telefono);
   const state = obtenerEstadoConversacion(telefono);
+  const customerProfile = resolveCustomerProfile(telefono);
+  if (customerProfile.customerName) {
+    state.customerName = customerProfile.customerName;
+    state.awaitingName = false;
+  }
+  state.customerType = customerProfile.customerType;
+  state.registeredCustomerId = customerProfile.customer?.id || null;
   const contextualizedMessage = aplicarContextoProductoAMensaje(mensaje, state);
   const hasDraftContext = tieneBorradorPedido(state);
   const hasSuggestionContext = Boolean(obtenerSuggestionMemoryActiva(state));
@@ -4182,14 +4282,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.lastIntent = routingIntent;
     state.awaitingName = !state.customerName;
     actualizarActiveOrderContext(state, { intent: routingIntent });
-    const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null });
-    const respuesta = await generarRespuestaConversacional({
-      telefono,
-      sourceMessageId,
-      routingIntent,
-      fallback,
-      context: { customerName: state.customerName || null, userMessage: mensaje }
-    });
+    const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null, isDistributor: customerProfile.isDistributor });
+    const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
@@ -4217,17 +4311,12 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (routingIntent === "provide_name" && explicitName) {
     state.customerName = explicitName;
+    state.customerType = "public";
     state.awaitingName = false;
     state.lastIntent = routingIntent;
     actualizarActiveOrderContext(state, { intent: routingIntent });
-    const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts() });
-    const respuesta = await generarRespuestaConversacional({
-      telefono,
-      sourceMessageId,
-      routingIntent,
-      fallback,
-      context: { customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts(), catalogUrl: CATALOG_URL, userMessage: mensaje }
-    });
+    const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts(customerProfile.customerType), priceLabel: customerProfile.priceLabel, isDistributor: customerProfile.isDistributor });
+    const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
@@ -4267,7 +4356,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
 
   if (["payment_method", "address_provided", "remove_item", "modify_quantity"].includes(routingIntent)) {
-    let pedidoActual = construirPedidoDesdeEstado(state);
+    let pedidoActual = {
+      ...construirPedidoDesdeEstado(state),
+      customer_type_applied: customerProfile.customerType,
+      price_tier_applied: customerProfile.customerType
+    };
 
     if (routingIntent === "payment_method") {
       pedidoActual = calcularTotalesPedido({ ...pedidoActual, metodo_pago: extraerMetodoPagoDesdeTexto(mensaje) || pedidoActual.metodo_pago || null });
@@ -4316,17 +4409,12 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntent === "catalog_request") {
     state.lastIntent = routingIntent;
     state.awaitingName = false;
-    const featuredProducts = buildCatalogFeaturedProducts();
-    guardarSuggestionMemory(state, featuredProducts.map((product) => ({ nombre: product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
+    const pricingContext = buildCatalogPricingContext(customerProfile.customerType);
+    const featuredCatalog = buildCatalogFeaturedProducts(customerProfile.customerType);
+    guardarSuggestionMemory(state, featuredCatalog.map((product) => ({ nombre: product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
     actualizarActiveOrderContext(state, { intent: routingIntent });
-    const fallback = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts });
-    const respuesta = await generarRespuestaConversacional({
-      telefono,
-      sourceMessageId,
-      routingIntent,
-      fallback,
-      context: { customerName: state.customerName || null, featuredProducts, catalogUrl: CATALOG_URL, userMessage: mensaje }
-    });
+    const fallback = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts: featuredCatalog, priceLabel: pricingContext.priceLabel, isDistributor: pricingContext.isDistributor });
+    const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
@@ -4334,22 +4422,20 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntent === "price_request") {
     state.lastIntent = routingIntent;
     state.awaitingName = false;
-    const featuredProducts = buildPriceRequestProducts(contextualizedMessage.text || mensaje);
-    guardarSuggestionMemory(state, (featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts()).map((product) => ({ nombre: product.label || product })), { type: "price_suggestion", reason: "price_request" });
+    const pricingContext = buildCatalogPricingContext(customerProfile.customerType);
+    const featuredProducts = buildPriceRequestProducts(contextualizedMessage.text || mensaje, 4, customerProfile.customerType);
+    const fallbackProducts = featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts(customerProfile.customerType);
+    guardarSuggestionMemory(state, fallbackProducts.map((product) => ({ nombre: product.label || product })), { type: "price_suggestion", reason: "price_request" });
     actualizarActiveOrderContext(state, { intent: routingIntent });
     const queryLabel = limpiarTextoProductoSolicitado(contextualizedMessage.text || mensaje) || "ese producto";
     const fallback = construirRespuestaPreciosInformativo({
       customerName: state.customerName || null,
-      featuredProducts: featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts(),
-      queryLabel
+      featuredProducts: fallbackProducts,
+      queryLabel,
+      priceLabel: pricingContext.priceLabel,
+      isDistributor: pricingContext.isDistributor
     });
-    const respuesta = await generarRespuestaConversacional({
-      telefono,
-      sourceMessageId,
-      routingIntent,
-      fallback,
-      context: { customerName: state.customerName || null, featuredProducts, queryLabel, catalogUrl: CATALOG_URL, userMessage: mensaje }
-    });
+    const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
@@ -4374,8 +4460,10 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
           ambiguousProducts: [],
           unmatchedProducts: []
         }, { availableProducts: buildCatalogShortList(5) })
-      : construirRespuestaCasual();
-    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+      : construirRespuestaConfirmacion({ hasDraftContext, isDistributor: customerProfile.isDistributor });
+    const respuesta = activeContext?.products?.length
+      ? await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } })
+      : fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }
@@ -4384,12 +4472,15 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     telefono,
     mensajeOriginal: mensaje,
     sourceMessageId,
-    guardar: false
+    guardar: false,
+    customerType: customerProfile.customerType
   });
 
-  const pedidoCombinado = combinarPedidoParcialConOpciones(state.pendingPedido || { cliente: state.customerName || null }, resultadoActual.pedido || {}, {
+  const pedidoCombinado = combinarPedidoParcialConOpciones(state.pendingPedido || { cliente: state.customerName || null, customer_type_applied: customerProfile.customerType, price_tier_applied: customerProfile.customerType }, resultadoActual.pedido || {}, {
     appendProducts: Boolean(contextualizedMessage.appendProducts)
   });
+  pedidoCombinado.customer_type_applied = customerProfile.customerType;
+  pedidoCombinado.price_tier_applied = customerProfile.customerType;
   if (!pedidoCombinado.cliente && state.customerName) {
     pedidoCombinado.cliente = state.customerName;
   }
@@ -4743,6 +4834,61 @@ app.post("/admin/catalog/sync", requirePanelAuth, async (_req, res) => {
   } catch (error) {
     logEvent("catalogo_sync_error", { error: error.response?.data || error.message }, "error");
     return res.status(500).json({ ok: false, error: "No se pudo sincronizar el catálogo", detalle: error.message });
+  }
+});
+
+app.get("/admin/customers", requirePanelAuth, (req, res) => {
+  try {
+    const query = limpiarTexto(req.query.q || req.query.query || "");
+    const customers = listCustomers({ query });
+    return res.json({ ok: true, total: customers.length, customers });
+  } catch (error) {
+    logEvent("customers_list_error", { error: error.message }, "error");
+    return res.status(500).json({ ok: false, error: "No se pudieron cargar los clientes", detalle: error.message });
+  }
+});
+
+app.post("/admin/customers", requirePanelAuth, (req, res) => {
+  try {
+    const customer = createCustomer(req.body || {});
+    return res.status(201).json({ ok: true, customer });
+  } catch (error) {
+    logEvent("customer_create_error", { error: error.message }, "warn");
+    return handleCustomerApiError(res, error, { fallbackMessage: "No se pudo crear el cliente" });
+  }
+});
+
+app.patch("/admin/customers/:id", requirePanelAuth, (req, res) => {
+  try {
+    const customer = updateCustomer(req.params.id, req.body || {});
+    return res.json({ ok: true, customer });
+  } catch (error) {
+    logEvent("customer_update_error", { id: req.params.id, error: error.message }, "warn");
+    return handleCustomerApiError(res, error, { fallbackMessage: "No se pudo actualizar el cliente" });
+  }
+});
+
+app.patch("/admin/customers/:id/status", requirePanelAuth, (req, res) => {
+  try {
+    if (typeof req.body?.isActive !== "boolean") {
+      return res.status(400).json({ ok: false, error: "isActive debe ser booleano" });
+    }
+
+    const customer = setCustomerStatus(req.params.id, req.body.isActive);
+    return res.json({ ok: true, customer });
+  } catch (error) {
+    logEvent("customer_status_error", { id: req.params.id, error: error.message }, "warn");
+    return handleCustomerApiError(res, error, { fallbackMessage: "No se pudo actualizar el estado del cliente" });
+  }
+});
+
+app.delete("/admin/customers/:id", requirePanelAuth, (req, res) => {
+  try {
+    const customer = deleteCustomer(req.params.id);
+    return res.json({ ok: true, customer });
+  } catch (error) {
+    logEvent("customer_delete_error", { id: req.params.id, error: error.message }, "warn");
+    return handleCustomerApiError(res, error, { fallbackMessage: "No se pudo eliminar el cliente" });
   }
 });
 

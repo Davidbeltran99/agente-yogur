@@ -35,6 +35,19 @@ const kpiPending = document.getElementById("kpiPending");
 const kpiDelivered = document.getElementById("kpiDelivered");
 const reportsGrid = document.getElementById("reportsGrid");
 const settingsGrid = document.getElementById("settingsGrid");
+const customersMeta = document.getElementById("customersMeta");
+const customersFeedback = document.getElementById("customersFeedback");
+const customersList = document.getElementById("customersList");
+const customerSearchInput = document.getElementById("customerSearchInput");
+const customerForm = document.getElementById("customerForm");
+const customerFormTitle = document.getElementById("customerFormTitle");
+const customerFormResetButton = document.getElementById("customerFormResetButton");
+const customerIdInput = document.getElementById("customerIdInput");
+const customerNameInput = document.getElementById("customerNameInput");
+const customerPhoneInput = document.getElementById("customerPhoneInput");
+const customerTypeInput = document.getElementById("customerTypeInput");
+const customerNotesInput = document.getElementById("customerNotesInput");
+const customerSubmitButton = document.getElementById("customerSubmitButton");
 const historyList = document.getElementById("historyList");
 const historyDetail = document.getElementById("historyDetail");
 const toastContainer = document.getElementById("toastContainer");
@@ -81,6 +94,8 @@ let selectedPhone = null;
 let activeMessages = [];
 let historyClosures = [];
 let selectedClosureId = null;
+let customers = [];
+let selectedCustomerId = null;
 let healthState = null;
 let sessionTimeoutHandle = null;
 let finalizeModalOpen = false;
@@ -98,6 +113,8 @@ let ordersPollingInFlight = false;
 let conversationsPollingInFlight = false;
 let conversationSearchQuery = "";
 let conversationSearchDebounce = null;
+let customerSearchQuery = "";
+let customerSearchDebounce = null;
 let visibleMessagesLimit = 60;
 let currentTheme = getStoredThemePreference();
 let uiSoundsEnabled = getStoredSoundsPreference();
@@ -171,6 +188,18 @@ function getPaymentVariant(paymentMethod) {
   if (normalized.includes("efectivo")) return "cash";
   if (normalized.includes("transfer") || normalized.includes("nequi") || normalized.includes("davi")) return "digital";
   return "neutral";
+}
+
+function formatCustomerTypeLabel(value) {
+  return String(value || "public").toLowerCase() === "distributor" ? "Distribuidor" : "Público";
+}
+
+function formatCustomerStatusLabel(value) {
+  return value ? "Activo" : "Inactivo";
+}
+
+function getCustomerTypeBadgeClass(value) {
+  return String(value || "public").toLowerCase() === "distributor" ? "badge distributor" : "badge light";
 }
 
 function escapeHtml(value) {
@@ -768,6 +797,59 @@ function getClosureById(closureId) {
   return historyClosures.find((item) => item.id === closureId) || null;
 }
 
+function getCustomerById(customerId) {
+  return customers.find((item) => item.id === customerId) || null;
+}
+
+function showCustomersFeedback(message, type = "success") {
+  if (!customersFeedback) {
+    return;
+  }
+
+  customersFeedback.textContent = message;
+  customersFeedback.className = `feedback ${type}`;
+  customersFeedback.hidden = false;
+}
+
+function hideCustomersFeedback() {
+  if (!customersFeedback) {
+    return;
+  }
+
+  customersFeedback.hidden = true;
+  customersFeedback.textContent = "";
+  customersFeedback.className = "feedback";
+}
+
+function resetCustomerForm() {
+  selectedCustomerId = null;
+  if (customerForm) {
+    customerForm.reset();
+  }
+  if (customerIdInput) customerIdInput.value = "";
+  if (customerTypeInput) customerTypeInput.value = "public";
+  if (customerFormTitle) customerFormTitle.textContent = "Nuevo cliente";
+  if (customerSubmitButton) customerSubmitButton.textContent = "Guardar cliente";
+  hideCustomersFeedback();
+}
+
+function fillCustomerForm(customer) {
+  if (!customer) {
+    resetCustomerForm();
+    return;
+  }
+
+  selectedCustomerId = customer.id;
+  customerIdInput.value = customer.id || "";
+  customerNameInput.value = customer.name || "";
+  customerPhoneInput.value = customer.phone || "";
+  customerTypeInput.value = customer.customerType || "public";
+  customerNotesInput.value = customer.notes || "";
+  customerFormTitle.textContent = `Editar ${customer.name || "cliente"}`;
+  customerSubmitButton.textContent = "Guardar cambios";
+  hideCustomersFeedback();
+}
+
 function renderKPIs(summary) {
   const stats = summary?.stats || {};
   kpiOrdersToday.textContent = String(stats.totalOrders || 0);
@@ -918,6 +1000,46 @@ function renderSettings() {
   `;
 }
 
+function renderCustomers() {
+  if (customersMeta) {
+    customersMeta.textContent = `${customers.length} cliente(s) ${customerSearchQuery.trim() ? "filtrados" : "registrados"}`;
+  }
+
+  if (!customersList) {
+    return;
+  }
+
+  if (!customers.length) {
+    customersList.innerHTML = renderEmptyState({ iconName: "users", title: "Sin clientes registrados", copy: "Aquí podrás administrar clientes directos y distribuidores." });
+    return;
+  }
+
+  customersList.innerHTML = customers.map((customer) => {
+    const isSelected = customer.id === selectedCustomerId;
+    return `
+      <article class="customer-card ${isSelected ? "active" : ""}" data-customer-id="${escapeHtml(customer.id)}">
+        <div class="customer-card-top">
+          <div>
+            <div class="customer-name">${escapeHtml(customer.name || "Cliente sin nombre")}</div>
+            <div class="customer-subline">${escapeHtml(customer.phone || "Sin teléfono")}</div>
+          </div>
+          <span class="${escapeHtml(getCustomerTypeBadgeClass(customer.customerType))}">${escapeHtml(formatCustomerTypeLabel(customer.customerType))}</span>
+        </div>
+        <div class="customer-card-meta">
+          <span class="mini-pill">${escapeHtml(formatCustomerStatusLabel(customer.isActive))}</span>
+          <span class="helper-text">Actualizado ${escapeHtml(formatDate(customer.updatedAt || customer.createdAt))}</span>
+        </div>
+        ${customer.notes ? `<p class="helper-text customer-notes">${escapeHtml(customer.notes)}</p>` : ""}
+        <div class="customer-card-actions">
+          <button type="button" class="secondary small-action" data-edit-customer="${escapeHtml(customer.id)}">Editar</button>
+          <button type="button" class="secondary small-action" data-toggle-customer="${escapeHtml(customer.id)}" data-next-active="${customer.isActive ? "false" : "true"}">${customer.isActive ? "Desactivar" : "Activar"}</button>
+          <button type="button" class="secondary ghost small-action" data-delete-customer="${escapeHtml(customer.id)}">Eliminar</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
 function renderOrders() {
   if (!orders.length) {
     ordersTableBody.innerHTML = `<tr><td colspan="6">${renderEmptyState({ iconName: "box", title: "Todo tranquilo por ahora 😊", copy: "Abi mostrará aquí los nuevos pedidos cuando lleguen.", compact: true })}</td></tr>`;
@@ -931,6 +1053,7 @@ function renderOrders() {
     const avatar = buildAvatarLabel(order);
     const statusLabel = getStatusLabel(order.estado);
     const paymentVariant = getPaymentVariant(order.metodoPago);
+    const customerTierLabel = formatCustomerTypeLabel(order.customerTypeApplied || order.priceTierApplied);
 
     return `
       <tr data-order-id="${escapeHtml(order.id)}" class="${activeClass}">
@@ -942,6 +1065,7 @@ function renderOrders() {
               <div class="customer-subline">${escapeHtml(order.telefono || "Sin teléfono")}</div>
               <div class="inline-micro-meta">
                 <span class="mini-pill">${icon("message-circle", "ui-icon mini-icon")} Chat activo</span>
+                <span class="mini-pill">${escapeHtml(customerTierLabel)}</span>
               </div>
             </div>
           </div>
@@ -989,12 +1113,13 @@ function renderDetail() {
   }
 
   const dateMeta = formatDateTimeStack(order.fechaRegistro);
+  const customerTierLabel = formatCustomerTypeLabel(order.customerTypeApplied || order.priceTierApplied);
   const itemsHtml = (order.items || []).length
     ? order.items.map((item) => `
         <div class="item-row premium-item-row detail-product-row">
           <div>
             <strong>• ${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))} — ${escapeHtml(formatCurrency(item.subtotal || 0))}</strong>
-            <div class="helper-text">Unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))}</div>
+            <div class="helper-text">Unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))} · Fuente: ${escapeHtml(formatCustomerTypeLabel(item.priceSource || item.price_source))}</div>
           </div>
         </div>
       `).join("")
@@ -1024,6 +1149,7 @@ function renderDetail() {
         <div class="detail-chip-row">
           <span class="badge ${order.estado.replace(/\s+/g, "-")}">${escapeHtml(statusLabel)}</span>
           <span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "Sin definir")}</span>
+          <span class="mini-pill">${escapeHtml(customerTierLabel)}</span>
           <span class="mini-pill">${icon("clock-3", "ui-icon mini-icon")} ${escapeHtml(dateMeta.date)} · ${escapeHtml(dateMeta.time)}</span>
         </div>
       </div>
@@ -1034,6 +1160,7 @@ function renderDetail() {
           <div class="meta-item"><span>ID</span>${escapeHtml(order.id || "-")}</div>
           <div class="meta-item"><span>Cliente</span>${escapeHtml(order.cliente || "-")}</div>
           <div class="meta-item"><span>Teléfono</span>${escapeHtml(order.telefono || "-")}</div>
+          <div class="meta-item"><span>Precio aplicado</span>${escapeHtml(customerTierLabel)}</div>
         </div>
       </div>
       <div class="detail-card">
@@ -1259,7 +1386,7 @@ function renderHistoryDetail() {
         <h3>Pedidos archivados</h3>
         <div class="items-list">
           ${ordersList.length
-            ? ordersList.map((order) => `<div class="item-row"><strong>${escapeHtml(order.cliente || "Cliente sin nombre")}</strong><div class="helper-text">${escapeHtml(order.resumenItems || "Sin detalle")}</div><div class="helper-text">${escapeHtml(formatCurrency(order.total || 0))}</div></div>`).join("")
+            ? ordersList.map((order) => `<div class="item-row"><strong>${escapeHtml(order.cliente || "Cliente sin nombre")}</strong><div class="helper-text">${escapeHtml(order.customerTypeLabel || formatCustomerTypeLabel(order.customerTypeApplied || order.priceTierApplied))} · ${escapeHtml(order.resumenItems || "Sin detalle")}</div><div class="helper-text">${escapeHtml(formatCurrency(order.total || 0))}</div></div>`).join("")
             : '<p class="helper-text">No se guardaron pedidos en este cierre.</p>'}
         </div>
       </div>
@@ -1581,6 +1708,138 @@ async function loadHealth() {
   }
 }
 
+async function loadCustomers(options = {}) {
+  const { silent = false } = options;
+  const query = customerSearchQuery.trim();
+  const requestQuery = query ? `?q=${encodeURIComponent(query)}` : "";
+
+  if (!silent && customersMeta) {
+    customersMeta.textContent = "Cargando clientes...";
+  }
+
+  try {
+    const response = await fetch(`/admin/customers${requestQuery}`, { cache: "no-store" });
+    const payload = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.detalle || payload.error || "No se pudieron cargar los clientes");
+    }
+
+    customers = payload.customers || [];
+    if (selectedCustomerId && !customers.some((customer) => customer.id === selectedCustomerId)) {
+      resetCustomerForm();
+    }
+    renderCustomers();
+  } catch (error) {
+    customers = [];
+    renderCustomers();
+    if (!silent) {
+      showCustomersFeedback(error.message, "error");
+    }
+  }
+}
+
+async function submitCustomerForm(event) {
+  event.preventDefault();
+  hideCustomersFeedback();
+
+  const payload = {
+    name: customerNameInput?.value?.trim() || "",
+    phone: customerPhoneInput?.value?.trim() || "",
+    customerType: customerTypeInput?.value || "public",
+    notes: customerNotesInput?.value?.trim() || ""
+  };
+
+  customerSubmitButton.disabled = true;
+
+  try {
+    const isEdit = Boolean(customerIdInput?.value);
+    const response = await fetch(isEdit ? `/admin/customers/${encodeURIComponent(customerIdInput.value)}` : "/admin/customers", {
+      method: isEdit ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const result = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    if (!response.ok || !result.ok) {
+      throw new Error(result.detalle || result.error || "No se pudo guardar el cliente");
+    }
+
+    showCustomersFeedback(isEdit ? "Cliente actualizado correctamente." : "Cliente creado correctamente.", "success");
+    showToast(isEdit ? "Cliente actualizado." : "Cliente creado.", "success");
+    resetCustomerForm();
+    await loadCustomers({ silent: true });
+  } catch (error) {
+    showCustomersFeedback(error.message, "error");
+    showToast(error.message, "error");
+  } finally {
+    customerSubmitButton.disabled = false;
+  }
+}
+
+async function updateCustomerStatus(customerId, isActive) {
+  hideCustomersFeedback();
+
+  try {
+    const response = await fetch(`/admin/customers/${encodeURIComponent(customerId)}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isActive })
+    });
+    const result = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    if (!response.ok || !result.ok) {
+      throw new Error(result.detalle || result.error || "No se pudo actualizar el cliente");
+    }
+
+    showToast(isActive ? "Cliente activado." : "Cliente desactivado.", "success");
+    await loadCustomers({ silent: true });
+  } catch (error) {
+    showCustomersFeedback(error.message, "error");
+    showToast(error.message, "error");
+  }
+}
+
+async function removeCustomer(customerId) {
+  hideCustomersFeedback();
+
+  try {
+    const response = await fetch(`/admin/customers/${encodeURIComponent(customerId)}`, { method: "DELETE" });
+    const result = await response.json();
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    if (!response.ok || !result.ok) {
+      throw new Error(result.detalle || result.error || "No se pudo eliminar el cliente");
+    }
+
+    showToast("Cliente eliminado.", "success");
+    resetCustomerForm();
+    await loadCustomers({ silent: true });
+  } catch (error) {
+    showCustomersFeedback(error.message, "error");
+    showToast(error.message, "error");
+  }
+}
+
 async function updateOrderStatus(orderId, nextStatus, button) {
   button.disabled = true;
   hideFeedback();
@@ -1707,7 +1966,7 @@ async function loadDashboard() {
   setLoadingState();
 
   try {
-    await Promise.all([loadOrders(), loadConversations(), loadHistory(), loadHealth()]);
+    await Promise.all([loadOrders(), loadConversations(), loadHistory(), loadHealth(), loadCustomers()]);
   } finally {
     closeDayButton.disabled = false;
     hideAppLoader();
@@ -1744,6 +2003,36 @@ document.addEventListener("click", (event) => {
   if (historyCard && !event.target.closest("a")) {
     selectedClosureId = historyCard.dataset.closureId;
     renderHistory();
+    return;
+  }
+
+  const customerCard = event.target.closest(".customer-card[data-customer-id]");
+  if (customerCard && !event.target.closest("button")) {
+    fillCustomerForm(getCustomerById(customerCard.dataset.customerId));
+    renderCustomers();
+    return;
+  }
+
+  const editCustomerButton = event.target.closest("button[data-edit-customer]");
+  if (editCustomerButton) {
+    fillCustomerForm(getCustomerById(editCustomerButton.dataset.editCustomer));
+    renderCustomers();
+    return;
+  }
+
+  const toggleCustomerButton = event.target.closest("button[data-toggle-customer]");
+  if (toggleCustomerButton) {
+    updateCustomerStatus(toggleCustomerButton.dataset.toggleCustomer, toggleCustomerButton.dataset.nextActive === "true");
+    return;
+  }
+
+  const deleteCustomerButton = event.target.closest("button[data-delete-customer]");
+  if (deleteCustomerButton) {
+    const customer = getCustomerById(deleteCustomerButton.dataset.deleteCustomer);
+    const shouldDelete = window.confirm(`¿Eliminar a ${customer?.name || "este cliente"}? Esta acción no se puede deshacer.`);
+    if (shouldDelete) {
+      removeCustomer(deleteCustomerButton.dataset.deleteCustomer);
+    }
     return;
   }
 
@@ -1796,6 +2085,14 @@ conversationSearchInput?.addEventListener("input", (event) => {
   conversationSearchQuery = event.target.value || "";
   conversationSearchDebounce = window.setTimeout(() => {
     loadConversations();
+  }, 220);
+});
+
+customerSearchInput?.addEventListener("input", (event) => {
+  window.clearTimeout(customerSearchDebounce);
+  customerSearchQuery = event.target.value || "";
+  customerSearchDebounce = window.setTimeout(() => {
+    loadCustomers();
   }, 220);
 });
 
@@ -1892,12 +2189,15 @@ chatMessageInput?.addEventListener("input", () => {
 });
 
 chatComposer.addEventListener("submit", sendChatMessage);
+customerForm?.addEventListener("submit", submitCustomerForm);
+customerFormResetButton?.addEventListener("click", resetCustomerForm);
 
 applyTheme(currentTheme);
 initSidebarState();
 initSectionState();
 syncThemeToggleState();
 syncSoundToggleState();
+resetCustomerForm();
 updateOrdersRefreshMeta();
 
 (async () => {

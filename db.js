@@ -4,6 +4,7 @@ const { randomUUID } = require("crypto");
 const Database = require("better-sqlite3");
 
 const ESTADOS_VALIDOS = new Set(["pendiente", "en proceso", "entregado", "cancelado"]);
+const CUSTOMER_TYPES = new Set(["public", "distributor"]);
 const DEFAULT_DB_PATH = path.join(__dirname, "data", "agente-yogur.sqlite");
 
 function normalizeText(value) {
@@ -52,6 +53,21 @@ function parseOptionalNumber(value) {
 
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizePhone(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const digits = normalized.replace(/\D+/g, "");
+  return digits || null;
+}
+
+function normalizeCustomerType(value, fallback = "public") {
+  const normalized = normalizeText(value)?.toLowerCase();
+  return CUSTOMER_TYPES.has(normalized) ? normalized : fallback;
 }
 
 function getDatabasePath() {
@@ -125,11 +141,25 @@ db.exec(`
     id TEXT PRIMARY KEY,
     nombre TEXT NOT NULL,
     precio REAL,
+    precio_publico REAL,
+    precio_distribuidor REAL,
     categoria TEXT,
     aliases TEXT,
     activo INTEGER NOT NULL DEFAULT 1,
     source_url TEXT,
     updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS customers (
+    id TEXT PRIMARY KEY,
+    phone TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    customer_type TEXT NOT NULL DEFAULT 'public',
+    notes TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(customer_type IN ('public', 'distributor'))
   );
 
   CREATE TABLE IF NOT EXISTS daily_closures (
@@ -154,6 +184,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_order_id ON messages(order_id);
   CREATE INDEX IF NOT EXISTS idx_catalog_products_activo ON catalog_products(activo);
   CREATE INDEX IF NOT EXISTS idx_catalog_products_nombre ON catalog_products(nombre);
+  CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+  CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
+  CREATE INDEX IF NOT EXISTS idx_customers_active ON customers(is_active);
   CREATE INDEX IF NOT EXISTS idx_daily_closures_created_at ON daily_closures(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_daily_closures_date_key ON daily_closures(date_key DESC);
 `);
@@ -163,6 +196,11 @@ ensureColumn("order_items", "precio_unitario", "REAL");
 ensureColumn("order_items", "subtotal", "REAL");
 ensureColumn("orders", "archived_at", "TEXT");
 ensureColumn("orders", "closure_id", "TEXT");
+ensureColumn("orders", "customer_type_applied", "TEXT");
+ensureColumn("orders", "price_tier_applied", "TEXT");
+ensureColumn("order_items", "price_source", "TEXT");
+ensureColumn("catalog_products", "precio_publico", "REAL");
+ensureColumn("catalog_products", "precio_distribuidor", "REAL");
 
 const insertOrderStatement = db.prepare(`
   INSERT INTO orders (
@@ -176,15 +214,17 @@ const insertOrderStatement = db.prepare(`
     observaciones,
     estado,
     total,
+    customer_type_applied,
+    price_tier_applied,
     source_message_id,
     created_at,
     updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const insertOrderItemStatement = db.prepare(`
-  INSERT INTO order_items (id, order_id, producto, sabor, cantidad, precio_unitario, subtotal, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO order_items (id, order_id, producto, sabor, cantidad, precio_unitario, subtotal, price_source, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const listOrderRowsBase = `
@@ -199,6 +239,8 @@ const listOrderRowsBase = `
     o.observaciones,
     o.estado,
     o.total,
+    o.customer_type_applied,
+    o.price_tier_applied,
     o.source_message_id,
     o.created_at,
     o.updated_at,
@@ -208,6 +250,7 @@ const listOrderRowsBase = `
     oi.cantidad,
     oi.precio_unitario,
     oi.subtotal,
+    oi.price_source,
     oi.created_at AS item_created_at
   FROM orders o
   LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -244,11 +287,13 @@ const listMessagesByPhoneStatement = db.prepare(`
 const conversationExistsStatement = db.prepare(`SELECT 1 AS exists_flag FROM messages WHERE phone = ? LIMIT 1`);
 const deactivateCatalogProductsBySourceStatement = db.prepare(`UPDATE catalog_products SET activo = 0, updated_at = ? WHERE source_url = ?`);
 const upsertCatalogProductStatement = db.prepare(`
-  INSERT INTO catalog_products (id, nombre, precio, categoria, aliases, activo, source_url, updated_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO catalog_products (id, nombre, precio, precio_publico, precio_distribuidor, categoria, aliases, activo, source_url, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     nombre = excluded.nombre,
     precio = excluded.precio,
+    precio_publico = excluded.precio_publico,
+    precio_distribuidor = excluded.precio_distribuidor,
     categoria = excluded.categoria,
     aliases = excluded.aliases,
     activo = excluded.activo,
@@ -256,12 +301,12 @@ const upsertCatalogProductStatement = db.prepare(`
     updated_at = excluded.updated_at
 `);
 const listCatalogProductsStatement = db.prepare(`
-  SELECT id, nombre, precio, categoria, aliases, activo, source_url, updated_at
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, aliases, activo, source_url, updated_at
   FROM catalog_products
   ORDER BY LOWER(nombre) ASC, rowid ASC
 `);
 const listActiveCatalogProductsStatement = db.prepare(`
-  SELECT id, nombre, precio, categoria, aliases, activo, source_url, updated_at
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, aliases, activo, source_url, updated_at
   FROM catalog_products
   WHERE activo = 1
   ORDER BY LOWER(nombre) ASC, rowid ASC
@@ -289,6 +334,44 @@ const archiveOrdersByClosureStatement = db.prepare(`
   SET closure_id = ?, archived_at = ?, updated_at = ?
   WHERE id = ?
 `);
+const listCustomersStatement = db.prepare(`
+  SELECT id, phone, name, customer_type, notes, is_active, created_at, updated_at
+  FROM customers
+  ORDER BY is_active DESC, LOWER(name) ASC, datetime(updated_at) DESC, rowid DESC
+`);
+const searchCustomersStatement = db.prepare(`
+  SELECT id, phone, name, customer_type, notes, is_active, created_at, updated_at
+  FROM customers
+  WHERE LOWER(name) LIKE ? OR phone LIKE ?
+  ORDER BY is_active DESC, LOWER(name) ASC, datetime(updated_at) DESC, rowid DESC
+`);
+const getCustomerByIdStatement = db.prepare(`
+  SELECT id, phone, name, customer_type, notes, is_active, created_at, updated_at
+  FROM customers
+  WHERE id = ?
+  LIMIT 1
+`);
+const getCustomerByPhoneStatement = db.prepare(`
+  SELECT id, phone, name, customer_type, notes, is_active, created_at, updated_at
+  FROM customers
+  WHERE phone = ?
+  LIMIT 1
+`);
+const insertCustomerStatement = db.prepare(`
+  INSERT INTO customers (id, phone, name, customer_type, notes, is_active, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const updateCustomerStatement = db.prepare(`
+  UPDATE customers
+  SET phone = ?, name = ?, customer_type = ?, notes = ?, is_active = ?, updated_at = ?
+  WHERE id = ?
+`);
+const updateCustomerStatusStatement = db.prepare(`
+  UPDATE customers
+  SET is_active = ?, updated_at = ?
+  WHERE id = ?
+`);
+const deleteCustomerStatement = db.prepare(`DELETE FROM customers WHERE id = ?`);
 
 const LIST_CONVERSATIONS_BASE_QUERY = `
   WITH ranked_messages AS (
@@ -394,6 +477,8 @@ function hydrateOrders(rows = []) {
         estado: normalizeStatus(row.estado),
         estadoLabel: humanizeStatus(row.estado),
         total: parseOptionalNumber(row.total),
+        customerTypeApplied: normalizeCustomerType(row.customer_type_applied, "public"),
+        priceTierApplied: normalizeCustomerType(row.price_tier_applied, "public"),
         sourceMessageId: row.source_message_id,
         fechaRegistro: row.created_at,
         updatedAt: row.updated_at,
@@ -411,7 +496,8 @@ function hydrateOrders(rows = []) {
         sabor: normalizeText(row.sabor),
         cantidad: Number.isFinite(Number(cantidad)) ? Number(cantidad) : cantidad,
         precioUnitario: parseOptionalNumber(row.precio_unitario),
-        subtotal: parseOptionalNumber(row.subtotal)
+        subtotal: parseOptionalNumber(row.subtotal),
+        priceSource: normalizeCustomerType(row.price_source, "public")
       });
     }
   }
@@ -451,6 +537,8 @@ function hydrateOrders(rows = []) {
       estado: order.estado,
       estadoLabel: order.estadoLabel,
       total: order.total ?? (computedTotal > 0 ? computedTotal : null),
+      customerTypeApplied: order.customerTypeApplied,
+      priceTierApplied: order.priceTierApplied,
       sourceMessageId: order.sourceMessageId,
       items: order.items,
       itemCount: order.items.length
@@ -566,6 +654,8 @@ function saveOrder({
     observaciones: normalizeText(pedido?.observaciones),
     estado: normalizeStatus(pedido?.estado),
     total: parseOptionalNumber(pedido?.total),
+    customerTypeApplied: normalizeCustomerType(pedido?.customer_type_applied, "public"),
+    priceTierApplied: normalizeCustomerType(pedido?.price_tier_applied, "public"),
     sourceMessageId: normalizeText(sourceMessageId),
     createdAt,
     updatedAt: createdAt,
@@ -576,6 +666,7 @@ function saveOrder({
       cantidad: Number.isFinite(Number(item?.cantidad)) ? Number(item.cantidad) : null,
       precioUnitario: parseOptionalNumber(item?.precio_unitario),
       subtotal: parseOptionalNumber(item?.subtotal),
+      priceSource: normalizeCustomerType(item?.price_source, "public"),
       createdAt
     }))
   };
@@ -595,6 +686,8 @@ function saveOrder({
         payload.observaciones,
         payload.estado,
         payload.total,
+        payload.customerTypeApplied,
+        payload.priceTierApplied,
         payload.sourceMessageId,
         payload.createdAt,
         payload.updatedAt
@@ -609,6 +702,7 @@ function saveOrder({
           item.cantidad,
           item.precioUnitario,
           item.subtotal,
+          item.priceSource,
           item.createdAt
         );
       }
@@ -668,6 +762,8 @@ function importOrders(orders = []) {
           normalizeText(order.observaciones),
           normalizeStatus(order.estado),
           parseOptionalNumber(order.total) ?? (computedTotal > 0 ? computedTotal : null),
+          normalizeCustomerType(order.customerTypeApplied ?? order.customer_type_applied, "public"),
+          normalizeCustomerType(order.priceTierApplied ?? order.price_tier_applied, "public"),
           normalizeText(order.sourceMessageId),
           normalizeText(order.fechaRegistro) || new Date().toISOString(),
           normalizeText(order.updatedAt) || normalizeText(order.fechaRegistro) || new Date().toISOString()
@@ -690,6 +786,7 @@ function importOrders(orders = []) {
           Number.isFinite(Number(item.cantidad)) ? Number(item.cantidad) : null,
           parseOptionalNumber(item.precioUnitario ?? item.precio_unitario),
           parseOptionalNumber(item.subtotal),
+          normalizeCustomerType(item.priceSource ?? item.price_source, "public"),
           createdAt
         );
       }
@@ -736,7 +833,9 @@ function hydrateCatalogProduct(row) {
   return {
     id: row.id,
     nombre: normalizeText(row.nombre),
-    precio: parseOptionalNumber(row.precio),
+    precio: parseOptionalNumber(row.precio_publico ?? row.precio),
+    precio_publico: parseOptionalNumber(row.precio_publico ?? row.precio),
+    precio_distribuidor: parseOptionalNumber(row.precio_distribuidor),
     categoria: normalizeText(row.categoria),
     aliases,
     activo: Boolean(row.activo),
@@ -770,7 +869,9 @@ function syncCatalogProducts(products = [], { sourceUrl = null } = {}) {
       upsertCatalogProductStatement.run(
         id,
         nombre,
-        parseOptionalNumber(product?.precio),
+        parseOptionalNumber(product?.precio_publico ?? product?.precio),
+        parseOptionalNumber(product?.precio_publico ?? product?.precio),
+        parseOptionalNumber(product?.precio_distribuidor),
         normalizeText(product?.categoria),
         JSON.stringify(aliases),
         product?.activo === false ? 0 : 1,
@@ -784,6 +885,145 @@ function syncCatalogProducts(products = [], { sourceUrl = null } = {}) {
     total: safeProducts.length,
     active: countCatalogProducts()
   };
+}
+
+function hydrateCustomer(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    phone: normalizePhone(row.phone),
+    name: normalizeText(row.name),
+    customerType: normalizeCustomerType(row.customer_type, "public"),
+    notes: normalizeText(row.notes),
+    isActive: Boolean(row.is_active),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function validateCustomerPayload(payload, { allowMissing = false } = {}) {
+  const phone = normalizePhone(payload?.phone);
+  const name = normalizeText(payload?.name);
+  const customerType = normalizeCustomerType(payload?.customerType ?? payload?.customer_type, null);
+
+  if (!allowMissing || payload?.phone !== undefined) {
+    if (!phone) {
+      const error = new Error("Teléfono obligatorio");
+      error.code = "INVALID_CUSTOMER_PHONE";
+      throw error;
+    }
+  }
+
+  if (!allowMissing || payload?.name !== undefined) {
+    if (!name) {
+      const error = new Error("Nombre obligatorio");
+      error.code = "INVALID_CUSTOMER_NAME";
+      throw error;
+    }
+  }
+
+  if (!allowMissing || payload?.customerType !== undefined || payload?.customer_type !== undefined) {
+    if (!customerType) {
+      const error = new Error("Tipo de cliente obligatorio");
+      error.code = "INVALID_CUSTOMER_TYPE";
+      throw error;
+    }
+  }
+
+  return {
+    phone: phone ?? null,
+    name: name ?? null,
+    customerType: customerType ?? null,
+    notes: normalizeText(payload?.notes),
+    isActive: payload?.isActive === undefined && payload?.is_active === undefined
+      ? null
+      : Boolean(payload?.isActive ?? payload?.is_active)
+  };
+}
+
+function listCustomers({ query = null } = {}) {
+  const normalizedQuery = normalizeText(query)?.toLowerCase();
+  const rows = normalizedQuery
+    ? searchCustomersStatement.all(`%${normalizedQuery}%`, `%${normalizedQuery.replace(/\D+/g, "")}%`)
+    : listCustomersStatement.all();
+  return rows.map(hydrateCustomer);
+}
+
+function getCustomerById(id) {
+  return hydrateCustomer(getCustomerByIdStatement.get(normalizeText(id)));
+}
+
+function getCustomerByPhone(phone) {
+  return hydrateCustomer(getCustomerByPhoneStatement.get(normalizePhone(phone)));
+}
+
+function createCustomer(payload = {}) {
+  const normalized = validateCustomerPayload(payload);
+  const now = new Date().toISOString();
+  const id = randomUUID();
+
+  insertCustomerStatement.run(
+    id,
+    normalized.phone,
+    normalized.name,
+    normalized.customerType,
+    normalized.notes,
+    normalized.isActive === null ? 1 : (normalized.isActive ? 1 : 0),
+    now,
+    now
+  );
+
+  return getCustomerById(id);
+}
+
+function updateCustomer(id, payload = {}) {
+  const current = getCustomerById(id);
+  if (!current) {
+    const error = new Error("Cliente no encontrado");
+    error.code = "CUSTOMER_NOT_FOUND";
+    throw error;
+  }
+
+  const normalized = validateCustomerPayload(payload, { allowMissing: true });
+  const updatedAt = new Date().toISOString();
+  updateCustomerStatement.run(
+    normalized.phone ?? current.phone,
+    normalized.name ?? current.name,
+    normalized.customerType ?? current.customerType,
+    normalized.notes ?? current.notes,
+    normalized.isActive === null ? (current.isActive ? 1 : 0) : (normalized.isActive ? 1 : 0),
+    updatedAt,
+    current.id
+  );
+
+  return getCustomerById(current.id);
+}
+
+function setCustomerStatus(id, isActive) {
+  const current = getCustomerById(id);
+  if (!current) {
+    const error = new Error("Cliente no encontrado");
+    error.code = "CUSTOMER_NOT_FOUND";
+    throw error;
+  }
+
+  updateCustomerStatusStatement.run(isActive ? 1 : 0, new Date().toISOString(), current.id);
+  return getCustomerById(current.id);
+}
+
+function deleteCustomer(id) {
+  const current = getCustomerById(id);
+  if (!current) {
+    const error = new Error("Cliente no encontrado");
+    error.code = "CUSTOMER_NOT_FOUND";
+    throw error;
+  }
+
+  deleteCustomerStatement.run(current.id);
+  return current;
 }
 
 function listCatalogProducts({ activeOnly = true } = {}) {
@@ -975,8 +1215,11 @@ module.exports = {
   db,
   databasePath,
   ESTADOS_VALIDOS,
+  CUSTOMER_TYPES,
   normalizeStatus,
   humanizeStatus,
+  normalizeCustomerType,
+  normalizePhone,
   saveOrder,
   listOrders,
   listOrdersIncludingArchived,
@@ -996,6 +1239,13 @@ module.exports = {
   listMessagesByPhone,
   countMessagesByPhone,
   conversationExists,
+  listCustomers,
+  getCustomerById,
+  getCustomerByPhone,
+  createCustomer,
+  updateCustomer,
+  setCustomerStatus,
+  deleteCustomer,
   createDailyClosure,
   listDailyClosures,
   getDailyClosureById

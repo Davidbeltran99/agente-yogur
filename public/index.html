@@ -49,6 +49,7 @@
       <symbol id="icon-volume-x" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m16 9 5 5M21 9l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
       <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
       <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3c0 6.08 4.93 11 11 11-.4 0-.8-.07-1.21-.21Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9.5" cy="7" r="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M22 21v-2a4 4 0 0 0-3-3.87" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 3.13a3.5 3.5 0 0 1 0 6.74" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     </defs>
   </svg>
 
@@ -87,6 +88,10 @@
         <button class="nav-link" data-section="chat" title="Chat de Abi" aria-label="Chat de Abi">
           <svg class="nav-icon ui-icon" aria-hidden="true"><use href="#icon-message-circle"></use></svg>
           <span class="nav-label">Chat de Abi</span>
+        </button>
+        <button class="nav-link" data-section="customers" title="Clientes" aria-label="Clientes">
+          <svg class="nav-icon ui-icon" aria-hidden="true"><use href="#icon-users"></use></svg>
+          <span class="nav-label">Clientes</span>
         </button>
         <button class="nav-link" data-section="history" title="Historial" aria-label="Historial">
           <svg class="nav-icon ui-icon" aria-hidden="true"><use href="#icon-history"></use></svg>
@@ -289,6 +294,65 @@
             </section>
           </div>
         </section>
+      </section>
+
+      <section id="customersSection" class="section-block panel-view" data-view="customers" hidden>
+        <div class="section-heading section-heading-split">
+          <div>
+            <p class="eyebrow">Clientes</p>
+            <h3>Directos y distribuidores</h3>
+            <p id="customersMeta" class="section-copy">Cargando clientes...</p>
+          </div>
+          <label class="chat-search customers-search">
+            <svg class="chat-search-icon ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+            <input id="customerSearchInput" type="search" placeholder="Buscar por nombre o teléfono" autocomplete="off" />
+          </label>
+        </div>
+
+        <div id="customersFeedback" class="feedback" hidden></div>
+
+        <div class="customers-layout">
+          <section class="surface customers-list-surface">
+            <div class="surface-header">
+              <h3>Base de clientes</h3>
+            </div>
+            <div id="customersList" class="customers-list"></div>
+          </section>
+
+          <section class="surface customers-form-surface">
+            <div class="surface-header">
+              <h3 id="customerFormTitle">Nuevo cliente</h3>
+              <button id="customerFormResetButton" type="button" class="secondary ghost">Limpiar</button>
+            </div>
+
+            <form id="customerForm" class="customer-form">
+              <input id="customerIdInput" type="hidden" />
+              <label class="field-block">
+                <span>Nombre</span>
+                <input id="customerNameInput" type="text" maxlength="120" placeholder="Nombre del cliente" required />
+              </label>
+              <label class="field-block">
+                <span>Teléfono WhatsApp</span>
+                <input id="customerPhoneInput" type="tel" maxlength="32" placeholder="573001112233" required />
+              </label>
+              <label class="field-block">
+                <span>Tipo de cliente</span>
+                <select id="customerTypeInput" required>
+                  <option value="public">Público</option>
+                  <option value="distributor">Distribuidor</option>
+                </select>
+              </label>
+              <label class="field-block">
+                <span>Notas</span>
+                <textarea id="customerNotesInput" rows="4" placeholder="Observaciones internas"></textarea>
+              </label>
+
+              <div class="customer-form-actions">
+                <button id="customerSubmitButton" type="submit" class="primary soft">Guardar cliente</button>
+              </div>
+            </form>
+          </section>
+        </div>
       </section>
 
       <section id="historySection" class="section-block panel-view" data-view="history">

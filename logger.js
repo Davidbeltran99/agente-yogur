@@ -24,7 +24,8 @@ const ALLOWED_EVENTS = new Set([
   "MULTI_TURN_STATE",
   "LIST_ORDER_DETECTED",
   "PARSED_LINE_ITEMS",
-  "ORDER_INTENT_CONFIDENCE"
+  "ORDER_INTENT_CONFIDENCE",
+  "missing_distributor_price"
 ]);
 
 const EVENT_ALIASES = {
