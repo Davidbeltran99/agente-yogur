@@ -195,18 +195,81 @@ function construirLineasCatalogo(featuredProducts = []) {
     : [];
 }
 
-function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [], priceLabel = "público", isDistributor = false } = {}) {
+function construirEjemplosPedidoBase() {
+  return [
+    "• 2 Aloe grandes",
+    "• 1 Griego pequeño",
+    "• 3 Café litro"
+  ].join("\n");
+}
+
+function construirRespuestaGuiaPedido({ customerName = null, short = false } = {}) {
+  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+
+  if (short) {
+    return [
+      saludo,
+      "Puedes pedirme con producto + cantidad.",
+      "Ejemplo: • 2 Aloe grandes\n• 1 Griego pequeño"
+    ].join("\n\n");
+  }
+
+  return [
+    saludo,
+    "Puedes pedirme así:",
+    construirEjemplosPedidoBase(),
+    "Y si ya sabes la dirección y el pago, puedes escribirlo todo junto:",
+    "“Quiero 2 Aloe grandes para la calle 10, pago Nequi”"
+  ].join("\n\n");
+}
+
+function construirAyudaPedidoPuntual({ title = "ese producto", options = [] } = {}) {
+  const normalizedTitle = String(title || "").trim().toLowerCase();
+
+  if (/griego/.test(normalizedTitle)) {
+    return "Puedes decirme: “quiero 2 griegos grandes” o “1 griego pequeño”.";
+  }
+
+  if (/cafe|café/.test(normalizedTitle)) {
+    return "Puedes decirme: “1 café grande” o “2 café litro”.";
+  }
+
+  if (/aloe/.test(normalizedTitle)) {
+    return "Puedes decirme: “2 aloe grandes” o “1 aloe litro”.";
+  }
+
+  if (/ancheta|regalo|detalle/.test(normalizedTitle)) {
+    return "Puedes decirme: “1 ancheta barata” o “1 ancheta premium”.";
+  }
+
+  const first = options[0]?.nombre || options[0]?.productoOriginal || "1 unidad";
+  const second = options[1]?.nombre || options[1]?.productoOriginal || null;
+  return second
+    ? `Puedes decirme: “1 ${first}” o “2 ${second}”.`
+    : `Puedes decirme: “1 ${first}”.`;
+}
+
+function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [], priceLabel = "público", isDistributor = false, guideMode = "mini" } = {}) {
   const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
   const lines = construirLineasCatalogo(featuredProducts);
+  const guide = guideMode === "full"
+    ? [
+        "Puedes pedirme así:",
+        construirEjemplosPedidoBase(),
+        "Si ya tienes dirección y pago, puedes escribirlo todo junto: “Quiero 2 Aloe grandes para la calle 10, pago Nequi”."
+      ].join("\n")
+    : (guideMode === "mini"
+      ? "Puedes decirme, por ejemplo: “2 Aloe grandes” o “1 Griego pequeño”."
+      : null);
 
   return [
     saludo,
     isDistributor ? `Te muestro precios de ${priceLabel}.` : `Te comparto algunos productos con precio ${priceLabel}.`,
-    "En Tellolac manejamos productos lácteos, aloe, café y anchetas.",
     "Algunos productos son:",
     lines.join("\n") || null,
+    guide,
     `También puedes ver el catálogo completo aquí:\n${CATALOG_URL}`,
-    "¿Te gustaría pedir alguno?"
+    "¿Cuál te gustaría pedir?"
   ].filter(Boolean).join("\n\n");
 }
 
@@ -383,6 +446,9 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   const catalogUrl = String(options.catalogUrl || CATALOG_URL || "").trim() || null;
   const nombreCliente = String(pedido?.cliente || "").trim();
   const isDistributor = String(pedido?.customer_type_applied || pedido?.customerTypeApplied || pedido?.price_tier_applied || pedido?.priceTierApplied || "public").trim().toLowerCase() === "distributor";
+  const guideMode = String(options.guideMode || "none").trim().toLowerCase();
+  const fullGuide = guideMode === "full" ? construirRespuestaGuiaPedido({ customerName: nombreCliente || null }) : null;
+  const shortGuide = guideMode === "short" ? construirRespuestaGuiaPedido({ customerName: nombreCliente || null, short: true }) : null;
 
   if (evaluacion.modelError) {
     return "Se me cruzó el mensaje un momento 😕 ¿me lo puedes reenviar?";
@@ -395,17 +461,18 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         "Te entendí esto por ahora:",
         detalle,
         pedido.total ? `Subtotal parcial: ${formatearMoneda(pedido.total)}` : null,
-        "Pero me falta confirmar otro producto para dejarte el pedido bien 😊",
-        listaProductosDisponibles,
+        "Me falta confirmar otro producto para dejarlo bien 😊",
+        shortGuide || listaProductosDisponibles,
         catalogUrl ? `Catálogo completo:\n${catalogUrl}` : null,
-        "¿Me lo escribes como aparece en el catálogo o me dices cuál producto exacto quieres?"
+        "Si quieres, te ayudo a escribirlo con cantidad y presentación."
       ].filter(Boolean).join("\n\n");
     }
 
     return [
       "No encontré ese producto en el catálogo actual 😊",
+      shortGuide || "Puedes pedirme con cantidad y presentación, por ejemplo: “1 aloe grande” o “2 griegos pequeños”.",
       catalogUrl ? `Revísalo aquí:\n${catalogUrl}` : null,
-      "Si quieres, escríbeme el nombre exacto y te ayudo a pedirlo."
+      "Si quieres, te ayudo a encontrarlo."
     ].filter(Boolean).join("\n\n");
   }
 
@@ -444,6 +511,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         firstAmbiguity?.soft && ambiguityOptions.length === 1
           ? `¿Te refieres a:\n${ambiguityLines}`
           : ambiguityLines,
+        construirAyudaPedidoPuntual({ title: titulo, options: ambiguityOptions }),
         evaluacion.faltantes?.includes("direccion") ? "Y también me compartes la dirección para enviarte el pedido ✨" : null,
         !firstAmbiguity?.soft || ambiguityOptions.length > 1 ? `Puedes responder ${optionNumbers}.` : null
       ].filter(Boolean).join("\n\n");
@@ -456,6 +524,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
       firstAmbiguity?.soft && ambiguityOptions.length === 1
         ? `¿Te refieres a:\n${ambiguityLines}`
         : ambiguityLines,
+      construirAyudaPedidoPuntual({ title: titulo, options: ambiguityOptions }),
       !firstAmbiguity?.soft || ambiguityOptions.length > 1 ? `Puedes responder ${optionNumbers}.` : null
     ].filter(Boolean).join("\n\n");
   }
@@ -494,7 +563,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     }
 
     if (evaluacion.faltantes?.includes("productos")) {
-      return "Claro 😊 ¿Qué producto deseas pedir?";
+      return fullGuide || shortGuide || "Claro 😊 ¿Qué producto deseas pedir?";
     }
 
     const faltantes = evaluacion.faltantes.map(formatearFaltante).join(", ");
@@ -534,6 +603,7 @@ module.exports = {
   CATALOG_URL,
   enviarMensajeWhatsApp,
   obtenerMediaWhatsApp,
+  construirRespuestaGuiaPedido,
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,

@@ -57,6 +57,7 @@ const {
 const {
   enviarMensajeWhatsApp,
   obtenerMediaWhatsApp,
+  construirRespuestaGuiaPedido,
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
@@ -2435,6 +2436,54 @@ function buildCatalogShortList(limit = 5) {
     .slice(0, limit);
 }
 
+function isExplicitOrderGuideRequest(texto = "") {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    /\bcomo\s+(pido|pedir|hago\s+el\s+pedido|compro)\b/i,
+    /\bquiero\s+pedir\b/i,
+    /\b(ayudame|ayudame\s+a|ayuda|me\s+ayudas)\s+(a\s+)?pedir\b/i,
+    /\bno\s+se\s+(como\s+pedir|pedir|que\s+pedir)\b/i,
+    /^no\s+se$/i
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function getOrderGuideMode({ texto = "", routingIntent = null, state = null, evaluacion = null } = {}) {
+  const normalized = normalizarTextoAnalisis(texto);
+  const hasShownGuide = Boolean(state?.hasShownOrderGuide);
+
+  if (routingIntent === "catalog_request") {
+    return hasShownGuide ? "mini" : "full";
+  }
+
+  if (isExplicitOrderGuideRequest(normalized)) {
+    return hasShownGuide ? "short" : "full";
+  }
+
+  if (evaluacion?.faltantes?.includes("productos")) {
+    return hasShownGuide ? "short" : "full";
+  }
+
+  if (evaluacion?.catalogStatus === "ambiguous") {
+    return "short";
+  }
+
+  return "none";
+}
+
+function rememberOrderGuideShown(state, guideMode) {
+  if (!state) {
+    return;
+  }
+
+  if (["full", "mini"].includes(guideMode)) {
+    state.hasShownOrderGuide = true;
+  }
+}
+
 function buildCatalogFeaturedProducts(customerType = "public") {
   const catalog = getCatalogProductsCache();
   const specs = [
@@ -3055,6 +3104,7 @@ function logMultiTurnState(state, details = {}) {
     customerName: (details.customerName ?? state?.customerName) || null,
     lastIntent: (details.lastIntent ?? state?.lastIntent) || null,
     awaitingName: details.awaitingName ?? state?.awaitingName ?? false,
+    hasShownOrderGuide: details.hasShownOrderGuide ?? state?.hasShownOrderGuide ?? false,
     pendingItems: details.pendingItems ?? (Array.isArray(state?.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0),
     hasSuggestionMemory: details.hasSuggestionMemory ?? Boolean(obtenerSuggestionMemoryActiva(state)),
     hasActiveOrderContext: details.hasActiveOrderContext ?? Boolean(obtenerActiveOrderContext(state)),
@@ -4403,6 +4453,7 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     customerName: state.customerName || null,
     lastIntent: state.lastIntent || null,
     awaitingName: state.awaitingName || false,
+    hasShownOrderGuide: state.hasShownOrderGuide || false,
     pendingItems: Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0,
     hasSuggestionMemory: Boolean(obtenerSuggestionMemoryActiva(state)),
     lastProduct: state.lastProductReference?.nombre || null
@@ -5533,30 +5584,55 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: null, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
+  if (isExplicitOrderGuideRequest(contextualizedMessage.text || mensaje)) {
+    state.lastIntent = "general_chat";
+    state.awaitingName = false;
+    const guideMode = state.hasShownOrderGuide ? "short" : "full";
+    const respuesta = construirRespuestaGuiaPedido({ customerName: state.customerName || null, short: guideMode !== "full" });
+    rememberOrderGuideShown(state, guideMode);
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "general_chat" };
+  }
+
   if (routingIntentFinal === "catalog_request") {
     state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
     const pricingContext = buildCatalogPricingContext(customerProfile.customerType);
     const featuredCatalog = buildCatalogFeaturedProducts(customerProfile.customerType);
+    const normalizedCatalogQuery = normalizarTextoAnalisis(contextualizedMessage.text || mensaje);
+    const explicitCatalogAsk = /\b(catalogo|catalogo|catalog|productos|portafolio)\b/i.test(normalizedCatalogQuery);
+    const targetedCatalogResolution = explicitCatalogAsk ? null : resolveProductFromCatalog(contextualizedMessage.text || mensaje);
+    const guideMode = getOrderGuideMode({ texto: mensaje, routingIntent: routingIntentFinal, state });
+
+    if (targetedCatalogResolution?.status === "ambiguous" && targetedCatalogResolution.candidates?.length) {
+      guardarSuggestionMemory(state, targetedCatalogResolution.candidates, { type: "ambiguity_suggestion", reason: contextualizedMessage.text || mensaje });
+      actualizarActiveOrderContext(state, { intent: "ambiguous_product" });
+      const respuesta = construirRespuestaPedido({
+        cliente: state.customerName || null,
+        productos: [],
+        customer_type_applied: customerProfile.customerType,
+        price_tier_applied: customerProfile.customerType
+      }, {
+        esValido: false,
+        faltantes: ["productos"],
+        productosInvalidos: [],
+        priceValidation: "ok",
+        addressStatus: "incomplete",
+        catalogStatus: "ambiguous",
+        ambiguousProducts: [{ input: contextualizedMessage.text || mensaje, options: targetedCatalogResolution.candidates, soft: false }],
+        unmatchedProducts: []
+      }, {
+        availableProducts: buildCatalogShortList(5),
+        guideMode: "short"
+      });
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+      return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "ambiguous_product" };
+    }
+
     guardarSuggestionMemory(state, featuredCatalog.map((product) => ({ nombre: product?.catalogName || product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
-    const fallback = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts: featuredCatalog, priceLabel: pricingContext.priceLabel, isDistributor: pricingContext.isDistributor });
-    const respuesta = await generarRespuestaConversacional({
-      telefono,
-      sourceMessageId,
-      routingIntent: routingIntentFinal,
-      fallback,
-      context: buildValidatedResponseContext({
-        orchestratorContext: orchestratorPayload.context,
-        gptIntent,
-        fallback,
-        customerName: state.customerName || null,
-        userMessage: mensaje,
-        availableProducts: featuredCatalog,
-        catalogUrl: CATALOG_URL,
-        activeIntent: routingIntentFinal
-      })
-    });
+    const respuesta = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts: featuredCatalog, priceLabel: pricingContext.priceLabel, isDistributor: pricingContext.isDistributor, guideMode });
+    rememberOrderGuideShown(state, guideMode);
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
@@ -5600,6 +5676,14 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntentFinal === "general_chat" && !(contextualizedMessage.used || ["add_item", "order_request"].includes(gptIntent.intent))) {
     state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
+    const explicitGuideMode = getOrderGuideMode({ texto: mensaje, routingIntent: routingIntentFinal, state });
+    if (explicitGuideMode !== "none") {
+      const respuesta = construirRespuestaGuiaPedido({ customerName: state.customerName || null, short: explicitGuideMode !== "full" });
+      rememberOrderGuideShown(state, explicitGuideMode);
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+      return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
+    }
+
     const activeContext = obtenerActiveOrderContext(state);
     const fallback = activeContext?.products?.length
       ? construirRespuestaPedido(state.pendingPedido || {
@@ -5763,30 +5847,37 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     inboundMessage.orderId = resultado.order.id;
   }
 
+  const orderGuideMode = imageAnalysis
+    ? "none"
+    : getOrderGuideMode({ texto: mensaje, routingIntent: resultado.intent, state, evaluacion: resultado.evaluacion });
   const fallbackRespuesta = imageAnalysis
     ? buildImageOrderFallback({ pedido: resultado.pedido, evaluacion: resultado.evaluacion, imageAnalysis })
     : construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
-        availableProducts: buildCatalogShortList(5)
+        availableProducts: buildCatalogShortList(5),
+        guideMode: orderGuideMode
       });
-  const respuesta = await generarRespuestaConversacional({
-    telefono,
-    sourceMessageId,
-    routingIntent: resultado.intent,
-    fallback: fallbackRespuesta,
-    context: buildValidatedResponseContext({
-      orchestratorContext: orchestratorPayload.context,
-      gptIntent,
-      pedido: resultado.pedido,
-      evaluacion: resultado.evaluacion,
-      fallback: fallbackRespuesta,
-      customerName: state.customerName || resultado.pedido?.cliente || null,
-      userMessage: mensaje,
-      availableProducts: buildCatalogShortList(5),
-      catalogUrl: CATALOG_URL,
-      activeIntent: resultado.intent,
-      imageAnalysis
-    })
-  });
+  rememberOrderGuideShown(state, orderGuideMode);
+  const respuesta = orderGuideMode !== "none"
+    ? fallbackRespuesta
+    : await generarRespuestaConversacional({
+        telefono,
+        sourceMessageId,
+        routingIntent: resultado.intent,
+        fallback: fallbackRespuesta,
+        context: buildValidatedResponseContext({
+          orchestratorContext: orchestratorPayload.context,
+          gptIntent,
+          pedido: resultado.pedido,
+          evaluacion: resultado.evaluacion,
+          fallback: fallbackRespuesta,
+          customerName: state.customerName || resultado.pedido?.cliente || null,
+          userMessage: mensaje,
+          availableProducts: buildCatalogShortList(5),
+          catalogUrl: CATALOG_URL,
+          activeIntent: resultado.intent,
+          imageAnalysis
+        })
+      });
   const delivery = await responderAlCliente({
     telefono,
     respuesta,

@@ -9,6 +9,7 @@ function createDefaultConversationState({ customerName = null, customerType = "p
     lastProductReference: null,
     lastIntent: null,
     awaitingName: false,
+    hasShownOrderGuide: false,
     lastSuggestedProducts: null,
     activeOrderContext: null,
     recentHistory: [],

@@ -78,6 +78,18 @@ async function run() {
   assert(cafeCount === 1, "10. no debe duplicar el producto anterior al agregar otra cosa", second10Products);
   checks.push({ case: 10, ok: true, result: second10Products.map((item) => `${item.cantidad || 1} x ${item.producto}`) });
 
+  const phone11 = `57300005${Date.now().toString().slice(-4)}`;
+  const case11 = await ejecutarFlujoMensaje({ mensaje: "cómo pido", telefono: phone11, sourceMessageId: `test11_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case11Text = case11.delivery?.respuesta || case11.respuesta || "";
+  assert(/2 aloe grandes/i.test(case11Text) && /1 griego pequeño/i.test(case11Text) && /pago nequi/i.test(case11Text), "11. cómo pido debe enseñar con ejemplos simples", case11);
+  checks.push({ case: 11, ok: true, result: case11Text });
+
+  const phone12 = `57300006${Date.now().toString().slice(-4)}`;
+  const case12 = await ejecutarFlujoMensaje({ mensaje: "griego", telefono: phone12, sourceMessageId: `test12_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case12Text = case12.delivery?.respuesta || case12.respuesta || "";
+  assert(/griego 250 g/i.test(case12Text) && /griego 500 g/i.test(case12Text) && /griegos grandes|griego pequeño/i.test(case12Text), "12. griego ambiguo debe incluir ayuda puntual", case12);
+  checks.push({ case: 12, ok: true, result: case12Text });
+
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 }
 
