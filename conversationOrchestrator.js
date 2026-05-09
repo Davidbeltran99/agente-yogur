@@ -104,7 +104,15 @@ function summarizeState(state = {}) {
     hasPendingOrder: Boolean(state?.pendingPedido),
     hasPendingClarification: Boolean(state?.pendingClarification),
     lastPaymentMethod: state?.lastPaymentMethod || null,
-    lastProductReference: state?.lastProductReference?.nombre || null
+    lastProductReference: state?.lastProductReference?.nombre || null,
+    recentImage: state?.lastImageContext
+      ? {
+          status: state.lastImageContext.status || null,
+          timestamp: state.lastImageContext.timestamp || null,
+          hasImage: true,
+          hasVisionResult: Boolean(state.lastImageContext.analysis)
+        }
+      : null
   };
 }
 

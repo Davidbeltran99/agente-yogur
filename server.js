@@ -246,6 +246,7 @@ const PARTIAL_ADDRESS_REFERENCE_TOKENS = ["la misma direccion", "la misma direcc
 const RECEIPT_IMAGE_KEYWORDS = ["comprobante", "pago", "transferencia", "nequi", "daviplata", "consignacion", "consignación", "soporte", "recibo"];
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const IMAGE_CONTEXT_TTL_MS = Number(process.env.IMAGE_CONTEXT_TTL_MS || 45 * 60 * 1000);
 const CATALOG_SNAPSHOT_SOURCE_URL = "local://catalog_snapshot.json";
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
   ["aloe", ["aloe", "sabila", "sábila"]],
@@ -2680,6 +2681,11 @@ function sanitizeAiResponseAgainstFallback(response, fallback, { routingIntent, 
     return fallback;
   }
 
+  if ((context?.imageAnalysis || context?.recentImage) && /no\s+puedo\s+(leer|ver|revisar).{0,20}(imagen|foto)|en\s+este\s+chat\s+no\s+puedo\s+leer\s+imagenes?/i.test(text)) {
+    logEvent("GPT_RESPONSE_SANITIZED", { routingIntent, reason: "image_capability_mismatch", usedFallback: true, responsePreview: text.slice(0, 160) });
+    return fallback;
+  }
+
   if (["order_request", "order_missing_data", "ambiguous_product", "admin_query", "payment_method", "address_provided"].includes(routingIntent)) {
     const confirmedProducts = Array.isArray(context?.validated?.confirmedProducts)
       ? context.validated.confirmedProducts.map((item) => normalizarTextoAnalisis(item?.name || item?.producto || "")).filter(Boolean)
@@ -2694,7 +2700,7 @@ function sanitizeAiResponseAgainstFallback(response, fallback, { routingIntent, 
   return text;
 }
 
-function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido = null, evaluacion = null, adminSummary = null, fallback = null, customerName = null, userMessage = null, availableProducts = [], catalogUrl = null, activeIntent = null, imageAnalysis = null }) {
+function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido = null, evaluacion = null, adminSummary = null, fallback = null, customerName = null, userMessage = null, availableProducts = [], catalogUrl = null, activeIntent = null, imageAnalysis = null, recentImage = null }) {
   const confirmedProducts = Array.isArray(pedido?.productos)
     ? pedido.productos.map((item) => ({
         name: item.producto,
@@ -2734,6 +2740,14 @@ function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido 
           extractedItems: imageAnalysis.items || [],
           uncertainLines: imageAnalysis.uncertain_lines || [],
           overallConfidence: imageAnalysis.overall_confidence || 0
+        }
+      : null,
+    recentImage: recentImage
+      ? {
+          status: recentImage.status || null,
+          timestamp: recentImage.timestamp || null,
+          hasImage: true,
+          hasVisionResult: Boolean(recentImage.analysis)
         }
       : null,
     tone: "Abi cálida, natural, comercial, corta y estilo WhatsApp"
@@ -3105,6 +3119,7 @@ function logMultiTurnState(state, details = {}) {
     lastIntent: (details.lastIntent ?? state?.lastIntent) || null,
     awaitingName: details.awaitingName ?? state?.awaitingName ?? false,
     hasShownOrderGuide: details.hasShownOrderGuide ?? state?.hasShownOrderGuide ?? false,
+    lastImageStatus: details.lastImageStatus ?? state?.lastImageContext?.status ?? null,
     pendingItems: details.pendingItems ?? (Array.isArray(state?.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0),
     hasSuggestionMemory: details.hasSuggestionMemory ?? Boolean(obtenerSuggestionMemoryActiva(state)),
     hasActiveOrderContext: details.hasActiveOrderContext ?? Boolean(obtenerActiveOrderContext(state)),
@@ -3942,6 +3957,147 @@ function buildImageOrderConfidence(imageAnalysis = {}) {
   return confidences.reduce((acc, value) => acc + value, 0) / confidences.length;
 }
 
+function buildStoredImageContext({ telefono, sourceMessageId, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null, persistedMedia = null, analysis = null, status = "pending_ocr" } = {}) {
+  return {
+    phone: telefono,
+    sourceMessageId,
+    mediaId: mediaId || null,
+    mimeType: mediaMimeType || null,
+    filename: mediaFilename || null,
+    caption: limpiarTexto(caption) || null,
+    path: persistedMedia?.path || null,
+    absolutePath: persistedMedia?.absolutePath || null,
+    timestamp: Date.now(),
+    status,
+    analysis: analysis || null
+  };
+}
+
+function clearLastImageContext(state) {
+  if (state) {
+    state.lastImageContext = null;
+  }
+}
+
+function getLastImageContext(state, now = Date.now()) {
+  if (!state?.lastImageContext) {
+    return null;
+  }
+
+  if (Number(state.lastImageContext.timestamp || 0) + IMAGE_CONTEXT_TTL_MS <= now) {
+    clearLastImageContext(state);
+    return null;
+  }
+
+  return state.lastImageContext;
+}
+
+function setLastImageContext(state, imageContext = null) {
+  if (!state || !imageContext) {
+    return;
+  }
+
+  state.lastImageContext = imageContext;
+  logEvent("LAST_IMAGE_CONTEXT_SET", {
+    telefono: imageContext.phone || null,
+    sourceMessageId: imageContext.sourceMessageId || null,
+    mediaId: imageContext.mediaId || null,
+    status: imageContext.status || null,
+    hasPath: Boolean(imageContext.path || imageContext.absolutePath),
+    hasAnalysis: Boolean(imageContext.analysis),
+    timestamp: imageContext.timestamp || Date.now()
+  });
+}
+
+function isImageReviewRequest(texto = "", state = null) {
+  if (!getLastImageContext(state)) {
+    return false;
+  }
+
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    /\b(puedes|puede|podrias|podrías)\s+(leer|revisar)\s+(mi\s+)?(imagen|foto)\b/i,
+    /\b(lee|revisa)\s+(la\s+)?(imagen|foto)\b/i,
+    /\b(esa|eso)\s+es\s+un\s+pedido\b/i,
+    /\bnecesito\s+eso\b/i,
+    /\bsi[,\s]+es\s+un\s+pedido\b/i,
+    /\bs[ií]\s*,?\s+es\s+un\s+pedido\b/i,
+    /\brevisa\s+mi\s+imagen\b/i
+  ].some((pattern) => pattern.test(normalized));
+}
+
+async function processImageOrder(image = null) {
+  if (!image) {
+    return {
+      items: [],
+      uncertain_lines: [],
+      extracted_text: null,
+      address: null,
+      payment_method: null,
+      overall_confidence: 0
+    };
+  }
+
+  if (image.analysis) {
+    return image.analysis;
+  }
+
+  let buffer = null;
+  if (image.absolutePath && fs.existsSync(image.absolutePath)) {
+    buffer = fs.readFileSync(image.absolutePath);
+  }
+
+  if (!buffer?.length) {
+    return {
+      items: [],
+      uncertain_lines: [],
+      extracted_text: null,
+      address: null,
+      payment_method: null,
+      overall_confidence: 0
+    };
+  }
+
+  logEvent("IMAGE_OCR_STARTED", {
+    telefono: image.phone || null,
+    sourceMessageId: image.sourceMessageId || null,
+    mediaId: image.mediaId || null,
+    mimeType: image.mimeType || null,
+    filename: image.filename || null
+  });
+
+  const imageAnalysis = await analizarImagenPedido({
+    buffer,
+    mimeType: image.mimeType || "image/jpeg",
+    filename: image.filename || "pedido.jpg",
+    caption: image.caption,
+    language: "es"
+  });
+
+  logEvent("IMAGE_OCR_RESULT", {
+    telefono: image.phone || null,
+    sourceMessageId: image.sourceMessageId || null,
+    items: imageAnalysis.items.length,
+    uncertainLines: imageAnalysis.uncertain_lines.length,
+    overallConfidence: imageAnalysis.overall_confidence,
+    extractedTextPreview: limpiarTexto(imageAnalysis.extracted_text)?.slice(0, 180) || null
+  });
+
+  if (imageAnalysis.uncertain_lines?.length) {
+    logEvent("IMAGE_ORDER_UNCERTAIN", {
+      telefono: image.phone || null,
+      sourceMessageId: image.sourceMessageId || null,
+      uncertainLines: imageAnalysis.uncertain_lines.map((line) => line?.text).filter(Boolean).slice(0, 6)
+    }, "warn");
+  }
+
+  return imageAnalysis;
+}
+
 function shouldTreatImageAsReceipt({ caption = null, activeOrder = null, imageAnalysis = null } = {}) {
   const normalizedCaption = normalizarTextoAnalisis(caption);
   const hasReceiptCue = normalizedCaption
@@ -3955,6 +4111,71 @@ function shouldTreatImageAsReceipt({ caption = null, activeOrder = null, imageAn
   }
 
   return Boolean(activeOrder) && !hasItems && !hasUncertain;
+}
+
+async function executeRecentImageReview({ telefono, sourceMessageId, origen = "webhook", simulated = false, inboundMessage = null, state = null, imageContext = null }) {
+  let imageAnalysis = {
+    items: [],
+    uncertain_lines: [],
+    extracted_text: null,
+    address: null,
+    payment_method: null,
+    overall_confidence: 0
+  };
+
+  try {
+    imageAnalysis = await processImageOrder(imageContext);
+  } catch (error) {
+    logEvent("MODEL_ERROR", {
+      model: OPENAI_MODEL,
+      error: error.message,
+      fallback: "image_order_ocr"
+    }, "warn");
+  }
+
+  if (state && imageContext) {
+    setLastImageContext(state, {
+      ...imageContext,
+      analysis: imageAnalysis,
+      status: "ocr_completed",
+      timestamp: Date.now()
+    });
+  }
+
+  const normalizedText = buildImageOrderNormalizedText(imageAnalysis, imageContext?.caption || null);
+  if (!normalizedText) {
+    const respuesta = buildImageOrderFallback({ pedido: null, evaluacion: { faltantes: [] }, imageAnalysis });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return {
+      pedido: null,
+      evaluacion: { esValido: false, faltantes: ["confirmacion_catalogo"], catalogStatus: "not_found" },
+      order: null,
+      inboundMessage,
+      respuesta,
+      delivery,
+      intent: "image_order_review",
+      sheets: { saved: false, skipped: true, reason: "image_ocr_unresolved" }
+    };
+  }
+
+  return ejecutarFlujoMensaje({
+    mensaje: normalizedText,
+    telefono,
+    sourceMessageId,
+    origen,
+    simulated,
+    messageType: "image",
+    transcription: limpiarTexto(imageAnalysis.extracted_text) || normalizedText,
+    mediaId: imageContext?.mediaId || null,
+    mediaMimeType: imageContext?.mimeType || null,
+    mediaFilename: imageContext?.filename || null,
+    skipRateLimit: true,
+    skipImageHandling: true,
+    skipInboundPersist: Boolean(inboundMessage),
+    existingInboundMessage: inboundMessage,
+    imageAnalysis,
+    imageCaption: imageContext?.caption || null
+  });
 }
 
 function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalysis = null }) {
@@ -4005,7 +4226,7 @@ function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalys
   return lines.join("\n");
 }
 
-async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = "webhook", simulated = false, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null }) {
+async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = "webhook", simulated = false, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null, imageAnalysisOverride = null }) {
   logEvent("IMAGE_MESSAGE_RECEIVED", {
     telefono,
     sourceMessageId,
@@ -4025,101 +4246,67 @@ async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = 
     });
   }
 
+  const state = obtenerEstadoConversacion(telefono);
   const activeOrder = getActiveOrderByPhone(telefono);
-  let imageAnalysis = {
-    items: [],
-    uncertain_lines: [],
-    extracted_text: null,
-    address: null,
-    payment_method: null,
-    overall_confidence: 0
-  };
-
-  if (mediaBuffer?.length) {
-    try {
-      imageAnalysis = await analizarImagenPedido({
-        buffer: mediaBuffer,
-        mimeType: mediaMimeType,
-        filename: mediaFilename,
-        caption,
-        language: "es"
-      });
-    } catch (error) {
-      logEvent("MODEL_ERROR", {
-        model: OPENAI_MODEL,
-        error: error.message,
-        fallback: "image_order_ocr"
-      }, "warn");
-    }
-  }
-
-  const imageConfidence = buildImageOrderConfidence(imageAnalysis);
-  logEvent("OCR_RESULT", {
+  const persistedMedia = mediaBuffer?.length
+    ? persistOrderMediaFile({ phone: telefono, mediaId, mimeType: mediaMimeType, filename: mediaFilename, buffer: mediaBuffer })
+    : { mediaId, mimeType: mediaMimeType, path: null, absolutePath: null };
+  const storedImageContext = buildStoredImageContext({
     telefono,
     sourceMessageId,
-    items: imageAnalysis.items.length,
-    uncertainLines: imageAnalysis.uncertain_lines.length,
-    overallConfidence: imageAnalysis.overall_confidence,
-    extractedTextPreview: limpiarTexto(imageAnalysis.extracted_text)?.slice(0, 180) || null
-  });
-  logEvent("IMAGE_ORDER_ITEMS_EXTRACTED", {
-    telefono,
-    sourceMessageId,
-    totalItems: imageAnalysis.items.length,
-    products: imageAnalysis.items.map((item) => item.product_query).slice(0, 8)
-  });
-  logEvent("IMAGE_ORDER_CONFIDENCE", {
-    telefono,
-    sourceMessageId,
-    confidence: imageConfidence,
-    uncertainLines: imageAnalysis.uncertain_lines.length
-  });
-
-  if (shouldTreatImageAsReceipt({ caption, activeOrder, imageAnalysis })) {
-    return handleIncomingReceiptImage({ telefono, sourceMessageId, simulated, mediaId, mediaBuffer, mediaMimeType, mediaFilename, caption });
-  }
-
-  const normalizedText = buildImageOrderNormalizedText(imageAnalysis, caption);
-  if (!normalizedText) {
-    const inboundMessage = persistirMensaje({
-      phone: telefono,
-      direction: "in",
-      messageType: "image",
-      messageText: limpiarTexto(caption) || "Imagen recibida",
-      transcription: limpiarTexto(imageAnalysis.extracted_text),
-      mediaId,
-      whatsappMessageId: sourceMessageId
-    });
-    const respuesta = buildImageOrderFallback({ pedido: null, evaluacion: { faltantes: [] }, imageAnalysis });
-    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return {
-      pedido: null,
-      evaluacion: { esValido: false, faltantes: ["confirmacion_catalogo"], catalogStatus: "not_found" },
-      order: null,
-      inboundMessage,
-      respuesta,
-      delivery,
-      intent: "image_order_review",
-      sheets: { saved: false, skipped: true, reason: "image_ocr_unresolved" }
-    };
-  }
-
-  return ejecutarFlujoMensaje({
-    mensaje: normalizedText,
-    telefono,
-    sourceMessageId,
-    origen,
-    simulated,
-    messageType: "image",
-    transcription: limpiarTexto(imageAnalysis.extracted_text) || normalizedText,
     mediaId,
     mediaBuffer,
     mediaMimeType,
     mediaFilename,
-    skipRateLimit: true,
-    skipImageHandling: true,
-    imageAnalysis,
-    imageCaption: caption
+    caption,
+    persistedMedia,
+    analysis: imageAnalysisOverride,
+    status: "pending_ocr"
+  });
+  setLastImageContext(state, storedImageContext);
+
+  if (shouldTreatImageAsReceipt({ caption, activeOrder, imageAnalysis: imageAnalysisOverride })) {
+    return handleIncomingReceiptImage({ telefono, sourceMessageId, simulated, mediaId, mediaBuffer, mediaMimeType, mediaFilename, caption });
+  }
+
+  const inboundMessage = persistirMensaje({
+    phone: telefono,
+    direction: "in",
+    messageType: "image",
+    messageText: limpiarTexto(caption) || "Imagen recibida",
+    transcription: null,
+    mediaId,
+    whatsappMessageId: sourceMessageId
+  });
+
+  const normalizedCaption = normalizarTextoAnalisis(caption);
+  const shouldProcessImmediately = Boolean(normalizedCaption)
+    && !["imagen recibida", "imagen", "foto"].includes(normalizedCaption)
+    && !/\b(puedes|puede|podrias|podrías)\s+(leer|revisar)\b/i.test(normalizedCaption);
+
+  if (!shouldProcessImmediately) {
+    const respuesta = "Listo 😊 recibí la imagen. La estoy revisando para sacar el pedido.";
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return {
+      pedido: null,
+      evaluacion: null,
+      order: null,
+      inboundMessage,
+      respuesta,
+      delivery,
+      intent: "image_received",
+      sheets: { saved: false, skipped: true, reason: "image_pending_ocr" }
+    };
+  }
+
+  return executeRecentImageReview({
+    telefono,
+    sourceMessageId,
+    origen,
+    simulated,
+    inboundMessage,
+    state,
+    imageContext: storedImageContext
   });
 }
 
@@ -4454,6 +4641,7 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     lastIntent: state.lastIntent || null,
     awaitingName: state.awaitingName || false,
     hasShownOrderGuide: state.hasShownOrderGuide || false,
+    lastImageStatus: state.lastImageContext?.status || null,
     pendingItems: Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0,
     hasSuggestionMemory: Boolean(obtenerSuggestionMemoryActiva(state)),
     lastProduct: state.lastProductReference?.nombre || null
@@ -5081,7 +5269,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
   }
 }
 
-async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, skipRateLimit = false, skipImageHandling = false, imageAnalysis = null, imageCaption = null }) {
+async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, skipRateLimit = false, skipImageHandling = false, skipInboundPersist = false, existingInboundMessage = null, imageAnalysis = null, imageAnalysisOverride = null, imageCaption = null }) {
   logEvent("mensaje_recibido", { origen, telefono, sourceMessageId, messageType, mediaId: mediaId || null });
 
   const receivedAtMs = Date.now();
@@ -5132,7 +5320,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       mediaBuffer,
       mediaMimeType,
       mediaFilename,
-      caption: mensaje
+      caption: mensaje,
+      imageAnalysisOverride
     });
   }
 
@@ -5158,15 +5347,30 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state
   });
 
-  const inboundMessage = persistirMensaje({
-    phone: telefono,
-    direction: "in",
-    messageType: messageType === "image" ? "image" : messageType,
-    messageText: messageType === "image" ? (limpiarTexto(imageCaption) || "Imagen recibida") : mensaje,
-    transcription: messageType === "image" ? (limpiarTexto(transcription) || limpiarTexto(mensaje)) : transcription,
-    mediaId,
-    whatsappMessageId: sourceMessageId
-  });
+  const inboundMessage = skipInboundPersist
+    ? existingInboundMessage
+    : persistirMensaje({
+        phone: telefono,
+        direction: "in",
+        messageType: messageType === "image" ? "image" : messageType,
+        messageText: messageType === "image" ? (limpiarTexto(imageCaption) || "Imagen recibida") : mensaje,
+        transcription: messageType === "image" ? (limpiarTexto(transcription) || limpiarTexto(mensaje)) : transcription,
+        mediaId,
+        whatsappMessageId: sourceMessageId
+      });
+
+  const lastImageContext = getLastImageContext(state);
+  if (messageType === "text" && isImageReviewRequest(mensaje, state) && lastImageContext) {
+    return executeRecentImageReview({
+      telefono,
+      sourceMessageId,
+      origen,
+      simulated,
+      inboundMessage,
+      state,
+      imageContext: lastImageContext
+    });
+  }
 
   const orchestratorPayload = buildConversationOrchestratorContext({
     currentMessage: mensaje,
@@ -5767,6 +5971,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       evaluacionCombinada.esValido = false;
       evaluacionCombinada.catalogStatus = evaluacionCombinada.catalogStatus === "ok" ? "partial" : evaluacionCombinada.catalogStatus;
       evaluacionCombinada.faltantes = [...new Set([...(evaluacionCombinada.faltantes || []), "confirmacion_catalogo"] )];
+      logEvent("IMAGE_ORDER_UNCERTAIN", {
+        telefono,
+        sourceMessageId,
+        uncertainLines: imageAnalysis.uncertain_lines.map((line) => line?.text).filter(Boolean).slice(0, 6)
+      }, "warn");
     }
 
     logEvent("IMAGE_ORDER_VALIDATED", {
@@ -6699,6 +6908,7 @@ module.exports = {
   sincronizarCatalogoDesdeTreinta,
   setCatalogProductsCache,
   getCatalogProductsCache,
+  processImageOrder,
   resolveProductFromCatalog,
   resolverProductoCatalogo,
   analizarProductosCatalogoDesdeTexto,

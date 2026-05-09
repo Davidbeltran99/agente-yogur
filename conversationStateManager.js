@@ -12,6 +12,7 @@ function createDefaultConversationState({ customerName = null, customerType = "p
     hasShownOrderGuide: false,
     lastSuggestedProducts: null,
     activeOrderContext: null,
+    lastImageContext: null,
     recentHistory: [],
     lastResolvedOrder: null
   };

@@ -90,6 +90,81 @@ async function run() {
   assert(/griego 250 g/i.test(case12Text) && /griego 500 g/i.test(case12Text) && /griegos grandes|griego pequeño/i.test(case12Text), "12. griego ambiguo debe incluir ayuda puntual", case12);
   checks.push({ case: 12, ok: true, result: case12Text });
 
+  const simulatedImageAnalysis = {
+    items: [
+      { raw_text: "2 griego 500", product_query: "griego 500 g", quantity: 2, confidence: 0.96 },
+      { raw_text: "1 aloe litro", product_query: "aloe litro", quantity: 1, confidence: 0.91 }
+    ],
+    uncertain_lines: [{ text: "cafe grande?", confidence: 0.42 }],
+    extracted_text: "2 griego 500\n1 aloe litro\ncafe grande?",
+    address: null,
+    payment_method: null,
+    overall_confidence: 0.82
+  };
+
+  const phone13 = `57300007${Date.now().toString().slice(-4)}`;
+  const case13 = await ejecutarFlujoMensaje({ mensaje: "", telefono: phone13, sourceMessageId: `test13_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("fake-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido.jpg", imageAnalysisOverride: simulatedImageAnalysis, skipRateLimit: true });
+  const case13Text = case13.delivery?.respuesta || case13.respuesta || "";
+  assert(/recibí la imagen/i.test(case13Text) && /revisando/i.test(case13Text), "13. imagen sola debe quedar en revisión", case13);
+  checks.push({ case: 13, ok: true, result: case13Text });
+
+  const case14 = await ejecutarFlujoMensaje({ mensaje: "puedes leer mi imagen?", telefono: phone13, sourceMessageId: `test14_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case14Text = case14.delivery?.respuesta || case14.respuesta || "";
+  assert(/griego 500 g/i.test(case14Text) && /aloe litro 1000 ml|aloe litro/i.test(case14Text) && !/no puedo leer imágenes|no puedo leer imagenes/i.test(case14Text), "14. follow-up de imagen debe usar OCR reciente", case14);
+  checks.push({ case: 14, ok: true, result: case14Text });
+
+  const phone15 = `57300008${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone15, sourceMessageId: `test15a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("fake-image-2"), mediaMimeType: "image/jpeg", mediaFilename: "pedido2.jpg", imageAnalysisOverride: simulatedImageAnalysis, skipRateLimit: true });
+  const case15 = await ejecutarFlujoMensaje({ mensaje: "sí, es un pedido", telefono: phone15, sourceMessageId: `test15b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case15Text = case15.delivery?.respuesta || case15.respuesta || "";
+  assert(/griego 500 g/i.test(case15Text) && /aloe litro 1000 ml|aloe litro/i.test(case15Text), "15. confirmar que es pedido debe procesar la última imagen", case15);
+  checks.push({ case: 15, ok: true, result: case15Text });
+
+  const handwrittenAnalysis = {
+    items: [{ raw_text: "3 aloe litro", product_query: "aloe litro", quantity: 3, confidence: 0.88 }],
+    uncertain_lines: [],
+    extracted_text: "3 aloe litro",
+    address: null,
+    payment_method: null,
+    overall_confidence: 0.88
+  };
+  const phone16 = `57300009${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone16, sourceMessageId: `test16a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("handwritten-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido3.jpg", imageAnalysisOverride: handwrittenAnalysis, skipRateLimit: true });
+  const case16 = await ejecutarFlujoMensaje({ mensaje: "lee la foto", telefono: phone16, sourceMessageId: `test16b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case16Text = case16.delivery?.respuesta || case16.respuesta || "";
+  assert(/3 Aloe Litro 1000 ml|3 aloe litro/i.test(case16Text), "16. imagen manuscrita debe producir items validados", case16);
+  checks.push({ case: 16, ok: true, result: case16Text });
+
+  const blurryAnalysis = {
+    items: [],
+    uncertain_lines: [{ text: "pedido borroso", confidence: 0.2 }],
+    extracted_text: "pedido borroso",
+    address: null,
+    payment_method: null,
+    overall_confidence: 0.2
+  };
+  const phone17 = `57300010${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone17, sourceMessageId: `test17a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("blurry-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido4.jpg", imageAnalysisOverride: blurryAnalysis, skipRateLimit: true });
+  const case17 = await ejecutarFlujoMensaje({ mensaje: "revisa la imagen", telefono: phone17, sourceMessageId: `test17b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case17Text = case17.delivery?.respuesta || case17.respuesta || "";
+  assert(/quiero confirmar|está correcto|pedido borroso/i.test(case17Text), "17. imagen borrosa debe pedir confirmación", case17);
+  checks.push({ case: 17, ok: true, result: case17Text });
+
+  const emptyAnalysis = {
+    items: [],
+    uncertain_lines: [],
+    extracted_text: "",
+    address: null,
+    payment_method: null,
+    overall_confidence: 0
+  };
+  const phone18 = `57300011${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone18, sourceMessageId: `test18a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("empty-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido5.jpg", imageAnalysisOverride: emptyAnalysis, skipRateLimit: true });
+  const case18 = await ejecutarFlujoMensaje({ mensaje: "puedes leer mi imagen?", telefono: phone18, sourceMessageId: `test18b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case18Text = case18.delivery?.respuesta || case18.respuesta || "";
+  assert(/no alcancé a leer bien la imagen/i.test(case18Text), "18. imagen sin productos debe pedir una imagen más clara o texto", case18);
+  checks.push({ case: 18, ok: true, result: case18Text });
+
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 }
 
