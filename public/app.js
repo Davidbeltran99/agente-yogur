@@ -119,6 +119,7 @@ let visibleMessagesLimit = 60;
 let currentTheme = getStoredThemePreference();
 let uiSoundsEnabled = getStoredSoundsPreference();
 let audioContext = null;
+let audioActivationHintShown = false;
 
 function icon(name, className = "ui-icon") {
   return `<svg class="${className}" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
@@ -554,16 +555,52 @@ function getOrCreateAudioContext() {
   return audioContext;
 }
 
-function playSoftTone(type = "conversation") {
-  if (!uiSoundsEnabled) {
+function showAudioActivationHint() {
+  if (audioActivationHintShown) {
     return;
   }
 
+  audioActivationHintShown = true;
+  showToast("Haz clic en el panel para activar sonidos.", "info");
+}
+
+async function ensureAudioContextReady({ userGesture = false } = {}) {
   const context = getOrCreateAudioContext();
   if (!context) {
-    return;
+    return null;
   }
 
+  if (context.state === "running") {
+    audioActivationHintShown = false;
+    return context;
+  }
+
+  if (context.state === "closed") {
+    return null;
+  }
+
+  try {
+    await context.resume();
+  } catch (_error) {
+    if (!userGesture) {
+      showAudioActivationHint();
+    }
+    return null;
+  }
+
+  if (context.state === "running") {
+    audioActivationHintShown = false;
+    return context;
+  }
+
+  if (!userGesture) {
+    showAudioActivationHint();
+  }
+
+  return null;
+}
+
+function scheduleSoftTone(context, type = "conversation") {
   const start = context.currentTime + 0.01;
   const frequencies = type === "order" ? [587, 740] : [494, 659];
   const gainNode = context.createGain();
@@ -580,10 +617,52 @@ function playSoftTone(type = "conversation") {
     oscillator.start(start + index * 0.04);
     oscillator.stop(start + 0.34 + index * 0.02);
   });
+}
 
-  if (context.state === "suspended") {
-    context.resume().catch(() => undefined);
+function playSoftTone(type = "conversation") {
+  if (!uiSoundsEnabled) {
+    return;
   }
+
+  const context = getOrCreateAudioContext();
+  if (!context) {
+    return;
+  }
+
+  if (context.state === "running") {
+    audioActivationHintShown = false;
+    scheduleSoftTone(context, type);
+    return;
+  }
+
+  ensureAudioContextReady()
+    .then((readyContext) => {
+      if (readyContext) {
+        scheduleSoftTone(readyContext, type);
+      }
+    })
+    .catch(() => undefined);
+}
+
+function primeAudioPlayback() {
+  if (!uiSoundsEnabled) {
+    return;
+  }
+
+  ensureAudioContextReady({ userGesture: true }).catch(() => undefined);
+}
+
+function toggleUiSounds() {
+  uiSoundsEnabled = !uiSoundsEnabled;
+  storeSoundsPreference();
+  syncSoundToggleState();
+  renderSettings();
+
+  if (uiSoundsEnabled) {
+    primeAudioPlayback();
+  }
+
+  showToast(uiSoundsEnabled ? "Sonidos suaves activados." : "Sonidos suaves desactivados.", "info");
 }
 
 function notifyOrderChanges(nextOrders, previousSnapshot) {
@@ -2059,11 +2138,7 @@ document.addEventListener("click", (event) => {
   }
 
   if (event.target.closest("[data-toggle-sounds]")) {
-    uiSoundsEnabled = !uiSoundsEnabled;
-    storeSoundsPreference();
-    syncSoundToggleState();
-    renderSettings();
-    showToast(uiSoundsEnabled ? "Sonidos suaves activados." : "Sonidos suaves desactivados.", "info");
+    toggleUiSounds();
   }
 });
 
@@ -2112,13 +2187,10 @@ themeToggleButton?.addEventListener("click", () => {
   showToast(currentTheme === "dark" ? "Tema oscuro activado." : "Tema claro activado.", "info");
 });
 
-soundToggleButton?.addEventListener("click", () => {
-  uiSoundsEnabled = !uiSoundsEnabled;
-  storeSoundsPreference();
-  syncSoundToggleState();
-  renderSettings();
-  showToast(uiSoundsEnabled ? "Sonidos suaves activados." : "Sonidos suaves desactivados.", "info");
-});
+soundToggleButton?.addEventListener("click", toggleUiSounds);
+
+document.addEventListener("pointerdown", primeAudioPlayback, { passive: true });
+document.addEventListener("keydown", primeAudioPlayback);
 
 closeDayButton?.addEventListener("click", openFinalizeModal);
 closeModalButton?.addEventListener("click", closeFinalizeModal);
