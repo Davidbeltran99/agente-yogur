@@ -394,6 +394,16 @@ function esIntencionDireccion(texto) {
   return Boolean(extraerDireccionDesdeTexto(texto));
 }
 
+function esReferenciaDireccionPersistida(texto, state) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  const hasStoredAddress = Boolean(state?.lastResolvedOrder?.direccion || state?.activeOrderContext?.direccion || state?.pendingPedido?.direccion);
+  return hasStoredAddress && PARTIAL_ADDRESS_REFERENCE_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)));
+}
+
 function esReferenciaAmbigua(texto, state) {
   const normalized = normalizarTextoAnalisis(texto);
   if (!normalized) {
@@ -437,7 +447,7 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
     return "payment_method";
   }
 
-  if (esIntencionDireccion(texto) && (hasDraftContext || hasActiveContext)) {
+  if ((esIntencionDireccion(texto) && (hasDraftContext || hasActiveContext)) || esReferenciaDireccionPersistida(texto, state)) {
     return "address_provided";
   }
 
@@ -1220,6 +1230,38 @@ function resolverProductoSemanticoPorPreferencias(texto, catalog = getCatalogPro
         product: preferred,
         confidence: preferences.wantsLarge || preferences.wantsSmall || preferences.wantsValue ? 84 : 80
       };
+}
+
+function resolverProductoContextualPorFamilia(texto, familyName, catalog = getCatalogProductsCache()) {
+  const normalizedFamily = normalizeCatalogSemanticFamilyName(familyName);
+  if (!normalizedFamily) {
+    return null;
+  }
+
+  const resolution = resolverProductoSemanticoPorPreferencias(`${normalizedFamily} ${texto}`.trim(), catalog);
+  if (resolution?.status === "matched" && resolution.product?.nombre) {
+    return resolution.product;
+  }
+
+  if (resolution?.status === "suggested" && Array.isArray(resolution.matches) && resolution.matches[0]?.nombre) {
+    return findCatalogProductByName(resolution.matches[0].nombre);
+  }
+
+  return null;
+}
+
+function resolverCantidadContextual(texto, { defaultQuantity = null } = {}) {
+  const normalized = normalizarTextoAnalisis(texto);
+  const cantidad = encontrarCantidadEnSegmento(normalized);
+  if (cantidad) {
+    return cantidad;
+  }
+
+  if (/\b(otro|otra|mas|más)\b/.test(normalized)) {
+    return defaultQuantity || 1;
+  }
+
+  return defaultQuantity;
 }
 
 function resolverProductoCatalogo(texto) {
@@ -2105,6 +2147,12 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = []) {
         }
       }
     }
+  }
+
+  const normalizedSource = normalizarTextoAnalisis(texto);
+  const hasDanglingSecondaryReference = /\b(lo otro|el otro|otro normal)\b/.test(normalizedSource);
+  if (hasDanglingSecondaryReference && items.length && !ambiguities.length && !unmatched.length) {
+    unmatched.push("lo otro");
   }
 
   return {
@@ -3438,7 +3486,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
 
   if (new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized) && lastActiveProduct) {
     return {
-      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${lastActiveProduct}`,
+      text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
       reason: "quantity_for_active_product",
       selectedProduct: lastActiveProduct,
@@ -3448,7 +3496,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
 
   if (esIntencionAgregarMas(raw) && lastActiveProduct) {
     return {
-      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${lastActiveProduct}`,
+      text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
       reason: "active_order_append_reference",
       selectedProduct: lastActiveProduct,
@@ -3459,7 +3507,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
   const sameProductReference = state?.lastProductReference?.nombre || lastActiveProduct || null;
   if (sameProductReference && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
     return {
-      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${sameProductReference}`,
+      text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${sameProductReference}`,
       used: true,
       reason: "same_product_reference",
       selectedProduct: sameProductReference,
@@ -3469,13 +3517,25 @@ function aplicarContextoProductoAMensaje(texto, state) {
 
   const hasFamilyReference = Boolean(state?.lastProductReference?.familia);
   const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
+  const hasValueCue = includesAnyToken(normalized, PRICE_VALUE_TOKENS);
   if (hasFamilyReference) {
     const alreadyMentionsFamily = getCatalogProductsCache().some((product) => {
       const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia);
       return family && normalized.includes(family);
     });
 
-    if (!alreadyMentionsFamily && hasVariantCue) {
+    if (!alreadyMentionsFamily && (hasVariantCue || hasValueCue)) {
+      const contextualProduct = resolverProductoContextualPorFamilia(raw, state.lastProductReference.familia);
+      if (contextualProduct?.nombre) {
+        return {
+          text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${contextualProduct.nombre}`,
+          used: true,
+          reason: hasValueCue ? "family_value_context_reference" : "family_variant_context_reference",
+          selectedProduct: contextualProduct.nombre,
+          appendProducts: esIntencionAgregarMas(raw)
+        };
+      }
+
       return {
         text: `${state.lastProductReference.familia} ${raw}`.trim(),
         used: true,
@@ -3502,7 +3562,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     logConfidenceLevel({ source: "suggestion_memory", stage: "context_resolution", confidence: suggestionResolution.confidence, input: raw });
 
     return {
-      text: `${encontrarCantidadEnSegmento(normalized) || 1} ${suggestionResolution.option.nombre}`,
+      text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${suggestionResolution.option.nombre}`,
       used: true,
       reason: suggestionResolution.reason,
       selectedProduct: suggestionResolution.option.nombre,
@@ -3701,13 +3761,14 @@ function quitarProductoDePedido(pedido, texto, state) {
 
 function actualizarCantidadPedido(pedido, texto, state) {
   const productos = Array.isArray(pedido?.productos) ? [...pedido.productos] : [];
+  const normalized = normalizarTextoAnalisis(texto);
   const index = encontrarIndiceProductoEnPedido(pedido, texto, state);
-  const cantidad = encontrarCantidadEnSegmento(normalizarTextoAnalisis(texto));
+  const isIncrement = /\b(mas|más|agrega|suma|otro|otra)\b/.test(normalized) && !/\bsolo\b/.test(normalized);
+  const cantidad = resolverCantidadContextual(normalized, { defaultQuantity: isIncrement ? 1 : null });
   if (index < 0 || !productos[index] || !cantidad) {
     return { pedido, updated: null };
   }
 
-  const isIncrement = /\b(mas|más|agrega|suma)\b/.test(normalizarTextoAnalisis(texto)) && !/\bsolo\b/.test(normalizarTextoAnalisis(texto));
   productos[index] = {
     ...productos[index],
     cantidad: isIncrement ? (Number(productos[index].cantidad) || 0) + cantidad : cantidad

@@ -35,6 +35,13 @@
       ]
     },
     {
+      "name": "single_item_add_another",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "agrega otro", "expect": { "pedidoQuantityFor": { "product": "Aloe Litro", "quantity": 2 } } }
+      ]
+    },
+    {
       "name": "suggestion_first_option",
       "steps": [
         { "message": "catalogo", "expect": { "intent": "catalog_request", "responseIncludes": ["Tellolac"] } },
@@ -45,7 +52,7 @@
       "name": "contextual_value_option",
       "steps": [
         { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
-        { "message": "el barato", "expect": { "pedidoProductsIncludes": ["Aloe Litro"], "orderCreated": false } }
+        { "message": "el barato", "expect": { "pedidoProductsIncludes": ["Aloe Litro 1000 ml"], "orderCreated": false } }
       ]
     },
     {
@@ -53,6 +60,13 @@
       "steps": [
         { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
         { "message": "el grande", "expect": { "pedidoProductsIncludes": ["Aloe Garrafa 1800 ml"], "orderCreated": false } }
+      ]
+    },
+    {
+      "name": "family_small_reference",
+      "steps": [
+        { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "el pequeño", "expect": { "pedidoProductsIncludes": ["Aloe Litro 1000 ml"], "orderCreated": false } }
       ]
     },
     {
@@ -77,7 +91,9 @@
         { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
         { "message": "calle 10 #20-30", "expect": { "responseIncludes": ["pagas"] } },
         { "message": "nequi", "expect": { "orderCreated": true } },
-        { "message": "lo mismo de ayer", "expect": { "intent": "reorder_memory", "pedidoProductsIncludes": ["Aloe Litro"], "responseIncludes": ["Aloe Litro"] } }
+        { "message": "lo mismo de ayer", "expect": { "intent": "reorder_memory", "pedidoProductsIncludes": ["Aloe Litro"], "responseIncludes": ["Aloe Litro"] } },
+        { "message": "la misma dirección", "expect": { "orderCreated": true, "responseIncludes": ["calle 10 #20-30"] } },
+        { "message": "donde siempre", "expect": { "orderCreated": true, "responseIncludes": ["calle 10 #20-30"] } }
       ]
     },
     {

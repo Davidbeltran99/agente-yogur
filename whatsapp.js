@@ -309,9 +309,12 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     if (productos.length) {
       return [
         construirSaludoNatural(nombreCliente),
-        "Te entendí este pedido:",
+        "Te entendí esto por ahora:",
         detalle,
-        "¿Me compartes la dirección y el método de pago para dejarlo listo?"
+        pedido.total ? `Subtotal parcial: ${formatearMoneda(pedido.total)}` : null,
+        "Pero me falta confirmar otro producto para dejarte el pedido bien 😊",
+        listaProductosDisponibles,
+        "¿Me lo escribes como aparece en el catálogo o me dices cuál de estos te gustaría llevar?"
       ].filter(Boolean).join("\n\n");
     }
 

@@ -137,7 +137,8 @@ async function main() {
       ...process.env,
       PORT: String(port),
       WHATSAPP_ENABLED: "false",
-      OPENAI_API_KEY: ""
+      OPENAI_API_KEY: "",
+      RATE_LIMIT_MAX_MESSAGES: "20"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
