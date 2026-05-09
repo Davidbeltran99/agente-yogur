@@ -5,6 +5,7 @@ const ALLOWED_EVENTS = new Set([
   "order_rejected",
   "whatsapp_send_error",
   "owner_notify_error",
+  "admin_notify_error",
   "MODEL_ACTIVE",
   "PROVIDER_ACTIVE",
   "model_used",

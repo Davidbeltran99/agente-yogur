@@ -99,6 +99,7 @@ const ADMIN_WHATSAPP_NUMBERS = new Set(String(process.env.ADMIN_WHATSAPP_NUMBERS
   .split(",")
   .map((value) => normalizePhone(value))
   .filter(Boolean));
+const ADMIN_NOTIFY_ENABLED = parseBooleanEnv(process.env.ADMIN_NOTIFY_ENABLED, false);
 const BUSINESS_HOURS_ENABLED = parseBooleanEnv(process.env.BUSINESS_HOURS_ENABLED, false);
 const BUSINESS_OPEN_HOUR = Number(process.env.BUSINESS_OPEN_HOUR || 7);
 const BUSINESS_CLOSE_HOUR = Number(process.env.BUSINESS_CLOSE_HOUR || 20);
@@ -3200,6 +3201,8 @@ function logRuntimeConfigSnapshot(context = "runtime") {
   logEvent("runtime_config_snapshot", {
     context,
     whatsappEnabled: WHATSAPP_ENABLED,
+    adminNotifyEnabled: ADMIN_NOTIFY_ENABLED,
+    adminWhatsappCount: getAdminWhatsappNumbers().length,
     openaiApiKeyPresent: apiKeyPresent,
     aiProvider,
     openaiModel: process.env.OPENAI_MODEL || OPENAI_MODEL,
@@ -3245,6 +3248,100 @@ function formatCurrency(value) {
     currency: "COP",
     maximumFractionDigits: 0
   }).format(numeric);
+}
+
+function getAdminWhatsappNumbers() {
+  return Array.from(ADMIN_WHATSAPP_NUMBERS).filter(Boolean);
+}
+
+function shouldSendAdminNotifications() {
+  return ADMIN_NOTIFY_ENABLED && WHATSAPP_ENABLED && getAdminWhatsappNumbers().length > 0;
+}
+
+function buildAdminOrderItemsText(order) {
+  if (Array.isArray(order?.items) && order.items.length) {
+    return order.items.map((item) => {
+      const note = limpiarTexto(item?.productNotes || item?.product_notes);
+      return `• ${item?.cantidad || 1} ${item?.producto || "Producto"}${note ? `\n  Nota: ${note}` : ""}`;
+    }).join("\n");
+  }
+
+  return limpiarTexto(order?.resumenItems) || "• Sin detalle";
+}
+
+function buildAdminNewOrderMessage(order) {
+  return [
+    "📦 Nuevo pedido Tellolac",
+    "",
+    `Cliente: ${limpiarTexto(order?.cliente) || "Sin nombre"}`,
+    `Teléfono: ${normalizePhone(order?.telefono) || "Sin teléfono"}`,
+    "",
+    "Pedido:",
+    buildAdminOrderItemsText(order),
+    "",
+    `Dirección: ${limpiarTexto(order?.direccion) || "Pendiente"}`,
+    `Pago: ${limpiarTexto(order?.metodoPago) || "Pendiente"}`,
+    `Total: ${formatCurrency(order?.total || 0)}`,
+    "",
+    `Estado: ${limpiarTexto(order?.estado) || "pendiente"}`
+  ].join("\n");
+}
+
+function buildAdminCloseDayMessage(summary, closure = null) {
+  return [
+    "📊 Resumen cierre Tellolac",
+    "",
+    `Fecha: ${summary?.dateKey || "Sin fecha"}`,
+    `Pedidos: ${summary?.stats?.totalOrders || 0}`,
+    `Ventas: ${formatCurrency(summary?.stats?.totalSales || 0)}`,
+    `Pendientes: ${summary?.stats?.pending || 0}`,
+    `En proceso: ${summary?.stats?.inTransit || 0}`,
+    `Entregados: ${summary?.stats?.delivered || 0}`,
+    `Cancelados: ${summary?.stats?.cancelled || 0}`,
+    closure?.id ? `Cierre: ${closure.id}` : null
+  ].filter(Boolean).join("\n");
+}
+
+async function notifyAdminWhatsAppNumbers({ message, context = "general", metadata = {} } = {}) {
+  if (!shouldSendAdminNotifications()) {
+    return { sent: 0, skipped: true, reason: "disabled_or_missing_admins" };
+  }
+
+  const text = String(message || "").trim();
+  if (!text) {
+    return { sent: 0, skipped: true, reason: "empty_message" };
+  }
+
+  const admins = getAdminWhatsappNumbers();
+  const results = await Promise.allSettled(admins.map((phone) => enviarMensajeWhatsApp(phone, text)));
+
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      return;
+    }
+
+    logEvent("admin_notify_error", {
+      adminPhone: admins[index],
+      context,
+      status: result.reason?.response?.status || null,
+      error: result.reason?.response?.data || result.reason?.message || String(result.reason || "unknown_error"),
+      ...metadata
+    }, "error");
+  });
+
+  return {
+    sent: results.filter((result) => result.status === "fulfilled").length,
+    skipped: false,
+    total: admins.length
+  };
+}
+
+async function notifyAdminCriticalAlert({ title = "Alerta crítica Tellolac", message = "Se detectó un error crítico.", metadata = {} } = {}) {
+  return notifyAdminWhatsAppNumbers({
+    message: [`🚨 ${title}`, "", String(message || "").trim()].join("\n"),
+    context: "critical_error",
+    metadata
+  });
 }
 
 function getDatePartsInTimeZone(date = new Date(), timeZone = BUSINESS_TIMEZONE) {
@@ -5447,6 +5544,17 @@ async function persistirPedidoFinal({ pedido, telefono, mensajeOriginal, sourceM
     error: sheets.error || null
   });
 
+  if (!String(sourceMessageId || "").startsWith("simulate_")) {
+    await notifyAdminWhatsAppNumbers({
+      message: buildAdminNewOrderMessage(order),
+      context: "new_order",
+      metadata: {
+        orderId: order.id,
+        telefono: order.telefono
+      }
+    });
+  }
+
   return { order, sheets };
 }
 
@@ -6554,6 +6662,8 @@ app.get("/health", (_req, res) => {
     dbPath: databasePath,
     catalogProducts: countCatalogProducts(),
     whatsappEnabled: WHATSAPP_ENABLED,
+    adminNotifyEnabled: ADMIN_NOTIFY_ENABLED,
+    adminWhatsappCount: getAdminWhatsappNumbers().length,
     panelAuthEnabled: PANEL_AUTH_ENABLED,
     sourceOfTruth: "sqlite",
     sheetsRole: SHEETS_BACKUP_ENABLED ? "reporting_backup" : "disabled",
@@ -6644,6 +6754,15 @@ app.post("/admin/close-day", requirePanelAuth, async (_req, res) => {
       },
       pdfPath,
       orderIds: summary.orders.map((order) => order.id)
+    });
+
+    await notifyAdminWhatsAppNumbers({
+      message: buildAdminCloseDayMessage(summary, closure),
+      context: "close_day",
+      metadata: {
+        closureId,
+        dateKey: summary.dateKey
+      }
     });
 
     return res.json({
