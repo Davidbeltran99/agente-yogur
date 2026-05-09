@@ -14,6 +14,12 @@ function assert(condition, message, details = null) {
   }
 }
 
+function responseMentionsProductNote(response = "", note = "") {
+  const normalizedResponse = String(response || "").toLowerCase();
+  const normalizedNote = String(note || "").toLowerCase();
+  return normalizedResponse.includes(`nota: ${normalizedNote}`) || normalizedResponse.includes(normalizedNote);
+}
+
 function byName(result) {
   return result?.product?.nombre || null;
 }
@@ -208,6 +214,16 @@ async function run() {
   const case23 = await ejecutarFlujoMensaje({ mensaje: "sí", telefono: phone23, sourceMessageId: `test23d_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
   assert(Boolean(case23.order?.id), "23. tras confirmación debe guardar el pedido", case23);
   checks.push({ case: 23, ok: true, result: case23.order?.id || null });
+
+  const phone24 = `57300017${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone24, sourceMessageId: `test24a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("special-instructions-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido10.jpg", imageAnalysisOverride: simulatedImageAnalysis, skipRateLimit: true });
+  const case24 = await ejecutarFlujoMensaje({ mensaje: "agrega kefir sin azucar", telefono: phone24, sourceMessageId: `test24b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case24Text = case24.delivery?.respuesta || case24.respuesta || "";
+  const kefirItem24 = (case24.pedido?.productos || []).find((item) => /kefir/i.test(item?.producto || ""));
+  assert(kefirItem24, "24. después de imagen debe poder agregar kefir con instrucción especial", case24);
+  assert(/sin azúcar/i.test(kefirItem24?.product_notes || kefirItem24?.productNotes || ""), "24. kefir agregado tras imagen debe conservar nota sin azúcar", case24);
+  assert(responseMentionsProductNote(case24Text, "sin azúcar"), "24. respuesta tras imagen debe mencionar la nota del producto", case24);
+  checks.push({ case: 24, ok: true, result: (case24.pedido?.productos || []).map((item) => ({ producto: item.producto, nota: item.product_notes || item.productNotes || null })) });
 
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 }

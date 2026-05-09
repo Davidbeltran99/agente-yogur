@@ -53,6 +53,12 @@ function collectProducts(container) {
   return container.map((item) => item?.producto).filter(Boolean);
 }
 
+function findProduct(container, productName) {
+  return Array.isArray(container)
+    ? container.find((item) => item?.producto === productName)
+    : null;
+}
+
 function assertStep(step, result, scenarioName, index) {
   const expect = step.expect || {};
   const label = `${scenarioName}#${index + 1}`;
@@ -101,6 +107,27 @@ function assertStep(step, result, scenarioName, index) {
     const target = (result.pedido?.productos || []).find((item) => item?.producto === expect.pedidoQuantityFor.product);
     assert(target, `${label}: missing quantity target ${expect.pedidoQuantityFor.product}`);
     assert(Number(target.cantidad) === Number(expect.pedidoQuantityFor.quantity), `${label}: expected quantity ${expect.pedidoQuantityFor.quantity}, got ${target.cantidad}`);
+  }
+
+  if (expect.pedidoProductNotesFor) {
+    const target = findProduct(result.pedido?.productos || [], expect.pedidoProductNotesFor.product);
+    assert(target, `${label}: missing notes target ${expect.pedidoProductNotesFor.product}`);
+    const notes = target.product_notes || target.productNotes || null;
+    assert(String(notes || "").toLowerCase().includes(String(expect.pedidoProductNotesFor.notes).toLowerCase()), `${label}: expected pedido notes ${expect.pedidoProductNotesFor.notes}, got ${notes}`);
+  }
+
+  if (expect.orderProductNotesFor) {
+    const target = findProduct(result.order?.items || [], expect.orderProductNotesFor.product);
+    assert(target, `${label}: missing order notes target ${expect.orderProductNotesFor.product}`);
+    const notes = target.product_notes || target.productNotes || null;
+    assert(String(notes || "").toLowerCase().includes(String(expect.orderProductNotesFor.notes).toLowerCase()), `${label}: expected order notes ${expect.orderProductNotesFor.notes}, got ${notes}`);
+  }
+
+  if (expect.firstPedidoProductNotesIncludes) {
+    const firstItem = Array.isArray(result.pedido?.productos) ? result.pedido.productos[0] : null;
+    const notes = firstItem?.product_notes || firstItem?.productNotes || null;
+    assert(firstItem, `${label}: missing first pedido item`);
+    assert(String(notes || "").toLowerCase().includes(String(expect.firstPedidoProductNotesIncludes).toLowerCase()), `${label}: expected first pedido notes ${expect.firstPedidoProductNotesIncludes}, got ${notes}`);
   }
 }
 

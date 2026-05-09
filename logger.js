@@ -25,7 +25,9 @@ const ALLOWED_EVENTS = new Set([
   "LIST_ORDER_DETECTED",
   "PARSED_LINE_ITEMS",
   "ORDER_INTENT_CONFIDENCE",
-  "missing_distributor_price"
+  "missing_distributor_price",
+  "SPECIAL_INSTRUCTION_DETECTED",
+  "PRODUCT_NOTE_APPLIED"
 ]);
 
 const EVENT_ALIASES = {

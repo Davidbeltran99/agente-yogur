@@ -361,7 +361,11 @@ function construirDetalleProductosAmable(productos = []) {
     const nombre = [p.producto || "producto", p.sabor || null].filter(Boolean).join(" ");
     const subtotal = formatearMoneda(p.subtotal);
     const personalizacion = construirTextoPersonalizacion(p.customizations);
-    return `• ${cantidad} ${nombre}${personalizacion ? ` (${personalizacion})` : ""}${subtotal ? ` — ${subtotal}` : ""}`;
+    const notes = p.product_notes || p.productNotes || null;
+    return [
+      `• ${cantidad} ${nombre}${subtotal ? ` — ${subtotal}` : ""}`,
+      notes ? `  Nota: ${notes}` : (personalizacion ? `  Nota: ${personalizacion}` : null)
+    ].filter(Boolean).join("\n");
   }).join("\n");
 }
 

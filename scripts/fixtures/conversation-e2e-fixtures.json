@@ -118,6 +118,36 @@
         { "message": "nequi", "expect": { "orderCreated": true, "responseIncludes": ["Carlos"] } },
         { "message": "okey bye", "expect": { "intent": "closing", "orderCreated": false, "responseIncludes": ["Carlos", "Quedamos atentos", "excelente día"], "responseExcludes": ["Aloe Litro", "Dirección", "Pago", "Total"] } }
       ]
+    },
+    {
+      "name": "special_instruction_kefir_sin_azucar",
+      "steps": [
+        { "message": "kefir sin azucar", "expect": { "responseIncludes": ["Kefir", "Nota: sin azúcar"], "responseExcludes": ["presentación exacta"], "firstPedidoProductNotesIncludes": "sin azúcar" } }
+      ]
+    },
+    {
+      "name": "special_instruction_yogurt_poca_azucar",
+      "steps": [
+        { "message": "1 yogurt con poca azucar", "expect": { "responseIncludes": ["Nota: con poca azúcar"], "firstPedidoProductNotesIncludes": "poca azúcar" } }
+      ]
+    },
+    {
+      "name": "special_instruction_kefir_poco_colorante",
+      "steps": [
+        { "message": "2 kefir con poco colorante", "expect": { "responseIncludes": ["Nota: con poco colorante"], "firstPedidoProductNotesIncludes": "poco colorante" } }
+      ]
+    },
+    {
+      "name": "special_instruction_yogurt_sin_colorante",
+      "steps": [
+        { "message": "yogurt sin colorante", "expect": { "responseIncludes": ["Nota: sin colorante"], "firstPedidoProductNotesIncludes": "sin colorante" } }
+      ]
+    },
+    {
+      "name": "exact_variant_griego_con_fruta",
+      "steps": [
+        { "message": "griego con fruta", "expect": { "pedidoProductsIncludes": ["Griego Fruta Unidad 120gr"], "responseIncludes": ["Griego Fruta"], "responseExcludes": ["Nota: con fruta"] } }
+      ]
     }
   ]
 }

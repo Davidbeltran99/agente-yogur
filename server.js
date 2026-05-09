@@ -707,6 +707,25 @@ function normalizeCatalogSemanticFamilyName(value) {
     .trim();
 }
 
+function matchesCatalogFamily(product, familyName) {
+  const normalizedFamily = normalizeCatalogText(familyName);
+  if (!normalizedFamily || !product) {
+    return false;
+  }
+
+  const familyAliases = SEMANTIC_FAMILY_KEYWORDS.get(normalizedFamily) || [normalizedFamily];
+  const haystacks = [
+    product?.nombre_raiz_familia,
+    product?.nombre_familia,
+    product?.categoria,
+    product?.nombre,
+    ...(Array.isArray(product?.aliases) ? product.aliases : [])
+  ].map((value) => normalizeCatalogText(value)).filter(Boolean);
+
+  return haystacks.some((value) => value === normalizedFamily)
+    || haystacks.some((value) => familyAliases.some((alias) => value.includes(normalizeCatalogText(alias))));
+}
+
 function tokenizarCatalogo(valor, { keepGeneric = false } = {}) {
   const normalized = normalizeCatalogText(valor);
   if (!normalized) {
@@ -839,7 +858,7 @@ function isLargeVariant(product) {
 }
 
 function getFamilyPriceStats(familyName) {
-  const familyProducts = getCatalogProductsCache().filter((product) => (product?.nombre_raiz_familia || product?.nombre_familia) === familyName);
+  const familyProducts = getCatalogProductsCache().filter((product) => matchesCatalogFamily(product, familyName));
   const prices = familyProducts
     .map((product) => parseOptionalNumber(product?.precio))
     .filter((price) => price !== null)
@@ -1580,7 +1599,7 @@ function resolveProductFromCatalog(query, context = {}) {
   const catalog = Array.isArray(context.catalog) ? context.catalog : getCatalogProductsCache();
   const families = detectProductResolverFamilies(normalizedQuery);
   const directPool = families.size
-    ? catalog.filter((product) => families.has(product?.nombre_raiz_familia || product?.nombre_familia))
+    ? catalog.filter((product) => Array.from(families).some((family) => matchesCatalogFamily(product, family)))
     : catalog;
   const workingPool = families.size === 1
     ? filterFamilyProductsForResolver(directPool, Array.from(families)[0], normalizedQuery)
@@ -1657,7 +1676,7 @@ function resolveProductFromCatalog(query, context = {}) {
   const fuzzyMatches = encontrarCoincidenciasCatalogo(query, {
     minScore: families.size ? 68 : 72,
     limit: 3
-  }).filter((entry) => !families.size || families.has(entry.product?.nombre_raiz_familia || entry.product?.nombre_familia));
+  }).filter((entry) => !families.size || Array.from(families).some((family) => matchesCatalogFamily(entry.product, family)));
 
   logProductResolverCandidates({
     query: candidate,
@@ -1754,6 +1773,8 @@ function consolidarItemsPedido(items = []) {
   for (const item of items) {
     const producto = limpiarTexto(item?.producto);
     const sabor = limpiarTexto(item?.sabor);
+    const itemCustomizations = mergeCustomizations([], Array.isArray(item?.customizations) ? item.customizations : []);
+    const productNotes = limpiarTexto(item?.product_notes ?? item?.productNotes) || buildNotesFromCustomizations(itemCustomizations);
     const cantidad = Number.isFinite(Number(item?.cantidad)) && Number(item.cantidad) > 0
       ? Number(item.cantidad)
       : null;
@@ -1764,14 +1785,16 @@ function consolidarItemsPedido(items = []) {
       continue;
     }
 
-    const key = `${producto || "sin-producto"}::${sabor || "sin-sabor"}`;
+    const key = `${producto || "sin-producto"}::${sabor || "sin-sabor"}::${productNotes || "sin-nota"}`;
     if (!grouped.has(key)) {
       grouped.set(key, {
         producto: producto || null,
         sabor: sabor || null,
         cantidad: cantidad || 0,
         precio_unitario: precioUnitario,
-        subtotal: subtotal
+        subtotal: subtotal,
+        product_notes: productNotes,
+        customizations: itemCustomizations
       });
       continue;
     }
@@ -1780,12 +1803,16 @@ function consolidarItemsPedido(items = []) {
     current.cantidad += cantidad || 0;
     current.precio_unitario = current.precio_unitario ?? precioUnitario;
     current.subtotal = (current.subtotal ?? 0) + (subtotal ?? 0);
+    current.customizations = mergeCustomizations(current.customizations, itemCustomizations);
+    current.product_notes = current.product_notes || productNotes || buildNotesFromCustomizations(current.customizations);
   }
 
   return Array.from(grouped.values()).map((item) => ({
     ...item,
     cantidad: item.cantidad || null,
-    subtotal: item.subtotal || null
+    subtotal: item.subtotal || null,
+    product_notes: item.product_notes || buildNotesFromCustomizations(item.customizations),
+    customizations: mergeCustomizations([], item.customizations)
   }));
 }
 
@@ -2116,7 +2143,9 @@ function esCoincidenciaConfiableParaLineaPedido(parsedLineItem, product) {
     return true;
   }
 
-  const requestedTokens = tokenizarCatalogo(parsedLineItem.productText, { keepGeneric: false })
+  const customizations = extractCustomizationsFromText(parsedLineItem.productText || "");
+  const baseProductText = stripCustomizationsFromText(parsedLineItem.productText || "", customizations) || parsedLineItem.productText;
+  const requestedTokens = tokenizarCatalogo(baseProductText, { keepGeneric: false })
     .filter((token) => !LIST_ORDER_NON_IDENTITY_TOKENS.has(token));
   if (!requestedTokens.length) {
     return true;
@@ -2190,9 +2219,11 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
   for (const segment of segments) {
     const parsedLineItem = parseListOrderLine(segment);
     const resolutionInput = parsedLineItem?.productText || segment;
-    const quickMatches = encontrarCoincidenciasCatalogo(resolutionInput, { minScore: 70, limit: 2 });
+    const segmentCustomizations = extractCustomizationsFromText(segment);
+    const baseResolutionInput = stripCustomizationsFromText(resolutionInput, segmentCustomizations) || resolutionInput;
+    const quickMatches = encontrarCoincidenciasCatalogo(baseResolutionInput, { minScore: 70, limit: 2 });
     const hasQuantity = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment));
-    const looksLikeProductQuery = esConsultaProductoProbable(resolutionInput);
+    const looksLikeProductQuery = esConsultaProductoProbable(baseResolutionInput);
 
     if (esSegmentoNoProducto(segment) && !quickMatches.length && !hasQuantity) {
       continue;
@@ -2202,48 +2233,57 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
       continue;
     }
 
-    const resolution = resolverProductoCatalogo(resolutionInput);
+    const directResolution = resolverProductoCatalogo(resolutionInput);
+    const usedBaseResolution = baseResolutionInput !== resolutionInput && directResolution.status === "not_found";
+    const resolution = usedBaseResolution ? resolverProductoCatalogo(baseResolutionInput) : directResolution;
+    const noteSourceText = usedBaseResolution ? segment : null;
+    const noteBaseQuery = usedBaseResolution ? baseResolutionInput : null;
+    const shouldApplySegmentCustomizations = segmentCustomizations.length > 0 && !productAlreadySatisfiesCustomizations(resolution.product, segmentCustomizations);
     if (resolution.status === "matched" && esCoincidenciaConfiableParaLineaPedido(parsedLineItem, resolution.product)) {
       logEvent("PRODUCT_MATCH_CONFIDENCE", {
-        input: resolutionInput,
+        input: usedBaseResolution ? baseResolutionInput : resolutionInput,
         status: resolution.status,
         confidence: resolution.confidence || 100,
         product: resolution.product?.nombre || null
       });
-      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 100, input: resolutionInput });
+      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 100, input: usedBaseResolution ? baseResolutionInput : resolutionInput });
       const cantidad = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
       const resolvedPrice = resolveCatalogPriceForCustomer(resolution.product, customerType);
       const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
 
-      items.push({
+      const resolvedItem = {
         producto: resolution.product.nombre,
         sabor: null,
         cantidad,
         precio_unitario: precioUnitario,
         subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
         price_source: resolvedPrice.priceSource
-      });
+      };
+      items.push(shouldApplySegmentCustomizations
+        ? applyProductCustomizations(resolvedItem, segmentCustomizations, { sourceText: noteSourceText || segment, baseQuery: noteBaseQuery || baseResolutionInput })
+        : resolvedItem);
       continue;
     }
 
     if (resolution.status === "ambiguous" || resolution.status === "suggested") {
       logEvent("PRODUCT_MATCH_CONFIDENCE", {
-        input: resolutionInput,
+        input: usedBaseResolution ? baseResolutionInput : resolutionInput,
         status: resolution.status,
         confidence: resolution.confidence || null,
         options: (resolution.matches || []).map((option) => option?.nombre).filter(Boolean)
       });
-      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 55, input: resolutionInput });
+      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: resolution.confidence || 55, input: usedBaseResolution ? baseResolutionInput : resolutionInput });
       ambiguities.push({
-        input: resolutionInput,
+        input: usedBaseResolution ? baseResolutionInput : resolutionInput,
         options: (resolution.matches || (resolution.product ? [resolution.product] : [])).slice(0, 3),
         soft: Boolean(resolution.soft || resolution.status === "suggested"),
-        confidence: resolution.confidence || null
+        confidence: resolution.confidence || null,
+        customizations: shouldApplySegmentCustomizations ? segmentCustomizations : []
       });
       continue;
     }
 
-    const localAliasResolution = resolverProductoAliasLocal(resolutionInput);
+    const localAliasResolution = resolverProductoAliasLocal(baseResolutionInput);
     if (localAliasResolution.status === "matched") {
       const cantidad = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
       const catalogProduct = findCatalogProductForCanonicalAlias(localAliasResolution.canonical);
@@ -2256,26 +2296,29 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
       const resolvedPrice = resolveCatalogPriceForCustomer(catalogProduct, customerType);
       const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
 
-      items.push({
+      const resolvedItem = {
         producto: catalogProduct.nombre,
         sabor: null,
         cantidad,
         precio_unitario: precioUnitario,
         subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
         price_source: resolvedPrice.priceSource
-      });
+      };
+      items.push(segmentCustomizations.length && !productAlreadySatisfiesCustomizations(catalogProduct, segmentCustomizations)
+        ? applyProductCustomizations(resolvedItem, segmentCustomizations, { sourceText: segment, baseQuery: baseResolutionInput })
+        : resolvedItem);
       continue;
     }
 
     if (hasQuantity || quickMatches.length || looksLikeProductQuery) {
       logEvent("PRODUCT_MATCH_CONFIDENCE", {
-        input: resolutionInput,
+        input: baseResolutionInput,
         status: "not_found",
         confidence: 0,
         options: quickMatches.map((entry) => entry.product?.nombre).filter(Boolean)
       });
-      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: 0, input: resolutionInput });
-      unmatched.push(resolutionInput);
+      logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: 0, input: baseResolutionInput });
+      unmatched.push(baseResolutionInput);
     }
   }
 
@@ -2285,7 +2328,11 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
       const candidateSegments = [...new Set(construirCandidatosProductoIA(aiItem).flatMap((candidate) => expandirSegmentoMultiProducto(candidate)).map((candidate) => limpiarTexto(candidate)).filter(Boolean))];
 
       for (const candidate of candidateSegments) {
-        const resolution = resolverProductoCatalogo(candidate);
+        const candidateCustomizations = extractCustomizationsFromText(candidate);
+        const baseCandidate = stripCustomizationsFromText(candidate, candidateCustomizations) || candidate;
+        const directResolution = resolverProductoCatalogo(candidate);
+        const usedBaseResolution = baseCandidate !== candidate && directResolution.status === "not_found";
+        const resolution = usedBaseResolution ? resolverProductoCatalogo(baseCandidate) : directResolution;
         if (resolution.status === "matched") {
           const cantidadDetectada = encontrarCantidadEnSegmento(normalizarTextoAnalisis(candidate));
           const cantidad = cantidadDetectada || (Number.isFinite(Number(aiItem?.cantidad)) && Number(aiItem.cantidad) > 0
@@ -2293,17 +2340,22 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
             : 1);
           const resolvedPrice = resolveCatalogPriceForCustomer(resolution.product, customerType);
           const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
-          const alreadyPresent = items.some((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(resolution.product.nombre));
+          const expectedNotes = usedBaseResolution ? buildNotesFromCustomizations(candidateCustomizations) : null;
+          const alreadyPresent = items.some((item) => normalizeCatalogText(item?.producto) === normalizeCatalogText(resolution.product.nombre)
+            && limpiarTexto(item?.product_notes ?? item?.productNotes) === limpiarTexto(expectedNotes));
 
           if (!alreadyPresent) {
-            items.push({
-              producto: resolution.product.nombre,
-              sabor: null,
-              cantidad,
-              precio_unitario: precioUnitario,
-              subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
-              price_source: resolvedPrice.priceSource
-            });
+          const resolvedItem = {
+            producto: resolution.product.nombre,
+            sabor: null,
+            cantidad,
+            precio_unitario: precioUnitario,
+            subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
+            price_source: resolvedPrice.priceSource
+          };
+            items.push(candidateCustomizations.length && !productAlreadySatisfiesCustomizations(resolution.product, candidateCustomizations)
+              ? applyProductCustomizations(resolvedItem, candidateCustomizations, { sourceText: candidate, baseQuery: baseCandidate })
+              : resolvedItem);
           }
 
           for (let index = unmatched.length - 1; index >= 0; index -= 1) {
@@ -2322,10 +2374,11 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
           const alreadyAmbiguous = ambiguities.some((entry) => normalizeCatalogText(entry?.input) === normalizeCatalogText(candidate));
           if (!ambiguityAlreadyCovered && !alreadyAmbiguous) {
             ambiguities.push({
-              input: candidate,
+              input: usedBaseResolution ? baseCandidate : candidate,
               options: resolutionOptions,
               soft: Boolean(resolution.soft || resolution.status === "suggested"),
-              confidence: resolution.confidence || null
+              confidence: resolution.confidence || null,
+              customizations: usedBaseResolution ? candidateCustomizations : []
             });
           }
           resolved = true;
@@ -2409,8 +2462,9 @@ function detectarIntencionPedido(texto) {
   const hasImplicitOrderReference = /\b(lo de siempre|lo mismo de ayer|lo mismo|de siempre|como siempre|lo otro|normal)\b/i.test(normalized);
   const hasSemanticPreferenceCue = /\b(pequeno|pequeño|grande|barato|barata|economico|económica|garrafa|litro)\b/i.test(normalized);
   const hasPureCatalogIntent = hasProductCue && normalized.split(" ").filter(Boolean).length <= 4;
+  const hasSpecialInstructionOrderCue = hasResolvableSpecialInstructionOrder(texto);
 
-  const confidence = hasProductCue && (hasPurchaseVerb || hasQuantity || hasImplicitOrderReference || hasSemanticPreferenceCue)
+  const confidence = hasProductCue && (hasPurchaseVerb || hasQuantity || hasImplicitOrderReference || hasSemanticPreferenceCue || hasSpecialInstructionOrderCue)
     ? 82
     : (hasProductCue ? 64 : 28);
   logEvent("ORDER_INTENT_CONFIDENCE", {
@@ -2418,7 +2472,8 @@ function detectarIntencionPedido(texto) {
     confidence,
     hasProductCue,
     hasPurchaseVerb,
-    hasQuantity
+    hasQuantity,
+    hasSpecialInstructionOrderCue
   });
   logConfidenceLevel({
     source: "default_order_detector",
@@ -2426,7 +2481,7 @@ function detectarIntencionPedido(texto) {
     confidence
   });
 
-  return (hasProductCue && (hasPurchaseVerb || hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference || hasSemanticPreferenceCue || hasPureCatalogIntent))
+  return (hasProductCue && (hasPurchaseVerb || hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference || hasSemanticPreferenceCue || hasPureCatalogIntent || hasSpecialInstructionOrderCue))
     || (hasPurchaseVerb && (hasQuantity || hasPaymentCue || hasAddressCue || hasImplicitOrderReference))
     || hasImplicitOrderReference;
 }
@@ -2546,7 +2601,7 @@ function buildPriceRequestProducts(texto, limit = 4, customerType = "public") {
 
   const catalog = getCatalogProductsCache();
   const preferences = extractSemanticCatalogPreferences(texto);
-  const familyMatches = catalog.filter((product) => preferences.families.has(product?.nombre_raiz_familia || product?.nombre_familia));
+  const familyMatches = catalog.filter((product) => Array.from(preferences.families || []).some((family) => matchesCatalogFamily(product, family)));
   const matches = (familyMatches.length ? familyMatches : encontrarCoincidenciasCatalogo(texto, { minScore: 60, limit }).map((entry) => entry.product))
     .filter(Boolean);
 
@@ -2797,7 +2852,14 @@ async function generarRespuestaConversacional({ telefono, sourceMessageId, routi
 function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { items: [] }) {
   const fechaEntregaDetectada = extraerFechaEntregaDesdeTexto(textoCliente);
   const fechaEntregaIA = sanitizeFechaEntregaIA(pedido?.fecha_entrega, textoCliente);
-  const customizations = mergeCustomizations(pedido?.customizations, extractOrderCustomizations(textoCliente));
+  const catalogItems = Array.isArray(catalogAnalysis?.items) ? catalogAnalysis.items : [];
+  const hasItemLevelCustomizations = Array.isArray(catalogAnalysis?.items)
+    && catalogAnalysis.items.some((item) => Array.isArray(item?.customizations) && item.customizations.length);
+  const extractedOrderCustomizations = hasItemLevelCustomizations ? [] : extractOrderCustomizations(textoCliente);
+  const orderLevelCustomizations = shouldKeepOrderLevelCustomizations(catalogItems, extractedOrderCustomizations)
+    ? extractedOrderCustomizations
+    : [];
+  const customizations = mergeCustomizations(pedido?.customizations, orderLevelCustomizations);
   const observacionesCustom = buildObservacionesFromCustomizations(customizations);
 
   return {
@@ -2805,7 +2867,7 @@ function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { ite
     customer_type_applied: normalizeCustomerType(pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public"),
     price_tier_applied: normalizeCustomerType(pedido?.price_tier_applied ?? pedido?.priceTierApplied ?? pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public"),
     cliente: pedido?.cliente || extraerClienteDesdeTexto(textoCliente),
-    productos: applyCustomizationsToProducts(Array.isArray(catalogAnalysis.items) ? catalogAnalysis.items : [], customizations),
+    productos: applyCustomizationsToProducts(catalogItems, customizations),
     direccion: pedido?.direccion || extraerDireccionDesdeTexto(textoCliente),
     fecha_entrega: fechaEntregaDetectada || fechaEntregaIA || null,
     metodo_pago: pedido?.metodo_pago || extraerMetodoPagoDesdeTexto(textoCliente),
@@ -3254,13 +3316,18 @@ function appendBusinessHoursNotice(text) {
 const CUSTOMIZATION_DEFINITIONS = [
   { key: "azucar", label: "Azúcar", value: "21%", pattern: /\b(\d{1,2})\s*%\s*(?:de\s*)?az[uú]car\b/i, text: (match) => `${match[1]}% de azúcar`, valueFromMatch: (match) => `${match[1]}%` },
   { key: "azucar", label: "Azúcar", value: "sin", pattern: /\bsin\s+az[uú]car\b/i, text: () => "sin azúcar" },
+  { key: "azucar", label: "Azúcar", value: "poca", pattern: /\b(?:con\s+)?poca\s+az[uú]car\b/i, text: () => "con poca azúcar" },
+  { key: "azucar", label: "Azúcar", value: "baja", pattern: /\bbajo\s+en\s+az[uú]car\b/i, text: () => "bajo en azúcar" },
   { key: "azucar", label: "Azúcar", value: "menos", pattern: /\bmenos\s+az[uú]car\b/i, text: () => "menos azúcar" },
   { key: "dulzor", label: "Dulzor", value: "más", pattern: /\bm[aá]s\s+dulce\b/i, text: () => "más dulce" },
   { key: "dulzor", label: "Dulzor", value: "poco", pattern: /\bpoco\s+dulce\b/i, text: () => "poco dulce" },
+  { key: "colorante", label: "Colorante", value: "poco", pattern: /\b(?:con\s+)?poco\s+colorante\b/i, text: () => "con poco colorante" },
   { key: "colorante", label: "Colorante", value: "poquito", pattern: /\bpoquito\s+colorante\b/i, text: () => "poquito colorante" },
   { key: "colorante", label: "Colorante", value: "sin", pattern: /\bsin\s+colorante\b/i, text: () => "sin colorante" },
+  { key: "base", label: "Base", value: "natural", pattern: /\bnatural\b/i, text: () => "natural" },
   { key: "fruta", label: "Fruta", value: "con", pattern: /\bcon\s+fruta\b/i, text: () => "con fruta" },
-  { key: "fruta", label: "Fruta", value: "sin", pattern: /\bsin\s+fruta\b/i, text: () => "sin fruta" }
+  { key: "fruta", label: "Fruta", value: "sin", pattern: /\bsin\s+fruta\b/i, text: () => "sin fruta" },
+  { key: "presentacion", label: "Presentación", value: "surtido", pattern: /\bsurtido\b/i, text: () => "surtido" }
 ];
 
 function mergeCustomizations(base = [], incoming = []) {
@@ -3277,6 +3344,10 @@ function mergeCustomizations(base = [], incoming = []) {
 }
 
 function extractOrderCustomizations(texto = "") {
+  return extractCustomizationsFromText(texto);
+}
+
+function extractCustomizationsFromText(texto = "") {
   const customizations = [];
   const source = String(texto || "");
 
@@ -3297,12 +3368,134 @@ function extractOrderCustomizations(texto = "") {
   return mergeCustomizations([], customizations);
 }
 
+function stripCustomizationsFromText(texto = "", customizations = []) {
+  let stripped = String(texto || "");
+
+  for (const customization of Array.isArray(customizations) ? customizations : []) {
+    const definition = CUSTOMIZATION_DEFINITIONS.find((entry) => entry.key === customization?.key && entry.value === customization?.value);
+    if (!definition) {
+      continue;
+    }
+
+    stripped = stripped.replace(definition.pattern, " ");
+  }
+
+  return limpiarTexto(stripped.replace(/\s+/g, " ").replace(/\b(con|sin|tambien|también|tambien un|también un)\b\s*$/i, "").trim()) || null;
+}
+
+function productAlreadySatisfiesCustomizations(product, customizations = []) {
+  if (!product || !Array.isArray(customizations) || !customizations.length) {
+    return false;
+  }
+
+  const haystack = [
+    product?.nombre,
+    product?.producto,
+    product?.product_name,
+    product?.nombre_canonico,
+    ...(Array.isArray(product?.aliases) ? product.aliases : [])
+  ].map((value) => normalizeCatalogText(value)).filter(Boolean).join(" ");
+
+  return customizations.every((customization) => {
+    const text = normalizeCatalogText(customization?.text);
+    if (text && haystack.includes(text)) {
+      return true;
+    }
+
+    if (customization?.key === "fruta" && customization?.value === "con") {
+      return haystack.includes("fruta");
+    }
+
+    if (customization?.key === "natural") {
+      return haystack.includes("natural");
+    }
+
+    if (customization?.key === "surtido") {
+      return haystack.includes("surtido");
+    }
+
+    return false;
+  });
+}
+
+function shouldKeepOrderLevelCustomizations(productos = [], customizations = []) {
+  if (!Array.isArray(customizations) || !customizations.length) {
+    return false;
+  }
+
+  if (!Array.isArray(productos) || !productos.length) {
+    return true;
+  }
+
+  return productos.some((item) => !productAlreadySatisfiesCustomizations(item, customizations));
+}
+
+function logSpecialInstructionDetected({ sourceText = null, baseQuery = null, customizations = [] } = {}) {
+  if (!Array.isArray(customizations) || !customizations.length) {
+    return;
+  }
+
+  logEvent("SPECIAL_INSTRUCTION_DETECTED", {
+    sourceText: limpiarTexto(sourceText) || null,
+    baseQuery: limpiarTexto(baseQuery) || null,
+    instructions: customizations.map((item) => item?.text || item?.value).filter(Boolean)
+  });
+}
+
+function applyProductCustomizations(item = {}, customizations = [], { sourceText = null, baseQuery = null } = {}) {
+  const mergedCustomizations = mergeCustomizations(item?.customizations, customizations);
+  if (!mergedCustomizations.length) {
+    return item;
+  }
+
+  logSpecialInstructionDetected({ sourceText, baseQuery, customizations: mergedCustomizations });
+  logEvent("PRODUCT_NOTE_APPLIED", {
+    product: item?.producto || null,
+    baseQuery: limpiarTexto(baseQuery) || null,
+    instructions: mergedCustomizations.map((entry) => entry?.text || entry?.value).filter(Boolean)
+  });
+
+  return {
+    ...item,
+    product_notes: buildNotesFromCustomizations(mergedCustomizations),
+    customizations: mergedCustomizations
+  };
+}
+
+function hasResolvableSpecialInstructionOrder(texto = "") {
+  const customizations = extractCustomizationsFromText(texto);
+  if (!customizations.length) {
+    return false;
+  }
+
+  const baseQuery = stripCustomizationsFromText(texto, customizations);
+  if (!baseQuery) {
+    return false;
+  }
+
+  const catalogResolution = resolverProductoCatalogo(baseQuery);
+  if (["matched", "ambiguous", "suggested"].includes(catalogResolution.status)) {
+    return true;
+  }
+
+  const aliasResolution = resolverProductoAliasLocal(baseQuery);
+  if (aliasResolution.status === "matched") {
+    return true;
+  }
+
+  if (encontrarCoincidenciasCatalogo(baseQuery, { minScore: 70, limit: 1 }).length) {
+    return true;
+  }
+
+  return Boolean(resolverProductoSemanticoPorPreferencias(baseQuery));
+}
+
 function buildObservacionesFromCustomizations(customizations = []) {
   if (!Array.isArray(customizations) || !customizations.length) {
     return null;
   }
 
-  return customizations.map((item) => `- ${item.label}: ${item.value}`).join("\n");
+  return customizations.map((item) => `- ${item.text || `${item.label}: ${item.value}`}`).join("\n");
 }
 
 function buildNotesFromCustomizations(customizations = []) {
@@ -3310,7 +3503,7 @@ function buildNotesFromCustomizations(customizations = []) {
     return null;
   }
 
-  return customizations.map((item) => `${item.label}: ${item.value}`).join(" | ");
+  return customizations.map((item) => item.text || `${item.label}: ${item.value}`).join(" | ");
 }
 
 function applyCustomizationsToProducts(productos = [], customizations = []) {
@@ -3319,6 +3512,14 @@ function applyCustomizationsToProducts(productos = [], customizations = []) {
   }
 
   return productos.map((item) => {
+    if (productAlreadySatisfiesCustomizations(item, customizations)) {
+      return {
+        ...item,
+        product_notes: item?.product_notes || null,
+        customizations: Array.isArray(item?.customizations) ? item.customizations : []
+      };
+    }
+
     const mergedCustomizations = mergeCustomizations(item?.customizations, customizations);
     return {
       ...item,
@@ -3610,7 +3811,7 @@ function shouldUseOpenAIForPedido(textoCliente, catalogAnalysis = { items: [] })
 
   const hasTemporalCue = /\b(hoy|manana|mañana|tarde|noche|am|pm|hora|horas|despues|después|antes)\b/.test(normalized)
     || /\b\d{1,2}(:\d{2})?\b/.test(textoCliente);
-  const hasObservationCue = /\b(sin azucar|sin azúcar|con hielo|sin hielo|nota|observacion|observación|por favor no|sin tapa)\b/.test(normalized);
+  const hasObservationCue = /\b(sin azucar|sin azúcar|poca azucar|poca azúcar|bajo en azucar|bajo en azúcar|sin colorante|poco colorante|con fruta|sin fruta|natural|surtido|con hielo|sin hielo|nota|observacion|observación|por favor no|sin tapa)\b/.test(normalized);
   const hasNameCue = /(?:soy|mi nombre es|habla)\s+/i.test(textoCliente);
   const quantityMatches = normalized.match(new RegExp(`\\b${QUANTITY_TOKEN_PATTERN}\\b`, "g")) || [];
   const hasMultipleItemCue = quantityMatches.length >= 2;
@@ -4878,6 +5079,7 @@ function obtenerAclaracionPendienteActiva(state, now = Date.now()) {
 
 function construirEstadoAclaracionProducto({ ambiguity, pedidoParcial }) {
   const createdAt = Date.now();
+  const ambiguityCustomizations = mergeCustomizations([], ambiguity?.customizations || []);
 
   return {
     phone: null,
@@ -4893,6 +5095,7 @@ function construirEstadoAclaracionProducto({ ambiguity, pedidoParcial }) {
     })),
     pedido_parcial: normalizarPedido(pedidoParcial || {}),
     cantidad: encontrarCantidadEnSegmento(normalizarTextoAnalisis(ambiguity?.input || "")) || 1,
+    customizations: ambiguityCustomizations,
     created_at: createdAt,
     expires_at: createdAt + PRODUCT_DISAMBIGUATION_TTL_MS
   };
@@ -5106,7 +5309,9 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
   const pedidoResuelto = agregarProductoAPedido(clarification.pedido_parcial || {}, {
     producto: selectedOption.nombre,
     cantidad: clarification.cantidad || 1,
-    precio_unitario: parseOptionalNumber(selectedOption.precio)
+    precio_unitario: parseOptionalNumber(selectedOption.precio),
+    product_notes: buildNotesFromCustomizations(clarification.customizations || []),
+    customizations: mergeCustomizations([], clarification.customizations || [])
   });
   if (!pedidoResuelto.cliente && state.customerName) {
     pedidoResuelto.cliente = state.customerName;
@@ -5573,7 +5778,10 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     hasDraftContext,
     hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used)
   });
-  const shouldForceOrderFlow = contextualizedMessage.used || esReferenciaAmbigua(mensaje, state) || gptIntent.intent === "add_item";
+  const shouldForceOrderFlow = contextualizedMessage.used
+    || esReferenciaAmbigua(mensaje, state)
+    || gptIntent.intent === "add_item"
+    || hasResolvableSpecialInstructionOrder(mensaje);
   const effectiveRoutingIntent = shouldForceOrderFlow && ["general_chat", "catalog_request", "price_request"].includes(routingIntent)
     ? "order_missing_data"
     : routingIntent;

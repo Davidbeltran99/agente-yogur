@@ -579,7 +579,8 @@ function hydrateOrders(rows = []) {
     const resumenItems = order.items.map((item) => {
       const cantidad = item.cantidad ?? "?";
       const partes = [String(cantidad), item.producto || "producto", item.sabor || null].filter(Boolean);
-      return partes.join(" ");
+      const notes = normalizeText(item.productNotes);
+      return `${partes.join(" ")}${notes ? ` (Nota: ${notes})` : ""}`;
     }).filter(Boolean);
     const productos = [...new Set(order.items.map((item) => item.producto).filter(Boolean))];
     const sabores = order.items.map((item) => item.sabor).filter(Boolean);

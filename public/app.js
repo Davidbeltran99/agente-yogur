@@ -251,7 +251,11 @@ function formatOrderItemsSummary(order) {
   if (order?.resumenItems) return order.resumenItems;
   if (!Array.isArray(order?.items) || !order.items.length) return "-";
   return order.items
-    .map((item) => [item.cantidad ?? "?", item.producto || "producto", item.sabor || null].filter(Boolean).join(" "))
+    .map((item) => {
+      const summary = [item.cantidad ?? "?", item.producto || "producto", item.sabor || null].filter(Boolean).join(" ");
+      const notes = item.productNotes || item.product_notes || null;
+      return `${summary}${notes ? ` (Nota: ${notes})` : ""}`;
+    })
     .join(", ");
 }
 
@@ -1232,13 +1236,13 @@ function renderDetail() {
   const itemsHtml = (order.items || []).length
     ? order.items.map((item) => {
         const itemCustomizations = formatCustomizationList(item.customizations);
-        const itemNotes = [item.productNotes || item.product_notes || null, ...itemCustomizations].filter(Boolean).join(" · ");
+        const itemNotes = [item.productNotes || item.product_notes || null, ...itemCustomizations].filter(Boolean);
         return `
           <div class="item-row premium-item-row detail-product-row">
             <div>
               <strong>• ${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))} — ${escapeHtml(formatCurrency(item.subtotal || 0))}</strong>
               <div class="helper-text">Unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))} · Fuente: ${escapeHtml(formatCustomerTypeLabel(item.priceSource || item.price_source))}</div>
-              ${itemNotes ? `<div class="helper-text">${escapeHtml(itemNotes)}</div>` : ""}
+              ${itemNotes.map((note) => `<div class="helper-text">${escapeHtml(String(note).startsWith("Nota:") ? note : `Nota: ${note}`)}</div>`).join("")}
             </div>
           </div>
         `;

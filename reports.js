@@ -92,6 +92,12 @@ async function generateDailyClosurePdf({ closureId, summary }) {
         doc.text(`Tipo de precio: ${safeText(order.customerTypeLabel || order.priceTierLabel || "Público")}`);
         doc.text(`Pago: ${safeText(order.metodoPago || "Sin definir")}`);
         doc.text(`Detalle: ${safeText(order.resumenItems || "Sin detalle")}`);
+        (Array.isArray(order.items) ? order.items : []).forEach((item) => {
+          if (item?.productNotes) {
+            doc.text(`• ${safeText(`${item.cantidad || 1} ${item.producto || "Producto"}`)}`);
+            doc.text(`  Nota: ${safeText(item.productNotes)}`);
+          }
+        });
         const customizations = formatCustomizationLines(order.customizations);
         if (customizations.length) {
           doc.text(`Observaciones: ${safeText(customizations.join(" | "))}`);
