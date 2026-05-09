@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { procesarMensaje, generarRespuestaAbi, transcribirAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
+const { inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -75,6 +75,7 @@ const {
   getConversationState,
   appendRecentHistory
 } = require("./conversationStateManager");
+const { buildConversationOrchestratorContext } = require("./conversationOrchestrator");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -2370,8 +2371,11 @@ function buildCatalogFeaturedProducts(customerType = "public") {
   return specs.map((spec) => {
     const matches = catalog.filter((product) => {
       const canonical = normalizeCanonicalCatalogName(product?.nombre_canonico || product?.nombre);
+      const normalizedName = normalizeCanonicalCatalogName(product?.nombre);
       const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia || product?.nombre);
-      return spec.exactName ? canonical === spec.exactName : family === spec.familyName;
+      return spec.exactName
+        ? canonical === spec.exactName || normalizedName.includes(spec.exactName)
+        : family === spec.familyName;
     });
     if (!matches.length) {
       return null;
@@ -2385,6 +2389,7 @@ function buildCatalogFeaturedProducts(customerType = "public") {
     return {
       emoji: spec.emoji,
       label: spec.label,
+      catalogName: matches[0]?.nombre || spec.label,
       price: prices.length ? prices[0] : null,
       pricePrefix: spec.pricePrefix || null
     };
@@ -2406,15 +2411,192 @@ function buildPriceRequestProducts(texto, limit = 4, customerType = "public") {
   }));
 }
 
-async function generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context }) {
-  if (["order_request", "order_missing_data", "ambiguous_product"].includes(routingIntent)) {
-    logEvent("RESPONSE_SOURCE", { telefono, sourceMessageId, intent: routingIntent, source: "template_locked" });
+function buildRelevantCatalogForOrchestrator(texto, state, customerType = "public", limit = 12) {
+  const catalogCache = getCatalogProductsCache();
+  const matches = encontrarCoincidenciasCatalogo(texto, { minScore: 55, limit: Math.min(limit, 8) }).map((entry) => ({
+    nombre: entry.product?.nombre,
+    nombre_familia: entry.product?.nombre_familia || null,
+    presentacion: entry.product?.presentacion || null,
+    precio: resolveCatalogPriceForCustomer(entry.product, customerType).unitPrice,
+    customerType,
+    score: entry.confidence || entry.score || 0,
+    source: "match"
+  }));
+  const suggested = (obtenerSuggestionMemoryActiva(state)?.options || [])
+    .map((option) => catalogCache.find((product) => normalizarTextoAnalisis(product?.nombre) === normalizarTextoAnalisis(option?.nombre || option?.label || option)))
+    .filter(Boolean)
+    .map((product) => ({
+      nombre: product.nombre,
+      nombre_familia: product.nombre_familia || null,
+      presentacion: product.presentacion || null,
+      precio: resolveCatalogPriceForCustomer(product, customerType).unitPrice,
+      customerType,
+      score: 0,
+      source: "suggestion"
+    }));
+  const contextualProducts = [
+    ...(Array.isArray(state?.pendingPedido?.productos) ? state.pendingPedido.productos : []),
+    ...(Array.isArray(state?.lastResolvedOrder?.productos) ? state.lastResolvedOrder.productos : [])
+  ]
+    .map((item) => catalogCache.find((product) => normalizarTextoAnalisis(product?.nombre) === normalizarTextoAnalisis(item?.producto)))
+    .filter(Boolean)
+    .map((product) => ({
+      nombre: product.nombre,
+      nombre_familia: product.nombre_familia || null,
+      presentacion: product.presentacion || null,
+      precio: resolveCatalogPriceForCustomer(product, customerType).unitPrice,
+      customerType,
+      score: 0,
+      source: "context"
+    }));
+
+  const deduped = [];
+  const seen = new Set();
+  for (const product of [...contextualProducts, ...suggested, ...matches]) {
+    const key = normalizarTextoAnalisis(product?.nombre);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(product);
+    if (deduped.length >= limit) {
+      break;
+    }
+  }
+
+  return deduped;
+}
+
+function buildRecentMessagesForOrchestrator(telefono, limit = 5) {
+  return listMessagesByPhone(telefono)
+    .slice(-limit)
+    .map((message) => ({
+      role: message.direction === "out" ? "assistant" : "user",
+      text: message.messageText,
+      intent: null,
+      messageType: message.messageType,
+      createdAt: message.createdAt
+    }));
+}
+
+function mapGptIntentToRoutingIntent(intent, { hasDraftContext = false, hasActiveContext = false } = {}) {
+  switch (intent) {
+    case "order_request":
+      return hasDraftContext ? "order_missing_data" : "order_request";
+    case "add_item":
+      return (hasDraftContext || hasActiveContext) ? "order_missing_data" : "order_request";
+    case "remove_item":
+      return "remove_item";
+    case "closing":
+      return "closing";
+    case "admin_query":
+      return "admin_query";
+    case "payment":
+      return "payment_method";
+    case "address":
+      return "address_provided";
+    case "catalog_request":
+      return "catalog_request";
+    default:
+      return "general_chat";
+  }
+}
+
+function resolveRoutingIntentWithGpt({ heuristicIntent, gptIntent, hasDraftContext = false, hasActiveContext = false }) {
+  const protectedIntents = new Set(["greeting", "identity", "provide_name", "human_help", "complaint_confusion", "reorder_memory", "price_request"]);
+  if (protectedIntents.has(heuristicIntent)) {
+    return heuristicIntent;
+  }
+
+  if (gptIntent?.intent && Number(gptIntent.confidence || 0) >= 0.58) {
+    return mapGptIntentToRoutingIntent(gptIntent.intent, { hasDraftContext, hasActiveContext });
+  }
+
+  return heuristicIntent;
+}
+
+function sanitizeAiResponseAgainstFallback(response, fallback, { routingIntent, context } = {}) {
+  const text = limpiarTexto(response);
+  if (!text) {
     return fallback;
   }
 
+  if (/\b(descuent|rebaja|gratis|obsequio)\b/i.test(text)) {
+    return fallback;
+  }
+
+  if (["order_request", "order_missing_data", "ambiguous_product", "admin_query", "payment_method", "address_provided"].includes(routingIntent)) {
+    const confirmedProducts = Array.isArray(context?.validated?.confirmedProducts)
+      ? context.validated.confirmedProducts.map((item) => normalizarTextoAnalisis(item?.name || item?.producto || "")).filter(Boolean)
+      : [];
+    if (confirmedProducts.length && !confirmedProducts.some((name) => normalizarTextoAnalisis(text).includes(name))) {
+      return fallback;
+    }
+  }
+
+  return text;
+}
+
+function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido = null, evaluacion = null, adminSummary = null, fallback = null, customerName = null, userMessage = null, availableProducts = [], catalogUrl = null, activeIntent = null }) {
+  const confirmedProducts = Array.isArray(pedido?.productos)
+    ? pedido.productos.map((item) => ({
+        name: item.producto,
+        quantity: item.cantidad || 1,
+        unitPrice: item.precio_unitario || 0,
+        subtotal: item.subtotal || 0,
+        notes: item.product_notes || null,
+        customizations: item.customizations || []
+      }))
+    : [];
+
+  return {
+    orchestrator: orchestratorContext,
+    intent: activeIntent,
+    gptIntent,
+    customerName,
+    userMessage,
+    fallback,
+    validated: {
+      confirmedProducts,
+      ambiguousProducts: evaluacion?.ambiguousProducts || [],
+      notFoundProducts: evaluacion?.unmatchedProducts || [],
+      missingData: evaluacion?.faltantes || [],
+      total: pedido?.total ?? null,
+      address: pedido?.direccion || null,
+      paymentMethod: pedido?.metodo_pago || null,
+      customerType: pedido?.customer_type_applied || pedido?.price_tier_applied || null,
+      notes: pedido?.notes || null,
+      observations: pedido?.observaciones || null,
+      receipt: pedido?.receipt || null,
+      adminSummary
+    },
+    availableProducts,
+    catalogUrl,
+    tone: "Abi cálida, natural, comercial, corta y estilo WhatsApp"
+  };
+}
+
+async function generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context }) {
+  logEvent("TOKEN_USAGE_ESTIMATE", {
+    telefono,
+    sourceMessageId,
+    stage: "final_response_context",
+    estimatedTokens: Math.max(1, Math.ceil(JSON.stringify({ intent: routingIntent, fallback, context }).length / 4))
+  });
+
   try {
-    const respuesta = await generarRespuestaAbi({ intent: routingIntent, ...context, fallback });
+    const respuesta = sanitizeAiResponseAgainstFallback(
+      await generarRespuestaAbi({ intent: routingIntent, ...context, fallback }),
+      fallback,
+      { routingIntent, context }
+    );
     if (respuesta) {
+      logEvent("GPT_FINAL_RESPONSE_USED", {
+        telefono,
+        sourceMessageId,
+        intent: routingIntent,
+        usedFallback: respuesta === fallback
+      });
       logEvent("RESPONSE_SOURCE", { telefono, sourceMessageId, intent: routingIntent, source: "ai" });
       return respuesta;
     }
@@ -2422,6 +2604,12 @@ async function generarRespuestaConversacional({ telefono, sourceMessageId, routi
     // fallback below
   }
 
+  logEvent("GPT_FINAL_RESPONSE_USED", {
+    telefono,
+    sourceMessageId,
+    intent: routingIntent,
+    usedFallback: true
+  });
   logEvent("RESPONSE_SOURCE", { telefono, sourceMessageId, intent: routingIntent, source: "template" });
   return fallback;
 }
@@ -3322,6 +3510,17 @@ async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
     priceValidation: evaluacion.priceValidation,
     total: pedido.total,
     items: Array.isArray(pedido.productos) ? pedido.productos.length : 0
+  });
+
+  logEvent("BACKEND_VALIDATION_RESULT", {
+    telefono: opciones.telefono || null,
+    sourceMessageId: opciones.sourceMessageId || null,
+    customerType: opciones.customerType || "public",
+    esValido: evaluacion.esValido,
+    faltantes: evaluacion.faltantes,
+    catalogStatus: evaluacion.catalogStatus,
+    total: pedido.total,
+    confirmedProducts: Array.isArray(pedido.productos) ? pedido.productos.map((item) => item?.producto).filter(Boolean) : []
   });
 
   logEvent("total_calculado", {
@@ -4571,17 +4770,13 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const hasDraftContext = tieneBorradorPedido(state);
   const hasSuggestionContext = Boolean(obtenerSuggestionMemoryActiva(state));
   const hasActiveOrderContext = Boolean(obtenerActiveOrderContext(state));
-  const routingIntent = detectarIntencionConversacional(mensaje, {
+  const heuristicIntent = detectarIntencionConversacional(mensaje, {
     hasDraftContext,
     hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used),
     customerName: state.customerName || null,
     awaitingName: state.awaitingName || false,
     state
   });
-  const hasOrderIntent = routingIntent === "order_request" || routingIntent === "order_missing_data";
-  const explicitName = routingIntent === "provide_name"
-    ? (extraerNombreExplícito(mensaje) || ((state.awaitingName && !state.customerName && esNombreDirectoValido(mensaje)) ? capitalizarNombre(mensaje) : null))
-    : null;
 
   const inboundMessage = persistirMensaje({
     phone: telefono,
@@ -4592,12 +4787,114 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     mediaId,
     whatsappMessageId: sourceMessageId
   });
-  appendRecentHistory(state, { role: "user", intent: routingIntent, text: mensaje });
 
-  if (isKnownAdminCommand(mensaje)) {
+  const orchestratorPayload = buildConversationOrchestratorContext({
+    currentMessage: mensaje,
+    messageType,
+    transcription,
+    customerName: state.customerName || customerProfile.customerName || null,
+    phone: telefono,
+    customerType: customerProfile.customerType,
+    activeOrder: activeOrderBefore,
+    pendingOrder: state.pendingPedido,
+    lastResolvedOrder: state.lastResolvedOrder,
+    recentSuggestions: obtenerSuggestionMemoryActiva(state)?.options || [],
+    relevantCatalog: buildRelevantCatalogForOrchestrator(contextualizedMessage.text || mensaje, state, customerProfile.customerType),
+    recentMessages: buildRecentMessagesForOrchestrator(telefono, 5),
+    state,
+    address: state.pendingPedido?.direccion || activeOrderBefore?.direccion || null,
+    paymentMethod: state.pendingPedido?.metodo_pago || state.lastPaymentMethod || activeOrderBefore?.metodoPago || null,
+    notes: state.pendingPedido?.notes || activeOrderBefore?.notes || null,
+    customizations: state.pendingPedido?.customizations || activeOrderBefore?.customizations || [],
+    businessHours: getBusinessHoursContext(),
+    isAdmin: isAdminWhatsAppNumber(telefono),
+    adminCommandAuthorized: isKnownAdminCommand(mensaje) && isAdminWhatsAppNumber(telefono)
+  });
+
+  logEvent("ORCHESTRATOR_CONTEXT_READY", {
+    telefono,
+    sourceMessageId,
+    customerType: customerProfile.customerType,
+    relevantCatalog: orchestratorPayload.context.relevantCatalog.length,
+    recentMessages: orchestratorPayload.context.recentMessages.length,
+    hasPendingOrder: Boolean(orchestratorPayload.context.pendingOrder),
+    hasActiveOrder: Boolean(orchestratorPayload.context.activeOrder)
+  });
+  logEvent("TOKEN_USAGE_ESTIMATE", {
+    telefono,
+    sourceMessageId,
+    stage: "orchestrator_context",
+    estimatedTokens: orchestratorPayload.tokenEstimate
+  });
+
+  let gptIntent = {
+    intent: "general",
+    confidence: 0,
+    products_mentioned: [],
+    requested_changes: [],
+    missing_data: [],
+    suggested_response_goal: ""
+  };
+
+  try {
+    gptIntent = await inferConversationIntent(orchestratorPayload.context);
+  } catch (error) {
+    logEvent("MODEL_ERROR", {
+      model: OPENAI_MODEL,
+      error: error.message,
+      fallback: "heuristic_intent"
+    }, "warn");
+  }
+
+  const routingIntent = resolveRoutingIntentWithGpt({
+    heuristicIntent,
+    gptIntent,
+    hasDraftContext,
+    hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used)
+  });
+  const shouldForceOrderFlow = contextualizedMessage.used || esReferenciaAmbigua(mensaje, state) || gptIntent.intent === "add_item";
+  const effectiveRoutingIntent = shouldForceOrderFlow && ["general_chat", "catalog_request", "price_request"].includes(routingIntent)
+    ? "order_missing_data"
+    : routingIntent;
+  const hasOrderIntent = effectiveRoutingIntent === "order_request" || effectiveRoutingIntent === "order_missing_data";
+  const explicitName = effectiveRoutingIntent === "provide_name"
+    ? (extraerNombreExplícito(mensaje) || ((state.awaitingName && !state.customerName && esNombreDirectoValido(mensaje)) ? capitalizarNombre(mensaje) : null))
+    : null;
+
+  logEvent("GPT_INTENT_RESULT", {
+    telefono,
+    sourceMessageId,
+    heuristicIntent,
+    resolvedIntent: effectiveRoutingIntent,
+    gptIntent: gptIntent.intent,
+    confidence: gptIntent.confidence,
+    productsMentioned: gptIntent.products_mentioned,
+    requestedChanges: gptIntent.requested_changes,
+    missingData: gptIntent.missing_data
+  });
+
+  const routingIntentFinal = effectiveRoutingIntent;
+
+  appendRecentHistory(state, { role: "user", intent: routingIntentFinal, text: mensaje });
+
+  if (routingIntentFinal === "admin_query" || isKnownAdminCommand(mensaje)) {
     const adminCommand = buildAdminWhatsappResponse(mensaje, telefono);
     const respuesta = adminCommand.handled
-      ? adminCommand.response
+      ? await generarRespuestaConversacional({
+          telefono,
+          sourceMessageId,
+          routingIntent: "admin_query",
+          fallback: adminCommand.response,
+          context: buildValidatedResponseContext({
+            orchestratorContext: orchestratorPayload.context,
+            gptIntent,
+            fallback: adminCommand.response,
+            customerName: state.customerName || null,
+            userMessage: mensaje,
+            adminSummary: { rawResponse: adminCommand.response },
+            activeIntent: "admin_query"
+          })
+        })
       : "Este comando no está disponible para este número.";
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return {
@@ -4624,7 +4921,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   logEvent("INTENT_DETECTED", {
     telefono,
     sourceMessageId,
-    intent: routingIntent,
+    intent: routingIntentFinal,
     contextApplied: contextualizedMessage.used || false,
     contextReason: contextualizedMessage.reason || null,
     explicitName: explicitName || null,
@@ -4634,7 +4931,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   logEvent("CONVERSATION_STATE", {
     telefono,
-    intent: routingIntent,
+    intent: routingIntentFinal,
     hasDraftContext,
     hasSuggestionContext,
     hasActiveOrderContext,
@@ -4644,7 +4941,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   logMultiTurnState(state, {
     telefono,
-    intent: routingIntent,
+    intent: routingIntentFinal,
     hasDraftContext,
     hasSuggestionContext,
     hasActiveOrderContext,
@@ -4664,95 +4961,167 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     return aclaracionResuelta;
   }
 
-  if (routingIntent === "greeting") {
-    state.lastIntent = routingIntent;
+  if (routingIntentFinal === "greeting") {
+    state.lastIntent = routingIntentFinal;
     state.awaitingName = !state.customerName;
-    actualizarActiveOrderContext(state, { intent: routingIntent });
+    actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null, isDistributor: customerProfile.isDistributor });
     const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "identity") {
-    state.lastIntent = routingIntent;
-    actualizarActiveOrderContext(state, { intent: routingIntent });
+  if (routingIntentFinal === "identity") {
+    state.lastIntent = routingIntentFinal;
+    actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const fallback = construirRespuestaIdentidad();
-    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { userMessage: mensaje } });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        activeIntent: routingIntentFinal
+      })
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "closing") {
+  if (routingIntentFinal === "closing") {
     state.pendingPedido = null;
-    state.lastIntent = routingIntent;
+    state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
     limpiarAclaracionPendiente(state);
     limpiarSuggestionMemory(state);
-    actualizarActiveOrderContext(state, { intent: routingIntent });
+    actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const respuesta = construirRespuestaDespedida({ customerName: state.customerName || null });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "provide_name" && explicitName) {
+  if (routingIntentFinal === "provide_name" && explicitName) {
     state.customerName = explicitName;
     state.customerType = "public";
     state.awaitingName = false;
-    state.lastIntent = routingIntent;
-    actualizarActiveOrderContext(state, { intent: routingIntent });
+    state.lastIntent = routingIntentFinal;
+    actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts(customerProfile.customerType), priceLabel: customerProfile.priceLabel, isDistributor: customerProfile.isDistributor });
     const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "human_help") {
-    state.lastIntent = routingIntent;
+  if (routingIntentFinal === "human_help") {
+    state.lastIntent = routingIntentFinal;
     const fallback = construirRespuestaAyudaHumana();
-    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        activeIntent: routingIntentFinal
+      })
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "complaint_confusion") {
-    state.lastIntent = routingIntent;
+  if (routingIntentFinal === "complaint_confusion") {
+    state.lastIntent = routingIntentFinal;
     const pedidoActual = construirPedidoDesdeEstado(state);
     const fallback = construirRespuestaCorreccion({ pedido: pedidoActual });
-    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        pedido: pedidoActual,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        activeIntent: routingIntentFinal
+      })
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: pedidoActual, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: pedidoActual, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "reorder_memory") {
+  if (routingIntentFinal === "reorder_memory") {
     const lastOrder = buscarUltimoPedidoCliente(telefono);
     if (lastOrder?.items?.length) {
       const pedidoRecordado = construirPedidoDesdeOrder(lastOrder);
       state.pendingPedido = pedidoRecordado;
       actualizarMemoriaConversacional(state, { pedido: pedidoRecordado, evaluacion: evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] }), intent: "order_missing_data" });
-      const fallback = construirRespuestaPedido(pedidoRecordado, evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] }), { availableProducts: buildCatalogShortList(5) });
-      const respuesta = await responderAlCliente({ telefono, respuesta: fallback, simulated, orderId: null });
-      return { pedido: pedidoRecordado, evaluacion: evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] }), order: null, inboundMessage, respuesta: fallback, delivery: respuesta, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+      const evaluacionRecordada = evaluarPedido(pedidoRecordado, { ambiguities: [], unmatched: [] });
+      const fallback = construirRespuestaPedido(pedidoRecordado, evaluacionRecordada, { availableProducts: buildCatalogShortList(5) });
+      const respuesta = await generarRespuestaConversacional({
+        telefono,
+        sourceMessageId,
+        routingIntent: "order_missing_data",
+        fallback,
+        context: buildValidatedResponseContext({
+          orchestratorContext: orchestratorPayload.context,
+          gptIntent,
+          pedido: pedidoRecordado,
+          evaluacion: evaluacionRecordada,
+          fallback,
+          customerName: state.customerName || null,
+          userMessage: mensaje,
+          availableProducts: buildCatalogShortList(5),
+          catalogUrl: CATALOG_URL,
+          activeIntent: "order_missing_data"
+        })
+      });
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+      return { pedido: pedidoRecordado, evaluacion: evaluacionRecordada, order: null, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
     }
 
     const fallback = "No veo un pedido reciente listo para repetir. Escríbeme qué quieres y te lo armo 😊";
-    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        activeIntent: routingIntentFinal
+      })
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (["payment_method", "address_provided", "remove_item", "modify_quantity"].includes(routingIntent)) {
+  if (["payment_method", "address_provided", "remove_item", "modify_quantity"].includes(routingIntentFinal)) {
     let pedidoActual = {
       ...construirPedidoDesdeEstado(state),
       customer_type_applied: customerProfile.customerType,
       price_tier_applied: customerProfile.customerType
     };
 
-    if (routingIntent === "payment_method") {
+    if (routingIntentFinal === "payment_method") {
       pedidoActual = calcularTotalesPedido({ ...pedidoActual, metodo_pago: extraerMetodoPagoDesdeTexto(mensaje) || pedidoActual.metodo_pago || null });
     }
 
-    if (routingIntent === "address_provided") {
+    if (routingIntentFinal === "address_provided") {
       pedidoActual = calcularTotalesPedido({
         ...pedidoActual,
         direccion: extraerDireccionDesdeTexto(mensaje, {
@@ -4761,11 +5130,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       });
     }
 
-    if (routingIntent === "remove_item") {
+    if (routingIntentFinal === "remove_item") {
       pedidoActual = quitarProductoDePedido(pedidoActual, mensaje, state).pedido;
     }
 
-    if (routingIntent === "modify_quantity") {
+    if (routingIntentFinal === "modify_quantity") {
       pedidoActual = actualizarCantidadPedido(pedidoActual, mensaje, state).pedido;
     }
 
@@ -4773,7 +5142,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     const evaluacionContextual = evaluarPedido(pedidoActual, { ambiguities: [], unmatched: [] });
     actualizarMemoriaConversacional(state, { pedido: pedidoActual, evaluacion: evaluacionContextual, intent: "order_missing_data" });
 
-    if (evaluacionContextual.esValido && ["payment_method", "address_provided"].includes(routingIntent)) {
+    if (evaluacionContextual.esValido && ["payment_method", "address_provided"].includes(routingIntentFinal)) {
       const persisted = await persistirPedidoFinal({
         pedido: pedidoActual,
         telefono,
@@ -4783,36 +5152,87 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       state.pendingPedido = null;
       actualizarMemoriaConversacional(state, { pedido: pedidoActual, evaluacion: evaluacionContextual, intent: "order_request" });
       const fallback = construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
-      const delivery = await responderAlCliente({ telefono, respuesta: fallback, simulated, orderId: persisted.order?.id || null });
-      return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: persisted.order, inboundMessage, respuesta: fallback, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "order_request" };
+      const respuesta = await generarRespuestaConversacional({
+        telefono,
+        sourceMessageId,
+        routingIntent: "order_request",
+        fallback,
+        context: buildValidatedResponseContext({
+          orchestratorContext: orchestratorPayload.context,
+          gptIntent,
+          pedido: pedidoActual,
+          evaluacion: evaluacionContextual,
+          fallback,
+          customerName: state.customerName || null,
+          userMessage: mensaje,
+          availableProducts: buildCatalogShortList(5),
+          catalogUrl: CATALOG_URL,
+          activeIntent: "order_request"
+        })
+      });
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: persisted.order?.id || null });
+      return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: persisted.order, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "order_request" };
     }
 
     const fallback = construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
-    const delivery = await responderAlCliente({ telefono, respuesta: fallback, simulated, orderId: null });
-    return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: null, inboundMessage, respuesta: fallback, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+      const respuesta = await generarRespuestaConversacional({
+        telefono,
+        sourceMessageId,
+        routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        pedido: pedidoActual,
+        evaluacion: evaluacionContextual,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        availableProducts: buildCatalogShortList(5),
+        catalogUrl: CATALOG_URL,
+          activeIntent: routingIntentFinal
+        })
+      });
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: null, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "catalog_request") {
-    state.lastIntent = routingIntent;
+  if (routingIntentFinal === "catalog_request") {
+    state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
     const pricingContext = buildCatalogPricingContext(customerProfile.customerType);
     const featuredCatalog = buildCatalogFeaturedProducts(customerProfile.customerType);
-    guardarSuggestionMemory(state, featuredCatalog.map((product) => ({ nombre: product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
-    actualizarActiveOrderContext(state, { intent: routingIntent });
+    guardarSuggestionMemory(state, featuredCatalog.map((product) => ({ nombre: product?.catalogName || product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
+    actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const fallback = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts: featuredCatalog, priceLabel: pricingContext.priceLabel, isDistributor: pricingContext.isDistributor });
-    const respuesta = fallback;
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        availableProducts: featuredCatalog,
+        catalogUrl: CATALOG_URL,
+        activeIntent: routingIntentFinal
+      })
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "price_request") {
-    state.lastIntent = routingIntent;
+  if (routingIntentFinal === "price_request") {
+    state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
     const pricingContext = buildCatalogPricingContext(customerProfile.customerType);
     const featuredProducts = buildPriceRequestProducts(contextualizedMessage.text || mensaje, 4, customerProfile.customerType);
     const fallbackProducts = featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts(customerProfile.customerType);
     guardarSuggestionMemory(state, fallbackProducts.map((product) => ({ nombre: product.label || product })), { type: "price_suggestion", reason: "price_request" });
-    actualizarActiveOrderContext(state, { intent: routingIntent });
+    actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const queryLabel = limpiarTextoProductoSolicitado(contextualizedMessage.text || mensaje) || "ese producto";
     const fallback = construirRespuestaPreciosInformativo({
       customerName: state.customerName || null,
@@ -4821,13 +5241,28 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       priceLabel: pricingContext.priceLabel,
       isDistributor: pricingContext.isDistributor
     });
-    const respuesta = fallback;
+    const respuesta = await generarRespuestaConversacional({
+      telefono,
+      sourceMessageId,
+      routingIntent: routingIntentFinal,
+      fallback,
+      context: buildValidatedResponseContext({
+        orchestratorContext: orchestratorPayload.context,
+        gptIntent,
+        fallback,
+        customerName: state.customerName || null,
+        userMessage: mensaje,
+        availableProducts: fallbackProducts,
+        catalogUrl: CATALOG_URL,
+        activeIntent: routingIntentFinal
+      })
+    });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
-  if (routingIntent === "general_chat") {
-    state.lastIntent = routingIntent;
+  if (routingIntentFinal === "general_chat" && !(contextualizedMessage.used || ["add_item", "order_request"].includes(gptIntent.intent))) {
+    state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
     const activeContext = obtenerActiveOrderContext(state);
     const fallback = activeContext?.products?.length
@@ -4848,10 +5283,26 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
         }, { availableProducts: buildCatalogShortList(5) })
       : construirRespuestaConfirmacion({ hasDraftContext, isDistributor: customerProfile.isDistributor });
     const respuesta = activeContext?.products?.length
-      ? await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } })
+      ? await generarRespuestaConversacional({
+          telefono,
+          sourceMessageId,
+          routingIntent: routingIntentFinal,
+          fallback,
+          context: buildValidatedResponseContext({
+            orchestratorContext: orchestratorPayload.context,
+            gptIntent,
+            pedido: state.pendingPedido,
+            fallback,
+            customerName: state.customerName || null,
+            userMessage: mensaje,
+            availableProducts: buildCatalogShortList(5),
+            catalogUrl: CATALOG_URL,
+            activeIntent: routingIntentFinal
+          })
+        })
       : fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
+    return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
 
   const resultadoActual = await procesarPedidoDesdeTexto(contextualizedMessage.text || mensaje, {
@@ -4862,8 +5313,13 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     customerType: customerProfile.customerType
   });
 
-  const pedidoCombinado = combinarPedidoParcialConOpciones(state.pendingPedido || { cliente: state.customerName || null, customer_type_applied: customerProfile.customerType, price_tier_applied: customerProfile.customerType }, resultadoActual.pedido || {}, {
-    appendProducts: Boolean(contextualizedMessage.appendProducts)
+  const basePedido = state.pendingPedido
+    || ((contextualizedMessage.appendProducts || gptIntent.intent === "add_item" || /\bdonde siempre\b/i.test(normalizarTextoAnalisis(mensaje)))
+      ? construirPedidoDesdeOrder(activeOrderBefore || state.lastResolvedOrder)
+      : null)
+    || { cliente: state.customerName || null, customer_type_applied: customerProfile.customerType, price_tier_applied: customerProfile.customerType };
+  const pedidoCombinado = combinarPedidoParcialConOpciones(basePedido, resultadoActual.pedido || {}, {
+    appendProducts: Boolean(contextualizedMessage.appendProducts || gptIntent.intent === "add_item")
   });
   pedidoCombinado.customer_type_applied = customerProfile.customerType;
   pedidoCombinado.price_tier_applied = customerProfile.customerType;
@@ -4955,14 +5411,18 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     sourceMessageId,
     routingIntent: resultado.intent,
     fallback: fallbackRespuesta,
-    context: {
-      customerName: state.customerName || resultado.pedido?.cliente || null,
-      userMessage: mensaje,
+    context: buildValidatedResponseContext({
+      orchestratorContext: orchestratorPayload.context,
+      gptIntent,
       pedido: resultado.pedido,
       evaluacion: resultado.evaluacion,
+      fallback: fallbackRespuesta,
+      customerName: state.customerName || resultado.pedido?.cliente || null,
+      userMessage: mensaje,
       availableProducts: buildCatalogShortList(5),
-      catalogUrl: CATALOG_URL
-    }
+      catalogUrl: CATALOG_URL,
+      activeIntent: resultado.intent
+    })
   });
   const delivery = await responderAlCliente({
     telefono,

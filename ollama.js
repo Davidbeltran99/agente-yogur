@@ -91,6 +91,48 @@ async function llamarOpenAI({ mensaje }) {
   return llamarOpenAIBase({ messages: construirMensajes(mensaje) });
 }
 
+function normalizarIntentResult(payload = {}) {
+  const allowedIntents = new Set(["order_request", "catalog_request", "add_item", "remove_item", "closing", "admin_query", "payment", "address", "general"]);
+  const intent = allowedIntents.has(String(payload.intent || "").trim()) ? String(payload.intent).trim() : "general";
+  const confidence = Math.max(0, Math.min(1, Number(payload.confidence) || 0));
+
+  return {
+    intent,
+    confidence,
+    products_mentioned: Array.isArray(payload.products_mentioned) ? payload.products_mentioned.slice(0, 8).map((item) => String(item || "").trim()).filter(Boolean) : [],
+    requested_changes: Array.isArray(payload.requested_changes) ? payload.requested_changes.slice(0, 8).map((item) => String(item || "").trim()).filter(Boolean) : [],
+    missing_data: Array.isArray(payload.missing_data) ? payload.missing_data.slice(0, 8).map((item) => String(item || "").trim()).filter(Boolean) : [],
+    suggested_response_goal: String(payload.suggested_response_goal || "").trim().slice(0, 240)
+  };
+}
+
+async function inferConversationIntent(contexto = {}) {
+  const systemPrompt = [
+    "Eres el orquestador conversacional de Abi para Tellolac.",
+    "Tu trabajo es clasificar la intención del mensaje usando SOLO el contexto dado.",
+    "No inventes productos, precios ni estados.",
+    "Devuelve únicamente JSON válido.",
+    "Usa intent solo de esta lista: order_request, catalog_request, add_item, remove_item, closing, admin_query, payment, address, general.",
+    "confidence debe estar entre 0 y 1.",
+    "products_mentioned y requested_changes deben ser listas cortas de texto.",
+    "missing_data debe listar solo datos realmente faltantes si aplica.",
+    "suggested_response_goal debe describir brevemente qué debería lograr la respuesta final."
+  ].join(" ");
+
+  const userPrompt = `Contexto:\n${JSON.stringify(contexto, null, 2)}\n\nClasifica la intención y devuelve el JSON.`;
+  const content = await llamarOpenAIBase({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0.1,
+    maxTokens: 220,
+    responseFormat: { type: "json_object" }
+  });
+
+  return normalizarIntentResult(JSON.parse(limpiarRespuestaJSON(content)));
+}
+
 async function generarRespuestaAbi(contexto = {}) {
   const systemPrompt = [
     "Eres Abi, asesora comercial de Tellolac.",
@@ -101,6 +143,9 @@ async function generarRespuestaAbi(contexto = {}) {
     "Nunca expliques validaciones internas ni menciones catálogo no encontrado, errores técnicos, parser, coincidencias exactas o lógica del sistema.",
     "Si hay productos confirmados y uno ambiguo, avanza con lo confirmado y pregunta únicamente por ese punto.",
     "Si falta un dato del pedido, pide solo ese dato de forma puntual y amable.",
+    "No uses frases quemadas como 'Estoy aquí para ayudarte', 'No encontré', 'Solo me falta' o 'Catálogo no tiene'.",
+    "Si el backend ya validó productos, precios o total, respétalos exactamente.",
+    "No calcules nada ni cambies cifras.",
     "Toma el fallback como base segura de negocio y, si lo mejoras, conserva exactamente los productos confirmados, sugerencias y faltantes.",
     "Devuelve solo texto plano para enviar al cliente."
   ].join(" ");
@@ -195,6 +240,7 @@ async function transcribirAudio(params = {}) {
 }
 
 module.exports = {
+  inferConversationIntent,
   procesarMensaje,
   generarRespuestaAbi,
   transcribirAudio,
