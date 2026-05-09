@@ -626,6 +626,11 @@ html.theme-dark tr.active td {
   background: rgba(119, 161, 255, 0.08);
 }
 
+html.theme-dark .orders-table tr[data-order-id] {
+  background: rgba(18, 27, 40, 0.92);
+  border-color: rgba(120, 142, 173, 0.18);
+}
+
 html.theme-dark .mini-pill {
   background: rgba(119, 161, 255, 0.14);
 }
@@ -776,7 +781,7 @@ html.theme-dark .app-loader {
 }
 
 .orders-layout {
-  grid-template-columns: minmax(0, 2.2fr) minmax(320px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .history-layout {
@@ -797,6 +802,10 @@ html.theme-dark .app-loader {
 .table-surface,
 .history-list-surface {
   padding-bottom: 10px;
+}
+
+.orders-table-surface {
+  overflow: visible;
 }
 
 .table-wrap {
@@ -889,6 +898,29 @@ tr.active td {
 
 .order-main-cell {
   gap: 8px;
+}
+
+.order-summary-cell {
+  min-width: 220px;
+}
+
+.summary-count {
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--primary-strong);
+}
+
+.summary-preview {
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.summary-extra {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 600;
 }
 
 .compact-gap {
@@ -1006,6 +1038,10 @@ tr.active td {
   flex-wrap: wrap;
 }
 
+.row-actions .small-action {
+  min-width: 110px;
+}
+
 .status-select {
   min-width: 150px;
 }
@@ -1116,6 +1152,10 @@ tr.active td {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.detail-product-row {
+  align-items: flex-start;
 }
 
 .detail-address-block {
@@ -1674,6 +1714,32 @@ tr.active td {
   animation: modalEnter var(--transition-base);
 }
 
+.order-detail-modal-card {
+  width: min(100%, 860px);
+  max-height: min(88vh, 860px);
+}
+
+.order-detail-modal-header {
+  align-items: center;
+}
+
+.order-detail-modal-body {
+  padding-top: 20px;
+}
+
+.order-detail-modal-actions {
+  gap: 12px;
+}
+
+.modal-close-x {
+  min-width: 44px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 14px;
+  font-size: 1.1rem;
+}
+
 .modal-header,
 .modal-actions {
   justify-content: space-between;
@@ -2215,6 +2281,94 @@ tr.active td {
 
   .table-wrap table {
     min-width: 620px;
+  }
+
+  .order-detail-modal {
+    padding: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
+
+  .order-detail-modal-card {
+    width: 100%;
+    max-height: min(94vh, 100vh);
+    border-radius: 24px 24px 0 0;
+  }
+
+  .order-detail-modal-actions {
+    position: sticky;
+    bottom: 0;
+    background: inherit;
+  }
+
+  .orders-table {
+    min-width: 0;
+  }
+
+  .orders-table thead {
+    display: none;
+  }
+
+  .orders-table,
+  .orders-table tbody,
+  .orders-table tr,
+  .orders-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .orders-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  .orders-table tr[data-order-id] {
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(143, 164, 191, 0.12);
+    border-radius: 20px;
+    box-shadow: 0 10px 24px rgba(16, 35, 61, 0.06);
+    overflow: hidden;
+  }
+
+  .orders-table tr[data-order-id] td,
+  .orders-table tr[data-order-id] td:first-child,
+  .orders-table tr[data-order-id] td:last-child {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+    padding: 10px 14px;
+  }
+
+  .orders-table tr[data-order-id] td:first-child {
+    padding-top: 16px;
+  }
+
+  .orders-table tr[data-order-id] td:last-child {
+    padding-bottom: 16px;
+  }
+
+  .orders-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .orders-table td:first-child::before {
+    display: none;
+  }
+
+  .orders-table .row-actions,
+  .orders-table .row-actions .small-action,
+  .order-detail-modal-actions .status-select,
+  .order-detail-modal-actions .primary {
+    width: 100%;
   }
 
   .detail-hero-top,

@@ -205,14 +205,13 @@
         <div id="feedback" class="feedback" hidden></div>
 
         <div class="orders-layout">
-          <section class="surface table-surface">
+          <section class="surface table-surface orders-table-surface">
             <div class="table-wrap">
-              <table>
+              <table class="orders-table">
                 <thead>
                   <tr>
                     <th>Cliente</th>
-                    <th>Pedido</th>
-                    <th>Fecha</th>
+                    <th>Pedido resumido</th>
                     <th>Pago</th>
                     <th>Total</th>
                     <th>Estado</th>
@@ -221,24 +220,12 @@
                 </thead>
                 <tbody id="ordersTableBody">
                   <tr>
-                    <td colspan="7" class="empty">Cargando...</td>
+                    <td colspan="6" class="empty">Cargando...</td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </section>
-
-          <aside class="surface detail-surface">
-            <div class="surface-header">
-              <div>
-                <h3>Detalle del pedido</h3>
-                <p class="helper-text">Dirección, pago, productos y notas.</p>
-              </div>
-            </div>
-            <div id="orderDetail" class="detail-empty">
-              <p>No hay ningún pedido seleccionado.</p>
-            </div>
-          </aside>
         </div>
       </section>
 
@@ -384,6 +371,30 @@
       <div class="modal-actions">
         <button type="button" id="cancelCloseDayButton" class="secondary">Cancelar</button>
         <button type="button" id="confirmCloseDayButton" class="primary">Confirmar cierre</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="orderDetailModal" class="modal order-detail-modal" hidden aria-hidden="true">
+    <div class="modal-card order-detail-modal-card" role="dialog" aria-modal="true" aria-labelledby="orderDetailTitle">
+      <div class="modal-header order-detail-modal-header">
+        <div>
+          <p class="eyebrow">Detalle del pedido</p>
+          <h3 id="orderDetailTitle">Pedido</h3>
+        </div>
+        <button type="button" id="orderDetailCloseButton" class="secondary ghost modal-close-x" aria-label="Cerrar detalle">✕</button>
+      </div>
+      <div id="orderDetail" class="modal-body order-detail-modal-body detail-empty">
+        <p>No hay ningún pedido seleccionado.</p>
+      </div>
+      <div class="modal-actions order-detail-modal-actions">
+        <select id="orderDetailStatusSelect" class="status-select">
+          <option value="pendiente">🟡 Pendiente</option>
+          <option value="en proceso">🔵 En camino</option>
+          <option value="entregado">🟢 Entregado</option>
+          <option value="cancelado">Cancelado</option>
+        </select>
+        <button type="button" id="orderDetailSaveButton" class="primary soft" disabled>Guardar estado</button>
       </div>
     </div>
   </div>

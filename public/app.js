@@ -43,6 +43,11 @@ const closeDaySummary = document.getElementById("closeDaySummary");
 const closeModalButton = document.getElementById("closeModalButton");
 const cancelCloseDayButton = document.getElementById("cancelCloseDayButton");
 const confirmCloseDayButton = document.getElementById("confirmCloseDayButton");
+const orderDetailModal = document.getElementById("orderDetailModal");
+const orderDetailTitle = document.getElementById("orderDetailTitle");
+const orderDetailCloseButton = document.getElementById("orderDetailCloseButton");
+const orderDetailStatusSelect = document.getElementById("orderDetailStatusSelect");
+const orderDetailSaveButton = document.getElementById("orderDetailSaveButton");
 const navLinks = Array.from(document.querySelectorAll(".nav-link[data-section]"));
 const sectionViews = Array.from(document.querySelectorAll(".panel-view[data-view]"));
 const tableWrap = document.querySelector(".table-wrap");
@@ -79,6 +84,7 @@ let selectedClosureId = null;
 let healthState = null;
 let sessionTimeoutHandle = null;
 let finalizeModalOpen = false;
+let orderDetailModalOpen = false;
 let sidebarCollapsed = false;
 let mobileSidebarOpen = false;
 let activeSection = "dashboard";
@@ -184,10 +190,76 @@ function formatOrderItemsSummary(order) {
     .join(", ");
 }
 
+function formatCompactOrderSummary(order) {
+  const items = Array.isArray(order?.items) ? order.items.filter(Boolean) : [];
+
+  if (!items.length) {
+    return {
+      countLabel: "Sin productos",
+      previewLabel: formatOrderItemsSummary(order),
+      extraLabel: ""
+    };
+  }
+
+  const previewLabel = items
+    .slice(0, 2)
+    .map((item) => `${item.cantidad ?? "?"} ${item.producto || "Producto"}`)
+    .join(", ");
+  const remaining = items.length - 2;
+
+  return {
+    countLabel: `${items.length} producto${items.length === 1 ? "" : "s"}`,
+    previewLabel,
+    extraLabel: remaining > 0 ? `+${remaining} más` : ""
+  };
+}
+
 function buildAvatarLabel(order) {
   const source = String(order?.cliente || order?.telefono || "CL").trim();
   const parts = source.split(/\s+/).filter(Boolean);
   return parts.slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("").slice(0, 2) || "CL";
+}
+
+function syncModalOpenState() {
+  document.body.classList.toggle("modal-open", finalizeModalOpen || orderDetailModalOpen);
+}
+
+function syncOrderDetailSaveState() {
+  const hasOrder = Boolean(selectedOrderId && getOrderById(selectedOrderId));
+  const changed = hasOrder && orderDetailStatusSelect?.value !== orderDetailStatusSelect?.dataset.currentStatus;
+
+  if (orderDetailSaveButton) {
+    orderDetailSaveButton.disabled = !changed;
+    orderDetailSaveButton.hidden = !hasOrder;
+  }
+
+  if (orderDetailStatusSelect) {
+    orderDetailStatusSelect.disabled = !hasOrder;
+  }
+}
+
+function openOrderDetailModal(orderId = selectedOrderId) {
+  if (orderId) {
+    selectedOrderId = orderId;
+  }
+
+  renderOrders();
+  renderDetail();
+  orderDetailModal.hidden = false;
+  orderDetailModal.setAttribute("aria-hidden", "false");
+  orderDetailModalOpen = true;
+  syncModalOpenState();
+  orderDetail.scrollTop = 0;
+  window.requestAnimationFrame(() => {
+    (orderDetailCloseButton || orderDetailSaveButton)?.focus();
+  });
+}
+
+function closeOrderDetailModal() {
+  orderDetailModal.hidden = true;
+  orderDetailModal.setAttribute("aria-hidden", "true");
+  orderDetailModalOpen = false;
+  syncModalOpenState();
 }
 
 function buildConversationLabel(conversation) {
@@ -848,23 +920,21 @@ function renderSettings() {
 
 function renderOrders() {
   if (!orders.length) {
-    ordersTableBody.innerHTML = `<tr><td colspan="7">${renderEmptyState({ iconName: "box", title: "Todo tranquilo por ahora 😊", copy: "Abi mostrará aquí los nuevos pedidos cuando lleguen.", compact: true })}</td></tr>`;
+    ordersTableBody.innerHTML = `<tr><td colspan="6">${renderEmptyState({ iconName: "box", title: "Todo tranquilo por ahora 😊", copy: "Abi mostrará aquí los nuevos pedidos cuando lleguen.", compact: true })}</td></tr>`;
     return;
   }
 
   ordersTableBody.innerHTML = orders.map((order) => {
     const activeClass = order.id === selectedOrderId ? "active" : "";
     const badgeClass = order.estado.replace(/\s+/g, "-");
-    const itemsSummary = formatOrderItemsSummary(order);
+    const { countLabel, previewLabel, extraLabel } = formatCompactOrderSummary(order);
     const avatar = buildAvatarLabel(order);
-    const dateMeta = formatDateTimeStack(order.fechaRegistro);
-    const itemCount = Array.isArray(order.items) ? order.items.length : 0;
     const statusLabel = getStatusLabel(order.estado);
     const paymentVariant = getPaymentVariant(order.metodoPago);
 
     return `
       <tr data-order-id="${escapeHtml(order.id)}" class="${activeClass}">
-        <td>
+        <td data-label="Cliente">
           <div class="customer-cell">
             <span class="customer-avatar">${escapeHtml(avatar)}</span>
             <div class="order-cell-stack">
@@ -876,43 +946,29 @@ function renderOrders() {
             </div>
           </div>
         </td>
-        <td>
-          <div class="order-cell-stack order-main-cell">
-            <div class="cell-kicker">Producto</div>
-            <div class="customer-name">${escapeHtml(itemsSummary)}</div>
-            <div class="cell-inline-meta">
-              <span class="mini-pill">${icon("shopping-bag", "ui-icon mini-icon")} ${escapeHtml(String(itemCount || 1))} item(s)</span>
-            </div>
-            <div class="cell-kicker">Dirección</div>
-            <div class="customer-subline multiline-clamp">${escapeHtml(order.direccion || "Sin dirección")}</div>
+        <td data-label="Pedido resumido">
+          <div class="order-cell-stack order-summary-cell">
+            <div class="summary-count">${escapeHtml(countLabel)}</div>
+            <div class="summary-preview multiline-clamp">${escapeHtml(previewLabel || "Sin detalle")}</div>
+            ${extraLabel ? `<div class="summary-extra">${escapeHtml(extraLabel)}</div>` : ""}
           </div>
         </td>
-        <td>
-          <div class="order-cell-stack compact-gap">
-            <div class="cell-kicker">Ingreso</div>
-            <div class="customer-name">${escapeHtml(dateMeta.date)}</div>
-            <div class="customer-subline">${escapeHtml(dateMeta.time)}</div>
-          </div>
-        </td>
-        <td>
+        <td data-label="Pago">
           <div class="order-cell-stack compact-gap">
             <div class="cell-kicker">Pago</div>
             <span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "Sin definir")}</span>
           </div>
         </td>
-        <td>
+        <td data-label="Total">
           <div class="order-cell-stack compact-gap">
             <span class="total-pill">${icon("badge-check", "ui-icon mini-icon")} ${escapeHtml(formatCurrency(order.total || 0))}</span>
             <div class="customer-subline">Pedido #${escapeHtml(order.id)}</div>
           </div>
         </td>
-        <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
-        <td>
+        <td data-label="Estado"><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
+        <td data-label="Acción">
           <div class="row-actions">
-            <select class="status-select" data-status-select="${escapeHtml(order.id)}">
-              ${STATUS_OPTIONS.map((status) => `<option value="${status.value}" ${order.estado === status.value ? "selected" : ""}>${status.label}</option>`).join("")}
-            </select>
-            <button class="primary soft" data-save-status="${escapeHtml(order.id)}">Guardar</button>
+            <button class="secondary small-action" data-open-order-detail="${escapeHtml(order.id)}">Ver detalle</button>
           </div>
         </td>
       </tr>
@@ -924,24 +980,32 @@ function renderDetail() {
   const order = getOrderById(selectedOrderId);
 
   if (!order) {
+    orderDetailTitle.textContent = "Pedido";
+    orderDetailStatusSelect.value = "pendiente";
+    orderDetailStatusSelect.dataset.currentStatus = "";
+    syncOrderDetailSaveState();
     orderDetail.innerHTML = renderEmptyState({ iconName: "clipboard-list", title: "No hay pedido seleccionado", copy: "Elige un pedido de la tabla para ver su detalle completo." });
     return;
   }
 
+  const dateMeta = formatDateTimeStack(order.fechaRegistro);
   const itemsHtml = (order.items || []).length
     ? order.items.map((item) => `
-        <div class="item-row premium-item-row">
+        <div class="item-row premium-item-row detail-product-row">
           <div>
-            <strong>${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))}</strong>
-            <div class="helper-text">Precio unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))}</div>
+            <strong>• ${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))} — ${escapeHtml(formatCurrency(item.subtotal || 0))}</strong>
+            <div class="helper-text">Unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))}</div>
           </div>
-          <span class="mini-total-pill">${escapeHtml(formatCurrency(item.subtotal || 0))}</span>
         </div>
       `).join("")
     : "<p class=\"helper-text\">No hay detalle de productos disponible.</p>";
 
   const statusLabel = getStatusLabel(order.estado);
   const paymentVariant = getPaymentVariant(order.metodoPago);
+  orderDetailTitle.textContent = `Pedido #${order.id || ""}`;
+  orderDetailStatusSelect.value = order.estado || "pendiente";
+  orderDetailStatusSelect.dataset.currentStatus = order.estado || "pendiente";
+  syncOrderDetailSaveState();
 
   orderDetail.innerHTML = `
     <div class="detail-grid">
@@ -960,15 +1024,16 @@ function renderDetail() {
         <div class="detail-chip-row">
           <span class="badge ${order.estado.replace(/\s+/g, "-")}">${escapeHtml(statusLabel)}</span>
           <span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "Sin definir")}</span>
-          <span class="mini-pill">${icon("clock-3", "ui-icon mini-icon")} ${escapeHtml(formatDate(order.fechaRegistro))}</span>
+          <span class="mini-pill">${icon("clock-3", "ui-icon mini-icon")} ${escapeHtml(dateMeta.date)} · ${escapeHtml(dateMeta.time)}</span>
         </div>
       </div>
       <div class="detail-card">
         <h3>${icon("shopping-bag")} Resumen</h3>
         <div class="meta-list premium-meta-list">
-          <div class="meta-item"><span>Pedido</span>${escapeHtml(formatOrderItemsSummary(order))}</div>
+          <div class="meta-item"><span>Fecha y hora</span>${escapeHtml(`${dateMeta.date} · ${dateMeta.time}`)}</div>
           <div class="meta-item"><span>ID</span>${escapeHtml(order.id || "-")}</div>
-          <div class="meta-item"><span>Fecha entrega</span>${escapeHtml(order.fechaEntrega || "Sin definir")}</div>
+          <div class="meta-item"><span>Cliente</span>${escapeHtml(order.cliente || "-")}</div>
+          <div class="meta-item"><span>Teléfono</span>${escapeHtml(order.telefono || "-")}</div>
         </div>
       </div>
       <div class="detail-card">
@@ -976,7 +1041,8 @@ function renderDetail() {
         <div class="meta-list premium-meta-list">
           <div class="meta-item detail-address-block"><span>Dirección</span>${escapeHtml(order.direccion || "-")}</div>
           <div class="meta-item"><span>Método de pago</span><span class="payment-pill ${paymentVariant}">${icon("wallet", "ui-icon mini-icon")} ${escapeHtml(order.metodoPago || "-")}</span></div>
-          <div class="meta-item"><span>Registrado</span>${escapeHtml(formatDate(order.fechaRegistro))}</div>
+          <div class="meta-item"><span>Estado</span><span class="badge ${order.estado.replace(/\s+/g, "-")}">${escapeHtml(statusLabel)}</span></div>
+          <div class="meta-item"><span>Fecha entrega</span>${escapeHtml(order.fechaEntrega || "Sin definir")}</div>
         </div>
       </div>
       <div class="detail-card">
@@ -1272,8 +1338,8 @@ function resetFinalizeModalState() {
   closeDaySummary.innerHTML = "";
   closeDayModal.hidden = true;
   closeDayModal.setAttribute("aria-hidden", "true");
-  document.body.classList.remove("modal-open");
   finalizeModalOpen = false;
+  syncModalOpenState();
   confirmCloseDayButton.disabled = false;
 }
 
@@ -1281,8 +1347,8 @@ function openFinalizeModal() {
   renderCloseDaySummary();
   closeDayModal.hidden = false;
   closeDayModal.setAttribute("aria-hidden", "false");
-  document.body.classList.add("modal-open");
   finalizeModalOpen = true;
+  syncModalOpenState();
   closeDayModal.scrollTop = 0;
   window.requestAnimationFrame(() => {
     (confirmCloseDayButton.disabled ? closeModalButton : confirmCloseDayButton)?.focus();
@@ -1355,7 +1421,7 @@ async function loadOrders(options = {}) {
       orders = [];
       selectedOrderId = null;
       tableMeta.textContent = "No se pudieron cargar pedidos";
-      ordersTableBody.innerHTML = `<tr><td colspan="7">${renderEmptyState({ iconName: "box", title: "No fue posible cargar los pedidos", copy: error.message, compact: true })}</td></tr>`;
+      ordersTableBody.innerHTML = `<tr><td colspan="6">${renderEmptyState({ iconName: "box", title: "No fue posible cargar los pedidos", copy: error.message, compact: true })}</td></tr>`;
       orderDetail.innerHTML = renderEmptyState({ iconName: "file-search", title: "Sin detalle disponible", copy: error.message });
       showFeedback(error.message, "error");
     }
@@ -1544,6 +1610,7 @@ async function updateOrderStatus(orderId, nextStatus, button) {
     showToast(error.message, "error");
   } finally {
     button.disabled = false;
+    syncOrderDetailSaveState();
   }
 }
 
@@ -1648,11 +1715,15 @@ async function loadDashboard() {
 }
 
 document.addEventListener("click", (event) => {
+  const openDetailButton = event.target.closest("button[data-open-order-detail]");
+  if (openDetailButton) {
+    openOrderDetailModal(openDetailButton.dataset.openOrderDetail);
+    return;
+  }
+
   const row = event.target.closest("tr[data-order-id]");
   if (row && !event.target.closest("button") && !event.target.closest("select")) {
-    selectedOrderId = row.dataset.orderId;
-    renderOrders();
-    renderDetail();
+    openOrderDetailModal(row.dataset.orderId);
     return;
   }
 
@@ -1756,9 +1827,23 @@ closeDayButton?.addEventListener("click", openFinalizeModal);
 closeModalButton?.addEventListener("click", closeFinalizeModal);
 cancelCloseDayButton?.addEventListener("click", closeFinalizeModal);
 confirmCloseDayButton?.addEventListener("click", confirmCloseDay);
+orderDetailCloseButton?.addEventListener("click", closeOrderDetailModal);
+orderDetailSaveButton?.addEventListener("click", () => {
+  if (!selectedOrderId || orderDetailSaveButton.disabled) {
+    return;
+  }
+
+  updateOrderStatus(selectedOrderId, orderDetailStatusSelect.value, orderDetailSaveButton);
+});
+orderDetailStatusSelect?.addEventListener("change", syncOrderDetailSaveState);
 closeDayModal?.addEventListener("click", (event) => {
   if (event.target === closeDayModal) {
     closeFinalizeModal();
+  }
+});
+orderDetailModal?.addEventListener("click", (event) => {
+  if (event.target === orderDetailModal) {
+    closeOrderDetailModal();
   }
 });
 
@@ -1769,6 +1854,11 @@ document.addEventListener("keydown", (event) => {
 
   if (finalizeModalOpen) {
     closeFinalizeModal();
+    return;
+  }
+
+  if (orderDetailModalOpen) {
+    closeOrderDetailModal();
     return;
   }
 
