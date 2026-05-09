@@ -51,6 +51,7 @@ const { generateDailyClosurePdf } = require("./reports");
 const {
   DEFAULT_CATALOG_URL,
   fetchCatalogProducts,
+  loadCatalogSnapshotProducts,
   normalizeCatalogText
 } = require("./catalog");
 const {
@@ -244,13 +245,66 @@ const PARTIAL_ADDRESS_REFERENCE_TOKENS = ["la misma direccion", "la misma direcc
 const RECEIPT_IMAGE_KEYWORDS = ["comprobante", "pago", "transferencia", "nequi", "daviplata", "consignacion", "consignación", "soporte", "recibo"];
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const CATALOG_SNAPSHOT_SOURCE_URL = "local://catalog_snapshot.json";
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
   ["aloe", ["aloe", "sabila", "sábila"]],
   ["cafe", ["cafe", "café", "cafecito"]],
   ["griego", ["griego", "yogur griego", "yogurt griego", "griego de kilo", "griego grande"]],
+  ["yogur", ["yogur", "yogurt", "yoghurt", "yogourt"]],
+  ["kefir", ["kefir", "kefyr", "kéfir"]],
+  ["kumis", ["kumis"]],
+  ["queso", ["queso", "quesitos"]],
   ["ancheta", ["ancheta", "regalo", "detalle", "combo", "combo regalo"]],
   ["bandeja queso arequipe", ["bandeja", "queso", "arequipe", "tabla"]]
 ]);
+const PRODUCT_RESOLUTION_FAMILY_RULES = {
+  griego: {
+    subtypeTokens: ["fruta", "surtido", "unidad"],
+    variants: [
+      { key: "500", aliases: ["500", "500 g", "500g", "500ml", "500 ml", "grande"], pattern: /\b500\s*g\b/ },
+      { key: "250", aliases: ["250", "250 g", "250g", "pequeno", "pequeño", "pequenito", "chico"], pattern: /\b250\s*g\b/ }
+    ]
+  },
+  cafe: {
+    variants: [
+      { key: "1800", aliases: ["1800", "1800 ml", "1800ml", "grande", "garrafa", "familiar"], pattern: /\b(1800\s*ml|garrafa)\b/ },
+      { key: "1000", aliases: ["1000", "1000 ml", "1000ml", "litro", "pequeno", "pequeño"], pattern: /\b(1000\s*ml|litro)\b/ }
+    ]
+  },
+  aloe: {
+    variants: [
+      { key: "1800", aliases: ["1800", "1800 ml", "1800ml", "grande", "garrafa", "familiar"], pattern: /\b(1800\s*ml|garrafa)\b/ },
+      { key: "1000", aliases: ["1000", "1000 ml", "1000ml", "litro", "pequeno", "pequeño"], pattern: /\b(1000\s*ml|litro)\b/ }
+    ]
+  },
+  ancheta: {
+    variants: [
+      { key: "value", aliases: ["barata", "barato", "economica", "económica", "economico", "económico", "asequible"], pattern: /\b(ancheta\s*1|ancheta\s*uno|ancheta\s+1)\b/ },
+      { key: "premium", aliases: ["premium", "grande"], pattern: /\b(premium|ancheta)\b/ }
+    ]
+  },
+  yogur: {
+    flavorTokens: ["mora", "fresa", "durazno", "cafe", "café"],
+    variants: [
+      { key: "1800", aliases: ["1800", "1800 ml", "1800ml", "garrafa", "grande"], pattern: /\b(1800\s*ml|garrafa)\b/ },
+      { key: "1000", aliases: ["1000", "1000 ml", "1000ml", "litro", "pequeno", "pequeño"], pattern: /\b(1000\s*ml|litro)\b/ },
+      { key: "500", aliases: ["500", "500 g", "500g"], pattern: /\b500\s*(g|ml)\b/ }
+    ]
+  },
+  kefir: {
+    variants: [
+      { key: "1000", aliases: ["1000", "1000 ml", "1000ml", "litro"], pattern: /\b(1000\s*ml|litro)\b/ }
+    ]
+  },
+  kumis: {
+    variants: [
+      { key: "1000", aliases: ["1000", "1000 ml", "1000ml", "litro"], pattern: /\b(1000\s*ml|litro)\b/ }
+    ]
+  },
+  queso: {
+    variants: []
+  }
+};
 
 function limpiarTexto(valor) {
   if (typeof valor !== "string") {
@@ -1378,267 +1432,279 @@ function resolverCantidadContextual(texto, { defaultQuantity = null } = {}) {
   return defaultQuantity;
 }
 
+function normalizeProductResolverQuery(texto) {
+  return normalizeCanonicalCatalogName(limpiarTextoProductoSolicitado(texto))
+    .replace(/\byogou?rt\b/g, "yogur")
+    .replace(/\byogurth\b/g, "yogur")
+    .replace(/\bgari?ego\b/g, "griego")
+    .replace(/\bkefyr\b/g, "kefir")
+    .replace(/\bcafecito\b/g, "cafe")
+    .replace(/\baloee\b/g, "aloe")
+    .replace(/\blts?\b/g, "litro")
+    .replace(/\blitros\b/g, "litro")
+    .replace(/\bgrs?\b/g, "g")
+    .replace(/\bmls\b/g, "ml")
+    .replace(/\b(detalles|detalle)\b/g, "ancheta")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detectProductResolverFamilies(normalizedQuery = "") {
+  const families = new Set();
+
+  for (const [family, aliases] of SEMANTIC_FAMILY_KEYWORDS.entries()) {
+    if (aliases.some((alias) => normalizedQuery.includes(normalizeCatalogText(alias)))) {
+      families.add(family);
+    }
+  }
+
+  return families;
+}
+
+function getProductResolverTokens(normalizedQuery = "") {
+  return extractCatalogIdentityTokens(normalizedQuery, { keepGeneric: true })
+    .filter((token) => !SIZE_SMALL_TOKENS.includes(token))
+    .filter((token) => !SIZE_LARGE_TOKENS.includes(token));
+}
+
+function getProductResolverVariantMatcher(familyName, normalizedQuery) {
+  const rule = PRODUCT_RESOLUTION_FAMILY_RULES[familyName];
+  if (!rule?.variants?.length) {
+    return null;
+  }
+
+  for (const variant of rule.variants) {
+    if (variant.aliases.some((alias) => normalizedQuery.includes(normalizeCatalogText(alias)))) {
+      return variant;
+    }
+  }
+
+  return null;
+}
+
+function filterFamilyProductsForResolver(products = [], familyName, normalizedQuery = "") {
+  let filtered = products.slice();
+  const rule = PRODUCT_RESOLUTION_FAMILY_RULES[familyName] || null;
+
+  if (rule?.subtypeTokens?.length) {
+    const queryHasSubtype = rule.subtypeTokens.some((token) => normalizedQuery.includes(normalizeCatalogText(token)));
+    if (!queryHasSubtype) {
+      const withoutSubtype = filtered.filter((product) => !rule.subtypeTokens.some((token) => normalizeCanonicalCatalogName(product?.nombre).includes(normalizeCatalogText(token))));
+      if (withoutSubtype.length) {
+        filtered = withoutSubtype;
+      }
+    }
+  }
+
+  if (Array.isArray(rule?.flavorTokens) && rule.flavorTokens.length) {
+    const queryFlavorTokens = rule.flavorTokens.filter((token) => normalizedQuery.includes(normalizeCatalogText(token)));
+    if (queryFlavorTokens.length) {
+      const flavorMatches = filtered.filter((product) => {
+        const haystack = [product?.nombre, ...(product?.aliases || [])].map((value) => normalizeCanonicalCatalogName(value)).join(" ");
+        return queryFlavorTokens.every((token) => haystack.includes(normalizeCatalogText(token)));
+      });
+
+      if (flavorMatches.length) {
+        filtered = flavorMatches;
+      }
+    }
+  }
+
+  return filtered;
+}
+
+function buildResolverCandidates(products = [], normalizedQuery = "", { families = new Set() } = {}) {
+  const queryTokens = getProductResolverTokens(normalizedQuery);
+  const requestedVariantNumbers = Array.from(normalizedQuery.matchAll(/\b(1800|1000|500|250|120)\b/g)).map((match) => match[1]);
+
+  return products.map((product) => {
+    const haystack = [
+      product?.nombre,
+      product?.nombre_canonico,
+      product?.nombre_familia,
+      product?.nombre_raiz_familia,
+      ...(product?.aliases || [])
+    ].map((value) => normalizeCanonicalCatalogName(value)).filter(Boolean);
+    const productTokens = new Set(haystack.flatMap((value) => extractCatalogIdentityTokens(value, { keepGeneric: true })));
+    const overlap = queryTokens.filter((token) => productTokens.has(token));
+    const familyName = product?.nombre_raiz_familia || product?.nombre_familia;
+    const familyHit = families.has(familyName);
+    const exactAlias = haystack.some((value) => value === normalizedQuery);
+    const containsHit = haystack.some((value) => normalizedQuery.includes(value) || value.includes(normalizedQuery));
+    const variantHit = requestedVariantNumbers.length
+      ? requestedVariantNumbers.every((variant) => haystack.some((value) => value.includes(variant)))
+      : true;
+
+    let score = 0;
+    if (exactAlias) score += 120;
+    if (familyHit) score += 55;
+    if (containsHit) score += 32;
+    score += overlap.length * 14;
+    if (!variantHit) score -= 12;
+
+    return {
+      product,
+      familyName,
+      overlap,
+      exactAlias,
+      containsHit,
+      variantHit,
+      score,
+      haystack
+    };
+  }).filter((entry) => entry.exactAlias || entry.containsHit || entry.overlap.length || entry.score > 0)
+    .sort((a, b) => (b.score - a.score)
+      || ((b.overlap.length || 0) - (a.overlap.length || 0))
+      || ((parseOptionalNumber(a.product?.precio) ?? Number.MAX_SAFE_INTEGER) - (parseOptionalNumber(b.product?.precio) ?? Number.MAX_SAFE_INTEGER)));
+}
+
+function logProductResolverInput(details = {}) {
+  logEvent("PRODUCT_RESOLVER_INPUT", details);
+}
+
+function logProductResolverCandidates(details = {}) {
+  logEvent("PRODUCT_RESOLVER_CANDIDATES", details);
+}
+
+function logProductResolverDecision(details = {}) {
+  logEvent("PRODUCT_RESOLVER_DECISION", details);
+}
+
+function resolveProductFromCatalog(query, context = {}) {
+  const candidate = limpiarTexto(query);
+  const normalizedQuery = normalizeProductResolverQuery(query);
+  const catalog = Array.isArray(context.catalog) ? context.catalog : getCatalogProductsCache();
+  const families = detectProductResolverFamilies(normalizedQuery);
+  const directPool = families.size
+    ? catalog.filter((product) => families.has(product?.nombre_raiz_familia || product?.nombre_familia))
+    : catalog;
+  const workingPool = families.size === 1
+    ? filterFamilyProductsForResolver(directPool, Array.from(families)[0], normalizedQuery)
+    : directPool;
+  const variantMatcher = families.size === 1 ? getProductResolverVariantMatcher(Array.from(families)[0], normalizedQuery) : null;
+
+  logProductResolverInput({
+    query: candidate,
+    normalizedQuery,
+    families: Array.from(families),
+    catalogSize: catalog.length,
+    workingPoolSize: workingPool.length
+  });
+
+  if (!normalizedQuery) {
+    const result = { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: "empty_query" };
+    logProductResolverDecision(result);
+    return result;
+  }
+
+  if (variantMatcher && workingPool.length) {
+    const variantMatches = workingPool.filter((product) => variantMatcher.pattern.test(normalizeCanonicalCatalogName(product?.nombre)));
+    if (variantMatches.length === 1) {
+      const result = { status: "resolved", query: candidate, normalizedQuery, product: variantMatches[0], reason: `family_variant:${variantMatcher.key}`, confidence: 97 };
+      logProductResolverCandidates({ query: candidate, mode: "family_variant", candidates: variantMatches.map((product) => product?.nombre) });
+      logProductResolverDecision({ ...result, product: result.product?.nombre || null });
+      return result;
+    }
+
+    if (variantMatches.length > 1) {
+      const options = buildCatalogAmbiguityOptions(variantMatches);
+      const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: `family_variant_ambiguous:${variantMatcher.key}`, confidence: 82 };
+      logProductResolverCandidates({ query: candidate, mode: "family_variant_ambiguous", candidates: options.map((product) => product?.nombre) });
+      logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
+      return result;
+    }
+  }
+
+  const deterministicCandidates = buildResolverCandidates(workingPool, normalizedQuery, { families });
+  logProductResolverCandidates({
+    query: candidate,
+    mode: "deterministic_contains",
+    candidates: deterministicCandidates.slice(0, 5).map((entry) => ({
+      product: entry.product?.nombre || null,
+      score: entry.score,
+      overlap: entry.overlap
+    }))
+  });
+
+  if (deterministicCandidates.length === 1) {
+    const winner = deterministicCandidates[0];
+    const result = { status: "resolved", query: candidate, normalizedQuery, product: winner.product, reason: "deterministic_single", confidence: 95 };
+    logProductResolverDecision({ ...result, product: winner.product?.nombre || null });
+    return result;
+  }
+
+  if (deterministicCandidates.length > 1) {
+    const [best, second] = deterministicCandidates;
+    const exactOnly = deterministicCandidates.filter((entry) => entry.exactAlias || entry.containsHit || entry.overlap.length === best.overlap.length);
+    const queryLooksGenericFamily = families.size === 1 && getProductResolverTokens(normalizedQuery).every((token) => normalizeCatalogText(Array.from(families)[0]).includes(token) || token === Array.from(families)[0]);
+
+    if (!queryLooksGenericFamily && best.score >= ((second?.score || 0) + 18)) {
+      const result = { status: "resolved", query: candidate, normalizedQuery, product: best.product, reason: "deterministic_best", confidence: 90 };
+      logProductResolverDecision({ ...result, product: best.product?.nombre || null });
+      return result;
+    }
+
+    const options = buildCatalogAmbiguityOptions((exactOnly.length ? exactOnly : deterministicCandidates).map((entry) => entry.product));
+    const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "deterministic_ambiguous", confidence: 78 };
+    logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
+    return result;
+  }
+
+  const fuzzyMatches = encontrarCoincidenciasCatalogo(query, {
+    minScore: families.size ? 68 : 72,
+    limit: 3
+  }).filter((entry) => !families.size || families.has(entry.product?.nombre_raiz_familia || entry.product?.nombre_familia));
+
+  logProductResolverCandidates({
+    query: candidate,
+    mode: "fuzzy",
+    candidates: fuzzyMatches.map((entry) => ({ product: entry.product?.nombre || null, score: entry.score, confidence: entry.confidence }))
+  });
+
+  if (!fuzzyMatches.length) {
+    const result = { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: families.size ? "family_not_found" : "catalog_not_found" };
+    logProductResolverDecision(result);
+    return result;
+  }
+
+  if (fuzzyMatches.length === 1 || ((fuzzyMatches[0]?.score || 0) - (fuzzyMatches[1]?.score || 0)) >= 10) {
+    const result = { status: "resolved", query: candidate, normalizedQuery, product: fuzzyMatches[0].product, reason: "fuzzy_best", confidence: fuzzyMatches[0].confidence };
+    logProductResolverDecision({ ...result, product: result.product?.nombre || null });
+    return result;
+  }
+
+  const options = buildCatalogAmbiguityOptions(fuzzyMatches.map((entry) => entry.product));
+  const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "fuzzy_ambiguous", confidence: fuzzyMatches[0].confidence };
+  logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
+  return result;
+}
+
 function resolverProductoCatalogo(texto) {
-  const candidate = limpiarTextoProductoSolicitado(texto);
-  const requestedPrice = extractRequestedPrice(texto);
-  const candidateCanonical = normalizeCanonicalCatalogName(candidate);
-  const candidateFamily = normalizeCatalogFamilyName(candidate);
-  const catalog = getCatalogProductsCache();
+  const resolution = resolveProductFromCatalog(texto);
+  const candidate = limpiarTexto(texto);
 
-  if (!candidate) {
-    return {
-      status: "not_found",
-      candidate: limpiarTexto(texto)
-    };
-  }
-
-  const directNameMatches = catalog.filter((product) => {
-    const originalName = normalizeCatalogText(product.producto_original || product.nombre);
-    return originalName === candidate || product.nombre_canonico === candidateCanonical;
-  });
-
-  if (directNameMatches.length > 1) {
-    const pricedMatch = resolveCatalogProductByPrice(directNameMatches, requestedPrice);
-    if (pricedMatch) {
-      return {
-        status: "matched",
-        candidate: limpiarTexto(texto),
-        product: pricedMatch
-      };
-    }
-
-    const deduped = resolveDedupedCatalogAmbiguity(directNameMatches);
-    return deduped.status === "matched"
-      ? {
-          status: "matched",
-          candidate: limpiarTexto(texto),
-          product: deduped.product
-        }
-      : {
-          status: "ambiguous",
-          candidate: limpiarTexto(texto),
-          matches: deduped.matches
-        };
-  }
-
-  if (directNameMatches.length === 1) {
+  if (resolution.status === "resolved") {
     return {
       status: "matched",
-      candidate: limpiarTexto(texto),
-      product: directNameMatches[0],
-      confidence: 99
+      candidate,
+      product: resolution.product,
+      confidence: resolution.confidence || 95
     };
   }
 
-  const exactMatches = catalog.filter((product) => {
-    const aliases = Array.isArray(product.aliases) ? product.aliases : [];
-    return aliases.includes(candidate);
-  });
-
-  if (exactMatches.length > 1) {
-    const pricedMatch = resolveCatalogProductByPrice(exactMatches, requestedPrice);
-    if (pricedMatch) {
-      return {
-        status: "matched",
-        candidate: limpiarTexto(texto),
-        product: pricedMatch
-      };
-    }
-
-    const deduped = resolveDedupedCatalogAmbiguity(exactMatches);
-    return deduped.status === "matched"
-      ? {
-          status: "matched",
-          candidate: limpiarTexto(texto),
-          product: deduped.product
-        }
-      : {
-          status: "ambiguous",
-          candidate: limpiarTexto(texto),
-          matches: deduped.matches
-        };
-  }
-
-  if (exactMatches.length === 1) {
-    const exactMatch = exactMatches[0];
-    const canonicalMatches = catalog.filter((product) => product.nombre_canonico === exactMatch.nombre_canonico);
-    if (canonicalMatches.length > 1) {
-      const pricedMatch = resolveCatalogProductByPrice(canonicalMatches, requestedPrice);
-      if (pricedMatch) {
-        return {
-          status: "matched",
-          candidate: limpiarTexto(texto),
-          product: pricedMatch
-        };
-      }
-
-      const deduped = resolveDedupedCatalogAmbiguity(canonicalMatches);
-      return deduped.status === "matched"
-        ? {
-            status: "matched",
-            candidate: limpiarTexto(texto),
-            product: deduped.product
-          }
-        : {
-            status: "ambiguous",
-            candidate: limpiarTexto(texto),
-            matches: deduped.matches
-          };
-    }
-
-    const familyMatches = catalog.filter((product) => product.nombre_familia === exactMatch.nombre_familia);
-    if (shouldAskFamilyClarificationForRootQuery(exactMatch, familyMatches, candidate)) {
-      const deduped = resolveDedupedCatalogAmbiguity(familyMatches);
-      return deduped.status === "matched"
-        ? {
-            status: "matched",
-            candidate: limpiarTexto(texto),
-            product: deduped.product
-          }
-        : {
-            status: "ambiguous",
-            candidate: limpiarTexto(texto),
-            matches: deduped.matches
-          };
-    }
-
-    return {
-      status: "matched",
-      candidate: limpiarTexto(texto),
-      product: exactMatch,
-      confidence: 98
-    };
-  }
-
-  const familyMatches = catalog.filter((product) => product.nombre_familia === candidateFamily);
-  if (familyMatches.length > 1) {
-    const pricedMatch = resolveCatalogProductByPrice(familyMatches, requestedPrice);
-    if (pricedMatch) {
-      return {
-        status: "matched",
-        candidate: limpiarTexto(texto),
-        product: pricedMatch
-      };
-    }
-
-    const deduped = resolveDedupedCatalogAmbiguity(familyMatches);
-    return deduped.status === "matched"
-      ? {
-          status: "matched",
-          candidate: limpiarTexto(texto),
-          product: deduped.product
-        }
-      : {
-          status: "ambiguous",
-          candidate: limpiarTexto(texto),
-          matches: deduped.matches
-        };
-  }
-
-  if (familyMatches.length === 1) {
-    return {
-      status: "matched",
-      candidate: limpiarTexto(texto),
-      product: familyMatches[0],
-      confidence: 90
-    };
-  }
-
-  const semanticResolution = resolverProductoSemanticoPorPreferencias(texto, catalog);
-  if (semanticResolution && (!semanticResolution.product || productHasCatalogIdentityOverlap(candidate, semanticResolution.product))) {
-    return semanticResolution;
-  }
-
-  const matches = encontrarCoincidenciasCatalogo(texto, { minScore: 70, limit: 3 });
-
-  if (!matches.length) {
-    const suggestionMatches = encontrarCoincidenciasCatalogo(texto, { minScore: 50, limit: 3 });
-    if (suggestionMatches.length) {
-      return {
-        status: "suggested",
-        candidate: limpiarTexto(texto),
-        matches: buildCatalogAmbiguityOptions(suggestionMatches.map((entry) => entry.product)),
-        confidence: suggestionMatches[0].confidence,
-        soft: true
-      };
-    }
-
-    return {
-      status: "not_found",
-      candidate: limpiarTexto(texto)
-    };
-  }
-
-  const [best, second] = matches;
-  if (!productHasCatalogIdentityOverlap(candidate, best?.product)) {
-    return {
-      status: "not_found",
-      candidate: limpiarTexto(texto)
-    };
-  }
-
-  if (second && Math.abs(best.score - second.score) <= 6) {
-    const semanticPreferences = extractSemanticCatalogPreferences(texto);
-    const sameFamilyMatches = matches.filter((entry) => entry.product?.nombre_familia === best.product?.nombre_familia);
-    const bestCanonical = best.product?.nombre_canonico || "";
-    const secondCanonical = second.product?.nombre_canonico || "";
-
-    if (sameFamilyMatches.length >= 2 && (semanticPreferences.wantsLarge || semanticPreferences.wantsSmall || semanticPreferences.wantsValue)) {
-      const preferredProduct = pickPreferredFamilyProduct(sameFamilyMatches.map((entry) => entry.product), semanticPreferences);
-      if (preferredProduct) {
-        return {
-          status: "matched",
-          candidate: limpiarTexto(texto),
-          product: preferredProduct
-        };
-      }
-    }
-
-    if (
-      sameFamilyMatches.length >= 2
-      && best.score >= 84
-      && !semanticPreferences.wantsLarge
-      && !semanticPreferences.wantsSmall
-      && !semanticPreferences.wantsValue
-      && !/\b\d{3,4}\s*ml\b/.test(bestCanonical)
-      && /\b\d{3,4}\s*ml\b/.test(secondCanonical)
-      && best.product?.nombre_familia === second.product?.nombre_familia
-    ) {
-      return {
-        status: "matched",
-        candidate: limpiarTexto(texto),
-        product: best.product,
-        confidence: best.confidence
-      };
-    }
-
-    const ambiguityPool = sameFamilyMatches.length >= 2 ? sameFamilyMatches : matches;
-
-    if (best.confidence >= 80 && (best.score - second.score) >= 4) {
-      return {
-        status: "matched",
-        candidate: limpiarTexto(texto),
-        product: best.product,
-        confidence: best.confidence
-      };
-    }
-
+  if (resolution.status === "ambiguous") {
     return {
       status: "ambiguous",
-      candidate: limpiarTexto(texto),
-      matches: buildCatalogAmbiguityOptions(ambiguityPool.map((entry) => entry.product)),
-      confidence: best.confidence,
-      soft: best.confidence >= 50
+      candidate,
+      matches: resolution.candidates,
+      confidence: resolution.confidence || 78,
+      soft: false
     };
   }
 
   return {
-    status: best.confidence >= 80 ? "matched" : "suggested",
-    candidate: limpiarTexto(texto),
-    product: best.confidence >= 80 ? best.product : undefined,
-    matches: best.confidence >= 80 ? undefined : buildCatalogAmbiguityOptions([best.product]),
-    confidence: best.confidence,
-    soft: best.confidence < 80
+    status: "not_found",
+    candidate
   };
 }
 
@@ -2277,8 +2343,17 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
     unmatched.push("lo otro");
   }
 
+  const consolidatedItems = consolidarItemsPedido(items);
+  logEvent("VALIDATED_ORDER_ITEMS", {
+    sourceText: limpiarTexto(texto),
+    itemCount: consolidatedItems.length,
+    items: consolidatedItems.map((item) => ({ producto: item?.producto || null, cantidad: item?.cantidad || null, precio_unitario: item?.precio_unitario || null })),
+    ambiguityCount: ambiguities.length,
+    unmatchedCount: unmatched.length
+  });
+
   return {
-    items: consolidarItemsPedido(items),
+    items: consolidatedItems,
     ambiguities: ambiguities.filter((entry, index, list) => {
       const currentKey = `${String(entry?.input || "").replace(new RegExp(`^${QUANTITY_TOKEN_PATTERN}\\s+`, "i"), "").trim()}|${(entry?.options || []).map((option) => option?.nombreCanonico || option?.nombre || "").join("|")}`;
       return list.findIndex((candidate) => {
@@ -2398,6 +2473,25 @@ function buildCatalogFeaturedProducts(customerType = "public") {
 }
 
 function buildPriceRequestProducts(texto, limit = 4, customerType = "public") {
+  const deterministicResolution = resolveProductFromCatalog(texto);
+  if (deterministicResolution.status === "ambiguous") {
+    return deterministicResolution.candidates.slice(0, limit).map((product) => ({
+      emoji: product.nombreCanonico?.includes("cafe") ? "☕" : (product.nombreCanonico?.includes("ancheta") ? "🎁" : "🥛"),
+      label: product.nombre,
+      price: resolveCatalogPriceForCustomer(findCatalogProductByName(product.nombre), customerType).unitPrice,
+      pricePrefix: null
+    }));
+  }
+
+  if (deterministicResolution.status === "resolved" && deterministicResolution.product) {
+    return [{
+      emoji: deterministicResolution.product.nombre_canonico?.includes("cafe") ? "☕" : (deterministicResolution.product.nombre_canonico?.includes("ancheta") ? "🎁" : "🥛"),
+      label: deterministicResolution.product.nombre,
+      price: resolveCatalogPriceForCustomer(deterministicResolution.product, customerType).unitPrice,
+      pricePrefix: null
+    }];
+  }
+
   const catalog = getCatalogProductsCache();
   const preferences = extractSemanticCatalogPreferences(texto);
   const familyMatches = catalog.filter((product) => preferences.families.has(product?.nombre_raiz_familia || product?.nombre_familia));
@@ -2414,7 +2508,16 @@ function buildPriceRequestProducts(texto, limit = 4, customerType = "public") {
 
 function buildRelevantCatalogForOrchestrator(texto, state, customerType = "public", limit = 12) {
   const catalogCache = getCatalogProductsCache();
-  const matches = encontrarCoincidenciasCatalogo(texto, { minScore: 55, limit: Math.min(limit, 8) }).map((entry) => ({
+  const deterministicResolution = resolveProductFromCatalog(texto);
+  const deterministicMatches = deterministicResolution.status === "ambiguous"
+    ? deterministicResolution.candidates
+      .map((option) => findCatalogProductByName(option?.nombre))
+      .filter(Boolean)
+    : (deterministicResolution.status === "resolved" && deterministicResolution.product ? [deterministicResolution.product] : []);
+  const matches = (deterministicMatches.length
+    ? deterministicMatches.map((product) => ({ product, confidence: 95, score: 95 }))
+    : encontrarCoincidenciasCatalogo(texto, { minScore: 55, limit: Math.min(limit, 8) }))
+    .map((entry) => ({
     nombre: entry.product?.nombre,
     nombre_familia: entry.product?.nombre_familia || null,
     presentacion: entry.product?.presentacion || null,
@@ -2519,10 +2622,12 @@ function resolveRoutingIntentWithGpt({ heuristicIntent, gptIntent, hasDraftConte
 function sanitizeAiResponseAgainstFallback(response, fallback, { routingIntent, context } = {}) {
   const text = limpiarTexto(response);
   if (!text) {
+    logEvent("GPT_RESPONSE_SANITIZED", { routingIntent, reason: "empty_response", usedFallback: true });
     return fallback;
   }
 
   if (/\b(descuent|rebaja|gratis|obsequio)\b/i.test(text)) {
+    logEvent("GPT_RESPONSE_SANITIZED", { routingIntent, reason: "pricing_policy", usedFallback: true, responsePreview: text.slice(0, 160) });
     return fallback;
   }
 
@@ -2531,10 +2636,12 @@ function sanitizeAiResponseAgainstFallback(response, fallback, { routingIntent, 
       ? context.validated.confirmedProducts.map((item) => normalizarTextoAnalisis(item?.name || item?.producto || "")).filter(Boolean)
       : [];
     if (confirmedProducts.length && !confirmedProducts.some((name) => normalizarTextoAnalisis(text).includes(name))) {
+      logEvent("GPT_RESPONSE_SANITIZED", { routingIntent, reason: "validated_items_mismatch", usedFallback: true, responsePreview: text.slice(0, 160) });
       return fallback;
     }
   }
 
+  logEvent("GPT_RESPONSE_SANITIZED", { routingIntent, reason: "accepted", usedFallback: false, responsePreview: text.slice(0, 160) });
   return text;
 }
 
@@ -3599,6 +3706,13 @@ async function bootstrapCatalogoDesdeTreinta() {
     const stats = await sincronizarCatalogoDesdeTreinta();
     logEvent("catalogo_sincronizado_treinta", { active: stats.active, total: stats.total, inactive: stats.inactive });
   } catch (error) {
+    const snapshotProducts = loadCatalogSnapshotProducts();
+    if (snapshotProducts.length) {
+      syncCatalogProducts(snapshotProducts, { sourceUrl: CATALOG_SNAPSHOT_SOURCE_URL });
+      setCatalogProductsCache(listCatalogProducts({ activeOnly: true }));
+      logEvent("catalog_snapshot_loaded", { total: snapshotProducts.length, sourceUrl: CATALOG_SNAPSHOT_SOURCE_URL }, "warn");
+    }
+
     setCatalogProductsCache(listCatalogProducts({ activeOnly: true }));
 
     if (!catalogProductsCache.length) {
@@ -6480,7 +6594,24 @@ async function startServer() {
   });
 }
 
-startServer().catch((error) => {
-  logEvent("server_start_error", { error: error.message }, "error");
-  process.exit(1);
-});
+if (require.main === module) {
+  startServer().catch((error) => {
+    logEvent("server_start_error", { error: error.message }, "error");
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app,
+  startServer,
+  bootstrapCatalogoDesdeTreinta,
+  sincronizarCatalogoDesdeTreinta,
+  setCatalogProductsCache,
+  getCatalogProductsCache,
+  resolveProductFromCatalog,
+  resolverProductoCatalogo,
+  analizarProductosCatalogoDesdeTexto,
+  ejecutarFlujoMensaje,
+  sanitizeAiResponseAgainstFallback,
+  buildValidatedResponseContext
+};

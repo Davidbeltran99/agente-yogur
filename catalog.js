@@ -1,6 +1,9 @@
+const fs = require("fs");
+const path = require("path");
 const axios = require("axios");
 
 const DEFAULT_CATALOG_URL = "https://catalogo.treinta.co/tellolac";
+const SNAPSHOT_PATH = path.join(__dirname, "catalog_snapshot.json");
 
 function normalizeText(value) {
   if (value === undefined || value === null) {
@@ -376,6 +379,32 @@ function parseCatalogProductsFromHtml(html) {
   })));
 }
 
+function loadCatalogSnapshotProducts(snapshotPath = SNAPSHOT_PATH) {
+  if (!fs.existsSync(snapshotPath)) {
+    return [];
+  }
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+    const products = Array.isArray(raw) ? raw : [];
+
+    return mergeCatalogProductsByPriceTier(products.map((product) => ({
+      id: normalizeText(product?.id),
+      nombre: normalizeText(product?.nombre),
+      precio: Number.isFinite(Number(product?.precio_publico ?? product?.precio)) ? Number(product?.precio_publico ?? product?.precio) : null,
+      precio_publico: Number.isFinite(Number(product?.precio_publico ?? product?.precio)) ? Number(product?.precio_publico ?? product?.precio) : null,
+      precio_distribuidor: Number.isFinite(Number(product?.precio_distribuidor)) ? Number(product?.precio_distribuidor) : null,
+      categoria: cleanCategory(product?.categoria),
+      presentacion: normalizeText(product?.presentacion) || inferPresentation(product?.nombre),
+      aliases: buildAliases(product),
+      activo: product?.activo !== false,
+      stock: Number.isFinite(Number(product?.stock)) ? Number(product?.stock) : null
+    })).filter((product) => product.id && product.nombre));
+  } catch (_error) {
+    return [];
+  }
+}
+
 async function fetchCatalogProducts(catalogUrl = DEFAULT_CATALOG_URL) {
   const response = await axios.get(catalogUrl, {
     timeout: 30000,
@@ -384,7 +413,10 @@ async function fetchCatalogProducts(catalogUrl = DEFAULT_CATALOG_URL) {
     }
   });
 
-  const products = parseCatalogProductsFromHtml(String(response.data || ""));
+  const scrapedProducts = parseCatalogProductsFromHtml(String(response.data || ""));
+  const snapshotProducts = loadCatalogSnapshotProducts();
+  const products = mergeCatalogProductsByPriceTier([...scrapedProducts, ...snapshotProducts]);
+
   return {
     catalogUrl,
     fetchedAt: new Date().toISOString(),
@@ -394,8 +426,10 @@ async function fetchCatalogProducts(catalogUrl = DEFAULT_CATALOG_URL) {
 
 module.exports = {
   DEFAULT_CATALOG_URL,
+  SNAPSHOT_PATH,
   normalizeCatalogText,
   buildAliases,
+  loadCatalogSnapshotProducts,
   parseCatalogProductsFromHtml,
   fetchCatalogProducts
 };
