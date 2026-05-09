@@ -247,6 +247,8 @@ const RECEIPT_IMAGE_KEYWORDS = ["comprobante", "pago", "transferencia", "nequi",
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
 const IMAGE_CONTEXT_TTL_MS = Number(process.env.IMAGE_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const IMAGE_ORDER_AUTO_PERSIST_ON_HIGH_CONFIDENCE = String(process.env.IMAGE_ORDER_AUTO_PERSIST_ON_HIGH_CONFIDENCE || "false").toLowerCase() === "true";
+const IMAGE_ORDER_AUTO_PERSIST_MIN_CONFIDENCE = Number(process.env.IMAGE_ORDER_AUTO_PERSIST_MIN_CONFIDENCE || 0.94);
 const CATALOG_SNAPSHOT_SOURCE_URL = "local://catalog_snapshot.json";
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
   ["aloe", ["aloe", "sabila", "sábila"]],
@@ -3957,7 +3959,7 @@ function buildImageOrderConfidence(imageAnalysis = {}) {
   return confidences.reduce((acc, value) => acc + value, 0) / confidences.length;
 }
 
-function buildStoredImageContext({ telefono, sourceMessageId, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null, persistedMedia = null, analysis = null, status = "pending_ocr" } = {}) {
+function buildStoredImageContext({ telefono, sourceMessageId, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null, persistedMedia = null, analysis = null, status = "pending" } = {}) {
   return {
     phone: telefono,
     sourceMessageId,
@@ -3975,6 +3977,11 @@ function buildStoredImageContext({ telefono, sourceMessageId, mediaId = null, me
 
 function clearLastImageContext(state) {
   if (state) {
+    state.lastImageMediaId = null;
+    state.lastImageTimestamp = null;
+    state.lastImageStatus = null;
+    state.lastImageCaption = null;
+    state.lastImageLocalPath = null;
     state.lastImageContext = null;
   }
 }
@@ -3997,6 +4004,11 @@ function setLastImageContext(state, imageContext = null) {
     return;
   }
 
+  state.lastImageMediaId = imageContext.mediaId || null;
+  state.lastImageTimestamp = imageContext.timestamp || Date.now();
+  state.lastImageStatus = imageContext.status || null;
+  state.lastImageCaption = imageContext.caption || null;
+  state.lastImageLocalPath = imageContext.absolutePath || imageContext.path || null;
   state.lastImageContext = imageContext;
   logEvent("LAST_IMAGE_CONTEXT_SET", {
     telefono: imageContext.phone || null,
@@ -4009,11 +4021,18 @@ function setLastImageContext(state, imageContext = null) {
   });
 }
 
-function isImageReviewRequest(texto = "", state = null) {
-  if (!getLastImageContext(state)) {
-    return false;
-  }
+function hasPendingImageConfirmation(state = null) {
+  const imageContext = getLastImageContext(state);
+  return Boolean(
+    imageContext?.status === "ocr_completed"
+    && Array.isArray(state?.pendingPedido?.productos)
+    && state.pendingPedido.productos.length
+    && state.pendingPedido?.direccion
+    && state.pendingPedido?.metodo_pago
+  );
+}
 
+function isImageReferencePhrase(texto = "") {
   const normalized = normalizarTextoAnalisis(texto);
   if (!normalized) {
     return false;
@@ -4022,12 +4041,36 @@ function isImageReviewRequest(texto = "", state = null) {
   return [
     /\b(puedes|puede|podrias|podrías)\s+(leer|revisar)\s+(mi\s+)?(imagen|foto)\b/i,
     /\b(lee|revisa)\s+(la\s+)?(imagen|foto)\b/i,
+    /\b(los|lo)\s+de\s+la\s+imagen\b/i,
+    /\bel\s+pedido\s+de\s+la\s+foto\b/i,
+    /^la\s+(foto|imagen)$/i,
+    /^eso$/i,
     /\b(esa|eso)\s+es\s+un\s+pedido\b/i,
+    /\bes\s+un\s+pedido\b/i,
     /\bnecesito\s+eso\b/i,
     /\bsi[,\s]+es\s+un\s+pedido\b/i,
     /\bs[ií]\s*,?\s+es\s+un\s+pedido\b/i,
     /\brevisa\s+mi\s+imagen\b/i
   ].some((pattern) => pattern.test(normalized));
+}
+
+function isImageReviewRequest(texto = "", state = null) {
+  return Boolean(getLastImageContext(state)) && isImageReferencePhrase(texto);
+}
+
+function logLastImageContextFound(imageContext = null, telefono = null, sourceMessageId = null) {
+  if (!imageContext) {
+    return;
+  }
+
+  logEvent("LAST_IMAGE_CONTEXT_FOUND", {
+    telefono: telefono || imageContext.phone || null,
+    sourceMessageId: sourceMessageId || imageContext.sourceMessageId || null,
+    mediaId: imageContext.mediaId || null,
+    status: imageContext.status || null,
+    timestamp: imageContext.timestamp || null,
+    hasAnalysis: Boolean(imageContext.analysis)
+  });
 }
 
 async function processImageOrder(image = null) {
@@ -4110,10 +4153,10 @@ function shouldTreatImageAsReceipt({ caption = null, activeOrder = null, imageAn
     return true;
   }
 
-  return Boolean(activeOrder) && !hasItems && !hasUncertain;
+  return false;
 }
 
-async function executeRecentImageReview({ telefono, sourceMessageId, origen = "webhook", simulated = false, inboundMessage = null, state = null, imageContext = null }) {
+async function executeRecentImageReview({ telefono, sourceMessageId, origen = "webhook", simulated = false, inboundMessage = null, state = null, imageContext = null, triggerText = null, requireConfirmation = false }) {
   let imageAnalysis = {
     items: [],
     uncertain_lines: [],
@@ -4123,9 +4166,23 @@ async function executeRecentImageReview({ telefono, sourceMessageId, origen = "w
     overall_confidence: 0
   };
 
+  logEvent("IMAGE_ORDER_PROCESS_STARTED", {
+    telefono,
+    sourceMessageId,
+    mediaId: imageContext?.mediaId || null,
+    triggerText: limpiarTexto(triggerText) || null,
+    requireConfirmation
+  });
+
   try {
     imageAnalysis = await processImageOrder(imageContext);
   } catch (error) {
+    logEvent("IMAGE_ORDER_PROCESS_FAILED", {
+      telefono,
+      sourceMessageId,
+      mediaId: imageContext?.mediaId || null,
+      error: error.message
+    }, "warn");
     logEvent("MODEL_ERROR", {
       model: OPENAI_MODEL,
       error: error.message,
@@ -4141,6 +4198,16 @@ async function executeRecentImageReview({ telefono, sourceMessageId, origen = "w
       timestamp: Date.now()
     });
   }
+
+  logEvent("IMAGE_ORDER_PROCESS_COMPLETED", {
+    telefono,
+    sourceMessageId,
+    mediaId: imageContext?.mediaId || null,
+    items: imageAnalysis.items.length,
+    uncertainLines: imageAnalysis.uncertain_lines.length,
+    overallConfidence: imageAnalysis.overall_confidence,
+    requireConfirmation
+  });
 
   const normalizedText = buildImageOrderNormalizedText(imageAnalysis, imageContext?.caption || null);
   if (!normalizedText) {
@@ -4174,6 +4241,7 @@ async function executeRecentImageReview({ telefono, sourceMessageId, origen = "w
     skipInboundPersist: Boolean(inboundMessage),
     existingInboundMessage: inboundMessage,
     imageAnalysis,
+    imageRequiresConfirmation: requireConfirmation,
     imageCaption: imageContext?.caption || null
   });
 }
@@ -4202,6 +4270,7 @@ function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalys
   }
 
   const missingData = Array.isArray(evaluacion?.faltantes) ? evaluacion.faltantes : [];
+  const requiresConfirmation = missingData.includes("confirmacion_imagen") || missingData.includes("confirmacion_catalogo");
   if (missingData.includes("direccion")) {
     if (lines.length) {
       lines.push("");
@@ -4215,11 +4284,22 @@ function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalys
     lines.push("¿Qué método de pago vas a usar?");
   }
 
+  if (!missingData.includes("direccion") && pedido?.direccion) {
+    if (lines.length) {
+      lines.push("");
+    }
+    lines.push(`Dirección: ${pedido.direccion}`);
+  }
+
+  if (!missingData.includes("metodo_pago") && pedido?.metodo_pago) {
+    lines.push(`Pago: ${pedido.metodo_pago}`);
+  }
+
   if (!lines.length) {
     return "No alcancé a leer bien la imagen 😊 ¿Me la envías un poco más clara o me escribes el pedido?";
   }
 
-  if (uncertainLines.length) {
+  if (requiresConfirmation) {
     lines.push("", "¿Me confirmas si está correcto?");
   }
 
@@ -4261,7 +4341,7 @@ async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = 
     caption,
     persistedMedia,
     analysis: imageAnalysisOverride,
-    status: "pending_ocr"
+    status: "pending"
   });
   setLastImageContext(state, storedImageContext);
 
@@ -4306,7 +4386,9 @@ async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = 
     simulated,
     inboundMessage,
     state,
-    imageContext: storedImageContext
+    imageContext: storedImageContext,
+    triggerText: caption,
+    requireConfirmation: false
   });
 }
 
@@ -5269,7 +5351,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
   }
 }
 
-async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, skipRateLimit = false, skipImageHandling = false, skipInboundPersist = false, existingInboundMessage = null, imageAnalysis = null, imageAnalysisOverride = null, imageCaption = null }) {
+async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, skipRateLimit = false, skipImageHandling = false, skipInboundPersist = false, existingInboundMessage = null, imageAnalysis = null, imageAnalysisOverride = null, imageRequiresConfirmation = false, imageCaption = null }) {
   logEvent("mensaje_recibido", { origen, telefono, sourceMessageId, messageType, mediaId: mediaId || null });
 
   const receivedAtMs = Date.now();
@@ -5360,7 +5442,60 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       });
 
   const lastImageContext = getLastImageContext(state);
+  if (messageType === "text" && esConfirmacionCasual(mensaje) && hasPendingImageConfirmation(state)) {
+    logLastImageContextFound(lastImageContext, telefono, sourceMessageId);
+    const pedidoConfirmado = calcularTotalesPedido({
+      ...state.pendingPedido,
+      customer_type_applied: customerProfile.customerType,
+      price_tier_applied: customerProfile.customerType
+    });
+    const evaluacionConfirmada = evaluarPedido(pedidoConfirmado, { ambiguities: [], unmatched: [] });
+    const persisted = await persistirPedidoFinal({
+      pedido: pedidoConfirmado,
+      telefono,
+      mensajeOriginal: mensaje,
+      sourceMessageId
+    });
+    state.pendingPedido = null;
+    limpiarAclaracionPendiente(state);
+    actualizarMemoriaConversacional(state, { pedido: pedidoConfirmado, evaluacion: evaluacionConfirmada, intent: "order_request" });
+    const respuesta = construirRespuestaPedido(pedidoConfirmado, evaluacionConfirmada, { availableProducts: buildCatalogShortList(5) });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: persisted.order?.id || null });
+    return {
+      pedido: pedidoConfirmado,
+      evaluacion: evaluacionConfirmada,
+      order: persisted.order,
+      inboundMessage,
+      respuesta: delivery?.respuesta || respuesta,
+      delivery,
+      intent: "order_request",
+      sheets: persisted.sheets
+    };
+  }
+  if (messageType === "text" && isImageReferencePhrase(mensaje)) {
+    logEvent("IMAGE_REFERENCE_DETECTED", {
+      telefono,
+      sourceMessageId,
+      hasLastImage: Boolean(lastImageContext),
+      text: limpiarTexto(mensaje)?.slice(0, 120) || null
+    });
+  }
+  if (messageType === "text" && isImageReferencePhrase(mensaje) && !lastImageContext) {
+    const respuesta = "Claro 😊 envíame la imagen del pedido y la reviso.";
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return {
+      pedido: state.pendingPedido || null,
+      evaluacion: state.pendingPedido ? evaluarPedido(state.pendingPedido, { ambiguities: [], unmatched: [] }) : null,
+      order: null,
+      inboundMessage,
+      respuesta,
+      delivery,
+      intent: "image_reference_missing",
+      sheets: { saved: false, skipped: true, reason: "missing_recent_image" }
+    };
+  }
   if (messageType === "text" && isImageReviewRequest(mensaje, state) && lastImageContext) {
+    logLastImageContextFound(lastImageContext, telefono, sourceMessageId);
     return executeRecentImageReview({
       telefono,
       sourceMessageId,
@@ -5368,7 +5503,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       simulated,
       inboundMessage,
       state,
-      imageContext: lastImageContext
+      imageContext: lastImageContext,
+      triggerText: mensaje,
+      requireConfirmation: true
     });
   }
 
@@ -5988,6 +6125,33 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     });
   }
 
+  const imageOrderConfidence = imageAnalysis ? buildImageOrderConfidence(imageAnalysis) : 0;
+  const shouldRequireImageConfirmation = Boolean(
+    imageAnalysis
+    && imageRequiresConfirmation
+    && pedidoCombinado?.productos?.length
+    && pedidoCombinado?.direccion
+    && pedidoCombinado?.metodo_pago
+    && (!IMAGE_ORDER_AUTO_PERSIST_ON_HIGH_CONFIDENCE
+      || !evaluacionCombinada.esValido
+      || Boolean(imageAnalysis?.uncertain_lines?.length)
+      || imageOrderConfidence < IMAGE_ORDER_AUTO_PERSIST_MIN_CONFIDENCE)
+  );
+
+  if (shouldRequireImageConfirmation) {
+    evaluacionCombinada.esValido = false;
+    evaluacionCombinada.faltantes = [...new Set([...(evaluacionCombinada.faltantes || []), "confirmacion_imagen"] )];
+    logEvent("IMAGE_ORDER_VALIDATED", {
+      telefono,
+      sourceMessageId,
+      confirmedProducts: Array.isArray(pedidoCombinado.productos) ? pedidoCombinado.productos.map((item) => item?.producto).filter(Boolean) : [],
+      uncertainLines: imageAnalysis?.uncertain_lines?.length || 0,
+      esValido: evaluacionCombinada.esValido,
+      faltantes: evaluacionCombinada.faltantes || [],
+      reason: "awaiting_image_confirmation"
+    });
+  }
+
   let resultado = {
     pedido: pedidoCombinado,
     evaluacion: evaluacionCombinada,
@@ -6066,7 +6230,14 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
         guideMode: orderGuideMode
       });
   rememberOrderGuideShown(state, orderGuideMode);
-  const respuesta = orderGuideMode !== "none"
+  const shouldBypassAiForImage = Boolean(
+    imageAnalysis
+    && (imageRequiresConfirmation
+      || imageAnalysis?.uncertain_lines?.length
+      || resultado?.evaluacion?.faltantes?.includes("confirmacion_imagen")
+      || resultado?.evaluacion?.faltantes?.includes("confirmacion_catalogo"))
+  );
+  const respuesta = orderGuideMode !== "none" || shouldBypassAiForImage
     ? fallbackRespuesta
     : await generarRespuestaConversacional({
         telefono,
@@ -6912,6 +7083,7 @@ module.exports = {
   resolveProductFromCatalog,
   resolverProductoCatalogo,
   analizarProductosCatalogoDesdeTexto,
+  obtenerEstadoConversacion,
   ejecutarFlujoMensaje,
   sanitizeAiResponseAgainstFallback,
   buildValidatedResponseContext

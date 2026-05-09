@@ -2,7 +2,8 @@ const {
   bootstrapCatalogoDesdeTreinta,
   resolverProductoCatalogo,
   analizarProductosCatalogoDesdeTexto,
-  ejecutarFlujoMensaje
+  ejecutarFlujoMensaje,
+  obtenerEstadoConversacion
 } = require("../server");
 
 function assert(condition, message, details = null) {
@@ -164,6 +165,49 @@ async function run() {
   const case18Text = case18.delivery?.respuesta || case18.respuesta || "";
   assert(/no alcancé a leer bien la imagen/i.test(case18Text), "18. imagen sin productos debe pedir una imagen más clara o texto", case18);
   checks.push({ case: 18, ok: true, result: case18Text });
+
+  const phone19 = `57300012${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone19, sourceMessageId: `test19a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("image-order-link"), mediaMimeType: "image/jpeg", mediaFilename: "pedido6.jpg", imageAnalysisOverride: simulatedImageAnalysis, skipRateLimit: true });
+  await ejecutarFlujoMensaje({ mensaje: "cl 41 - 08 28 . Efectivo", telefono: phone19, sourceMessageId: `test19b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case19 = await ejecutarFlujoMensaje({ mensaje: "los de la imagen", telefono: phone19, sourceMessageId: `test19c_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case19Text = case19.delivery?.respuesta || case19.respuesta || "";
+  assert(/griego 500 g/i.test(case19Text) && /aloe litro 1000 ml|aloe litro/i.test(case19Text) && /dirección: cl 41 - 08 28/i.test(case19Text) && /pago: efectivo/i.test(case19Text) && /confirmas/i.test(case19Text), "19. imagen previa debe enlazarse al contexto activo con dirección y pago", case19);
+  checks.push({ case: 19, ok: true, result: case19Text });
+
+  const phone20 = `57300013${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone20, sourceMessageId: `test20a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("image-order-es-pedido"), mediaMimeType: "image/jpeg", mediaFilename: "pedido7.jpg", imageAnalysisOverride: simulatedImageAnalysis, skipRateLimit: true });
+  const case20 = await ejecutarFlujoMensaje({ mensaje: "es un pedido", telefono: phone20, sourceMessageId: `test20b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case20Text = case20.delivery?.respuesta || case20.respuesta || "";
+  assert(/griego 500 g/i.test(case20Text) && /aloe litro 1000 ml|aloe litro/i.test(case20Text), "20. imagen previa + 'es un pedido' debe ejecutar OCR", case20);
+  checks.push({ case: 20, ok: true, result: case20Text });
+
+  const phone21 = `57300014${Date.now().toString().slice(-4)}`;
+  const case21 = await ejecutarFlujoMensaje({ mensaje: "los de la imagen", telefono: phone21, sourceMessageId: `test21_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case21Text = case21.delivery?.respuesta || case21.respuesta || "";
+  assert(/envíame la imagen del pedido y la reviso/i.test(case21Text), "21. sin imagen previa debe pedir la imagen", case21);
+  checks.push({ case: 21, ok: true, result: case21Text });
+
+  const phone22 = `57300015${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone22, sourceMessageId: `test22a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("expired-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido8.jpg", imageAnalysisOverride: simulatedImageAnalysis, skipRateLimit: true });
+  const state22 = obtenerEstadoConversacion(phone22);
+  if (state22?.lastImageContext) {
+    state22.lastImageContext.timestamp = Date.now() - (60 * 60 * 1000);
+    state22.lastImageTimestamp = state22.lastImageContext.timestamp;
+  }
+  const case22 = await ejecutarFlujoMensaje({ mensaje: "la foto", telefono: phone22, sourceMessageId: `test22b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const case22Text = case22.delivery?.respuesta || case22.respuesta || "";
+  assert(/envíame la imagen del pedido y la reviso/i.test(case22Text), "22. imagen expirada debe pedir una nueva imagen", case22);
+  checks.push({ case: 22, ok: true, result: case22Text });
+
+  const phone23 = `57300016${Date.now().toString().slice(-4)}`;
+  await ejecutarFlujoMensaje({ mensaje: "", telefono: phone23, sourceMessageId: `test23a_${Date.now()}`, origen: "script", simulated: true, messageType: "image", mediaId: `img_${Date.now()}`, mediaBuffer: Buffer.from("confirm-image"), mediaMimeType: "image/jpeg", mediaFilename: "pedido9.jpg", imageAnalysisOverride: handwrittenAnalysis, skipRateLimit: true });
+  await ejecutarFlujoMensaje({ mensaje: "cl 41 - 08 28 efectivo", telefono: phone23, sourceMessageId: `test23b_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const step23 = await ejecutarFlujoMensaje({ mensaje: "los de la imagen", telefono: phone23, sourceMessageId: `test23c_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  const step23Text = step23.delivery?.respuesta || step23.respuesta || "";
+  assert(/confirmas/i.test(step23Text), "23. antes de guardar con imagen debe pedir confirmación", step23);
+  const case23 = await ejecutarFlujoMensaje({ mensaje: "sí", telefono: phone23, sourceMessageId: `test23d_${Date.now()}`, origen: "script", simulated: true, skipRateLimit: true });
+  assert(Boolean(case23.order?.id), "23. tras confirmación debe guardar el pedido", case23);
+  checks.push({ case: 23, ok: true, result: case23.order?.id || null });
 
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 }
