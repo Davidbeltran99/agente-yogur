@@ -212,6 +212,41 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function formatCustomizationList(customizations = []) {
+  return Array.isArray(customizations)
+    ? customizations.filter((item) => item?.label && item?.value).map((item) => `${item.label}: ${item.value}`)
+    : [];
+}
+
+function renderCustomizationHtml(customizations = []) {
+  const items = formatCustomizationList(customizations);
+  if (!items.length) {
+    return '<p class="helper-text">Sin observaciones</p>';
+  }
+
+  return `<div class="meta-list premium-meta-list">${items.map((item) => `<div class="meta-item"><span>Observación</span>${escapeHtml(item)}</div>`).join("")}</div>`;
+}
+
+function renderReceiptHtml(receipt) {
+  if (!receipt?.path) {
+    return '<p class="helper-text">Sin comprobante</p>';
+  }
+
+  const isImage = /\.(png|jpe?g|webp|gif)$/i.test(receipt.path) || String(receipt.mimeType || "").startsWith("image/");
+  return `
+    <div class="items-list">
+      <div class="item-row premium-item-row detail-product-row">
+        <div>
+          <strong>Comprobante recibido</strong>
+          <div class="helper-text">${escapeHtml(receipt.mimeType || "Archivo adjunto")}</div>
+          <div class="helper-text"><a href="${escapeHtml(receipt.path)}" target="_blank" rel="noopener noreferrer">Abrir comprobante</a></div>
+        </div>
+      </div>
+      ${isImage ? `<img src="${escapeHtml(receipt.path)}" alt="Comprobante del pedido" style="width:100%;max-height:280px;object-fit:contain;border-radius:16px;border:1px solid rgba(143,164,191,.18);background:rgba(255,255,255,.65);padding:8px;box-sizing:border-box;">` : ""}
+    </div>
+  `;
+}
+
 function formatOrderItemsSummary(order) {
   if (order?.resumenItems) return order.resumenItems;
   if (!Array.isArray(order?.items) || !order.items.length) return "-";
@@ -1193,15 +1228,21 @@ function renderDetail() {
 
   const dateMeta = formatDateTimeStack(order.fechaRegistro);
   const customerTierLabel = formatCustomerTypeLabel(order.customerTypeApplied || order.priceTierApplied);
+  const orderCustomizations = formatCustomizationList(order.customizations);
   const itemsHtml = (order.items || []).length
-    ? order.items.map((item) => `
-        <div class="item-row premium-item-row detail-product-row">
-          <div>
-            <strong>• ${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))} — ${escapeHtml(formatCurrency(item.subtotal || 0))}</strong>
-            <div class="helper-text">Unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))} · Fuente: ${escapeHtml(formatCustomerTypeLabel(item.priceSource || item.price_source))}</div>
+    ? order.items.map((item) => {
+        const itemCustomizations = formatCustomizationList(item.customizations);
+        const itemNotes = [item.productNotes || item.product_notes || null, ...itemCustomizations].filter(Boolean).join(" · ");
+        return `
+          <div class="item-row premium-item-row detail-product-row">
+            <div>
+              <strong>• ${escapeHtml([item.cantidad ?? "?", item.producto || "Producto", item.sabor || null].filter(Boolean).join(" "))} — ${escapeHtml(formatCurrency(item.subtotal || 0))}</strong>
+              <div class="helper-text">Unitario: ${escapeHtml(formatCurrency(item.precioUnitario || item.precio_unitario || 0))} · Fuente: ${escapeHtml(formatCustomerTypeLabel(item.priceSource || item.price_source))}</div>
+              ${itemNotes ? `<div class="helper-text">${escapeHtml(itemNotes)}</div>` : ""}
+            </div>
           </div>
-        </div>
-      `).join("")
+        `;
+      }).join("")
     : "<p class=\"helper-text\">No hay detalle de productos disponible.</p>";
 
   const statusLabel = getStatusLabel(order.estado);
@@ -1256,8 +1297,15 @@ function renderDetail() {
         <div class="items-list">${itemsHtml}</div>
       </div>
       <div class="detail-card">
-        <h3>${icon("file-text")} Notas</h3>
-        <p class="helper-text">${escapeHtml(order.observaciones || "Sin observaciones")}</p>
+        <h3>${icon("file-text")} Observaciones</h3>
+        ${renderCustomizationHtml(order.customizations)}
+        ${order.notes ? `<p class="helper-text">${escapeHtml(order.notes)}</p>` : ""}
+        ${order.observaciones ? `<p class="helper-text">${escapeHtml(order.observaciones)}</p>` : ""}
+        ${!order.notes && !order.observaciones && !orderCustomizations.length ? '<p class="helper-text">Sin observaciones</p>' : ""}
+      </div>
+      <div class="detail-card">
+        <h3>${icon("file-text")} Comprobante</h3>
+        ${renderReceiptHtml(order.receipt)}
       </div>
     </div>
   `;
@@ -1465,7 +1513,11 @@ function renderHistoryDetail() {
         <h3>Pedidos archivados</h3>
         <div class="items-list">
           ${ordersList.length
-            ? ordersList.map((order) => `<div class="item-row"><strong>${escapeHtml(order.cliente || "Cliente sin nombre")}</strong><div class="helper-text">${escapeHtml(order.customerTypeLabel || formatCustomerTypeLabel(order.customerTypeApplied || order.priceTierApplied))} · ${escapeHtml(order.resumenItems || "Sin detalle")}</div><div class="helper-text">${escapeHtml(formatCurrency(order.total || 0))}</div></div>`).join("")
+            ? ordersList.map((order) => {
+                const customizationText = formatCustomizationList(order.customizations).join(" · ");
+                const receiptText = order.receipt?.path ? " · Comprobante recibido" : "";
+                return `<div class="item-row"><strong>${escapeHtml(order.cliente || "Cliente sin nombre")}</strong><div class="helper-text">${escapeHtml(order.customerTypeLabel || formatCustomerTypeLabel(order.customerTypeApplied || order.priceTierApplied))} · ${escapeHtml(order.resumenItems || "Sin detalle")}</div>${customizationText ? `<div class="helper-text">${escapeHtml(customizationText)}</div>` : ""}${order.notes ? `<div class="helper-text">${escapeHtml(order.notes)}</div>` : ""}<div class="helper-text">${escapeHtml(formatCurrency(order.total || 0))}${escapeHtml(receiptText)}</div></div>`;
+              }).join("")
             : '<p class="helper-text">No se guardaron pedidos en este cierre.</p>'}
         </div>
       </div>

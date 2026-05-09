@@ -21,6 +21,7 @@ const {
   listOrders,
   listOrdersIncludingArchived,
   updateOrderStatus,
+  attachReceiptToOrder,
   countOrders,
   getActiveOrderByPhone,
   importOrders,
@@ -90,11 +91,23 @@ const PANEL_LOGIN_RATE_LIMIT_WINDOW_MS = Number(process.env.PANEL_LOGIN_RATE_LIM
 const PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS || 5);
 const PANEL_AUTH_COOKIE_SECURE = parseBooleanEnv(process.env.PANEL_AUTH_COOKIE_SECURE, String(process.env.NODE_ENV || "").trim().toLowerCase() === "production");
 const PRODUCT_DISAMBIGUATION_TTL_MS = Number(process.env.PRODUCT_DISAMBIGUATION_TTL_MS || 15 * 60 * 1000);
+const ORDER_MEDIA_DIR = path.join(__dirname, "data", "order-media");
+const ADMIN_WHATSAPP_NUMBERS = new Set(String(process.env.ADMIN_WHATSAPP_NUMBERS || "")
+  .split(",")
+  .map((value) => normalizePhone(value))
+  .filter(Boolean));
+const BUSINESS_HOURS_ENABLED = parseBooleanEnv(process.env.BUSINESS_HOURS_ENABLED, false);
+const BUSINESS_OPEN_HOUR = Number(process.env.BUSINESS_OPEN_HOUR || 7);
+const BUSINESS_CLOSE_HOUR = Number(process.env.BUSINESS_CLOSE_HOUR || 20);
+const BUSINESS_TIMEZONE = String(process.env.BUSINESS_TIMEZONE || "America/Bogota").trim() || "America/Bogota";
 const panelLoginAttemptState = new Map();
+
+fs.mkdirSync(ORDER_MEDIA_DIR, { recursive: true });
 
 app.set("trust proxy", 1);
 app.use(express.json());
 app.use("/assets", express.static(path.join(publicDir, "assets")));
+app.use("/order-media", express.static(ORDER_MEDIA_DIR));
 app.get("/styles.css", (_req, res) => res.sendFile(path.join(publicDir, "styles.css")));
 app.get("/app.js", (_req, res) => {
   const runtimeConfig = [
@@ -2416,17 +2429,21 @@ async function generarRespuestaConversacional({ telefono, sourceMessageId, routi
 function enriquecerPedidoDetectado(pedido, textoCliente, catalogAnalysis = { items: [] }) {
   const fechaEntregaDetectada = extraerFechaEntregaDesdeTexto(textoCliente);
   const fechaEntregaIA = sanitizeFechaEntregaIA(pedido?.fecha_entrega, textoCliente);
+  const customizations = mergeCustomizations(pedido?.customizations, extractOrderCustomizations(textoCliente));
+  const observacionesCustom = buildObservacionesFromCustomizations(customizations);
 
   return {
     ...pedido,
     customer_type_applied: normalizeCustomerType(pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public"),
     price_tier_applied: normalizeCustomerType(pedido?.price_tier_applied ?? pedido?.priceTierApplied ?? pedido?.customer_type_applied ?? pedido?.customerTypeApplied, "public"),
     cliente: pedido?.cliente || extraerClienteDesdeTexto(textoCliente),
-    productos: Array.isArray(catalogAnalysis.items) ? catalogAnalysis.items : [],
+    productos: applyCustomizationsToProducts(Array.isArray(catalogAnalysis.items) ? catalogAnalysis.items : [], customizations),
     direccion: pedido?.direccion || extraerDireccionDesdeTexto(textoCliente),
     fecha_entrega: fechaEntregaDetectada || fechaEntregaIA || null,
     metodo_pago: pedido?.metodo_pago || extraerMetodoPagoDesdeTexto(textoCliente),
-    observaciones: pedido?.observaciones || null,
+    observaciones: pedido?.observaciones || observacionesCustom || null,
+    notes: pedido?.notes || buildNotesFromCustomizations(customizations),
+    customizations,
     estado: pedido?.estado || "pendiente"
   };
 }
@@ -2554,7 +2571,9 @@ function normalizarPedido(pedido = {}) {
             ? Number(item.cantidad)
             : null,
           precio_unitario: parseOptionalNumber(item?.precio_unitario),
-          subtotal: parseOptionalNumber(item?.subtotal)
+          subtotal: parseOptionalNumber(item?.subtotal),
+          product_notes: limpiarTexto(item?.product_notes ?? item?.productNotes),
+          customizations: mergeCustomizations([], Array.isArray(item?.customizations) ? item.customizations : [])
         }))
         .filter((item) => item.producto || item.sabor || item.cantidad)
     : [];
@@ -2566,6 +2585,15 @@ function normalizarPedido(pedido = {}) {
     fecha_entrega: limpiarTexto(pedido.fecha_entrega),
     metodo_pago: normalizarMetodoPago(pedido.metodo_pago),
     observaciones: limpiarTexto(pedido.observaciones),
+    notes: limpiarTexto(pedido.notes),
+    customizations: mergeCustomizations([], Array.isArray(pedido.customizations) ? pedido.customizations : []),
+    receipt: pedido?.receipt && typeof pedido.receipt === "object"
+      ? {
+          mediaId: limpiarTexto(pedido.receipt.mediaId),
+          path: limpiarTexto(pedido.receipt.path),
+          mimeType: limpiarTexto(pedido.receipt.mimeType)
+        }
+      : null,
     estado: limpiarTexto(pedido.estado) || "pendiente"
   };
 }
@@ -2596,13 +2624,17 @@ function calcularTotalesPedido(pedido = {}) {
       : null;
     const priceSource = limpiarTexto(item?.price_source) || (parseOptionalNumber(item?.precio_unitario ?? item?.precioUnitario) !== null ? (resolvedPrice.priceSource || "public") : resolvedPrice.priceSource);
 
+    const itemCustomizations = mergeCustomizations(item?.customizations, []);
+
     return {
       producto: normalizarProducto(catalogProduct?.nombre || item?.producto),
       sabor: limpiarTexto(item?.sabor),
       cantidad,
       precio_unitario: precioUnitario,
       subtotal,
-      price_source: priceSource || "public"
+      price_source: priceSource || "public",
+      product_notes: limpiarTexto(item?.product_notes ?? item?.productNotes) || buildNotesFromCustomizations(itemCustomizations),
+      customizations: itemCustomizations
     };
   }).filter((item) => item.producto || item.sabor || item.cantidad);
 
@@ -2783,6 +2815,149 @@ function formatCurrency(value) {
   }).format(numeric);
 }
 
+function getDatePartsInTimeZone(date = new Date(), timeZone = BUSINESS_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+  const parts = formatter.formatToParts(date).reduce((acc, part) => {
+    if (part.type !== "literal") {
+      acc[part.type] = part.value;
+    }
+    return acc;
+  }, {});
+
+  return {
+    year: Number(parts.year || 0),
+    month: Number(parts.month || 0),
+    day: Number(parts.day || 0),
+    hour: Number(parts.hour || 0),
+    minute: Number(parts.minute || 0),
+    dateKey: `${parts.year || "0000"}-${parts.month || "00"}-${parts.day || "00"}`
+  };
+}
+
+function getDateKeyInTimeZone(date = new Date(), timeZone = BUSINESS_TIMEZONE) {
+  return getDatePartsInTimeZone(date, timeZone).dateKey;
+}
+
+function isDateInTimeZone(value, dateKey, timeZone = BUSINESS_TIMEZONE) {
+  if (!value || !dateKey) {
+    return false;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value || "").slice(0, 10) === dateKey;
+  }
+
+  return getDateKeyInTimeZone(date, timeZone) === dateKey;
+}
+
+function getBusinessHoursContext(now = new Date()) {
+  const parts = getDatePartsInTimeZone(now, BUSINESS_TIMEZONE);
+  const outsideBusinessHours = BUSINESS_HOURS_ENABLED
+    ? (parts.hour < BUSINESS_OPEN_HOUR || parts.hour >= BUSINESS_CLOSE_HOUR)
+    : false;
+
+  return {
+    ...parts,
+    enabled: BUSINESS_HOURS_ENABLED,
+    outsideBusinessHours
+  };
+}
+
+function appendBusinessHoursNotice(text) {
+  if (!text || !getBusinessHoursContext().outsideBusinessHours) {
+    return text;
+  }
+
+  const notice = "Gracias 😊 Te dejo el pedido registrado. Será revisado en nuestro horario de atención.";
+  return String(text).includes(notice) ? text : `${text}\n\n${notice}`;
+}
+
+const CUSTOMIZATION_DEFINITIONS = [
+  { key: "azucar", label: "Azúcar", value: "21%", pattern: /\b(\d{1,2})\s*%\s*(?:de\s*)?az[uú]car\b/i, text: (match) => `${match[1]}% de azúcar`, valueFromMatch: (match) => `${match[1]}%` },
+  { key: "azucar", label: "Azúcar", value: "sin", pattern: /\bsin\s+az[uú]car\b/i, text: () => "sin azúcar" },
+  { key: "azucar", label: "Azúcar", value: "menos", pattern: /\bmenos\s+az[uú]car\b/i, text: () => "menos azúcar" },
+  { key: "dulzor", label: "Dulzor", value: "más", pattern: /\bm[aá]s\s+dulce\b/i, text: () => "más dulce" },
+  { key: "dulzor", label: "Dulzor", value: "poco", pattern: /\bpoco\s+dulce\b/i, text: () => "poco dulce" },
+  { key: "colorante", label: "Colorante", value: "poquito", pattern: /\bpoquito\s+colorante\b/i, text: () => "poquito colorante" },
+  { key: "colorante", label: "Colorante", value: "sin", pattern: /\bsin\s+colorante\b/i, text: () => "sin colorante" },
+  { key: "fruta", label: "Fruta", value: "con", pattern: /\bcon\s+fruta\b/i, text: () => "con fruta" },
+  { key: "fruta", label: "Fruta", value: "sin", pattern: /\bsin\s+fruta\b/i, text: () => "sin fruta" }
+];
+
+function mergeCustomizations(base = [], incoming = []) {
+  const merged = new Map();
+  for (const item of [...(Array.isArray(base) ? base : []), ...(Array.isArray(incoming) ? incoming : [])]) {
+    if (!item?.key) {
+      continue;
+    }
+
+    merged.set(item.key, item);
+  }
+
+  return Array.from(merged.values());
+}
+
+function extractOrderCustomizations(texto = "") {
+  const customizations = [];
+  const source = String(texto || "");
+
+  for (const definition of CUSTOMIZATION_DEFINITIONS) {
+    const match = source.match(definition.pattern);
+    if (!match) {
+      continue;
+    }
+
+    customizations.push({
+      key: definition.key,
+      label: definition.label,
+      value: typeof definition.valueFromMatch === "function" ? definition.valueFromMatch(match) : definition.value,
+      text: typeof definition.text === "function" ? definition.text(match) : definition.text
+    });
+  }
+
+  return mergeCustomizations([], customizations);
+}
+
+function buildObservacionesFromCustomizations(customizations = []) {
+  if (!Array.isArray(customizations) || !customizations.length) {
+    return null;
+  }
+
+  return customizations.map((item) => `- ${item.label}: ${item.value}`).join("\n");
+}
+
+function buildNotesFromCustomizations(customizations = []) {
+  if (!Array.isArray(customizations) || !customizations.length) {
+    return null;
+  }
+
+  return customizations.map((item) => `${item.label}: ${item.value}`).join(" | ");
+}
+
+function applyCustomizationsToProducts(productos = [], customizations = []) {
+  if (!Array.isArray(productos) || !productos.length) {
+    return [];
+  }
+
+  return productos.map((item) => {
+    const mergedCustomizations = mergeCustomizations(item?.customizations, customizations);
+    return {
+      ...item,
+      product_notes: buildNotesFromCustomizations(mergedCustomizations),
+      customizations: mergedCustomizations
+    };
+  });
+}
+
 function buildOrderAvatarLabel(order) {
   const source = limpiarTexto(order?.cliente) || limpiarTexto(order?.telefono) || "CL";
   const parts = source.split(/\s+/).filter(Boolean);
@@ -2790,13 +2965,12 @@ function buildOrderAvatarLabel(order) {
 }
 
 function buildDashboardSummary(orders = []) {
-  const now = new Date();
-  const todayKey = now.toISOString().slice(0, 10);
-  const todayOrders = orders.filter((order) => String(order.fechaRegistro || "").slice(0, 10) === todayKey);
+  const todayKey = getDateKeyInTimeZone(new Date(), BUSINESS_TIMEZONE);
+  const todayOrders = orders.filter((order) => isDateInTimeZone(order.fechaRegistro, todayKey, BUSINESS_TIMEZONE));
   return buildOperationalSummary(todayOrders, todayKey);
 }
 
-function buildOperationalSummary(orders = [], dateKey = new Date().toISOString().slice(0, 10)) {
+function buildOperationalSummary(orders = [], dateKey = getDateKeyInTimeZone(new Date(), BUSINESS_TIMEZONE)) {
   const stats = {
     totalOrders: orders.length,
     totalSales: orders.reduce((sum, order) => sum + (Number(order.total) || 0), 0),
@@ -3267,6 +3441,109 @@ function persistirMensaje({ phone, direction, messageText, messageType = "text",
   });
 
   return message;
+}
+
+function normalizeAdminCommand(texto = "") {
+  return normalizarTextoAnalisis(texto).replace(/\s+/g, " ").trim();
+}
+
+function isAdminWhatsAppNumber(phone) {
+  return ADMIN_WHATSAPP_NUMBERS.has(normalizePhone(phone));
+}
+
+function buildAdminWhatsappResponse(command, phone) {
+  if (!isAdminWhatsAppNumber(phone)) {
+    return { handled: false, unauthorized: false, response: null };
+  }
+
+  const normalizedCommand = normalizeAdminCommand(command);
+  const todayKey = getDateKeyInTimeZone(new Date(), BUSINESS_TIMEZONE);
+  const todayOrders = listOrdersIncludingArchived().filter((order) => isDateInTimeZone(order.fechaRegistro, todayKey, BUSINESS_TIMEZONE));
+  const totalSales = todayOrders.reduce((sum, order) => sum + (Number(order.total) || 0), 0);
+  const pending = todayOrders.filter((order) => order.estado === "pendiente").length;
+  const distributor = todayOrders.filter((order) => normalizeCustomerType(order.customerTypeApplied || order.priceTierApplied, "public") === "distributor").length;
+  const publicOrders = todayOrders.length - distributor;
+
+  switch (normalizedCommand) {
+    case "ventas hoy":
+    case "total ventas":
+      return { handled: true, unauthorized: false, response: `💰 Ventas de hoy: ${formatCurrency(totalSales)}` };
+    case "pedidos pendientes":
+      return { handled: true, unauthorized: false, response: `🟡 Pedidos pendientes hoy: ${pending}` };
+    case "pedidos distribuidor":
+      return { handled: true, unauthorized: false, response: `📦 Pedidos distribuidor hoy: ${distributor}` };
+    case "pedidos publico":
+    case "pedidos público":
+      return { handled: true, unauthorized: false, response: `🛍️ Pedidos público hoy: ${publicOrders}` };
+    case "resumen hoy":
+      return {
+        handled: true,
+        unauthorized: false,
+        response: [
+          "📊 Resumen de hoy:",
+          `Pedidos: ${todayOrders.length}`,
+          `Ventas: ${formatCurrency(totalSales)}`,
+          `Pendientes: ${pending}`,
+          `Distribuidor: ${distributor}`,
+          `Público: ${publicOrders}`
+        ].join("\n")
+      };
+    default:
+      return { handled: false, unauthorized: false, response: null };
+  }
+}
+
+function isKnownAdminCommand(texto = "") {
+  return ["ventas hoy", "total ventas", "pedidos pendientes", "pedidos distribuidor", "pedidos publico", "pedidos público", "resumen hoy"].includes(normalizeAdminCommand(texto));
+}
+
+function persistOrderMediaFile({ phone, mediaId, mimeType, filename, buffer }) {
+  const extension = path.extname(filename || "") || `.${String((mimeType || "application/octet-stream").split("/").pop() || "bin").replace(/[^a-z0-9]+/gi, "")}`;
+  const safePhone = normalizePhone(phone) || "cliente";
+  const safeMediaId = String(mediaId || Date.now()).replace(/[^a-zA-Z0-9_-]+/g, "");
+  const fileName = `${safePhone}-${safeMediaId}${extension.startsWith(".") ? extension : `.${extension}`}`;
+  const absolutePath = path.join(ORDER_MEDIA_DIR, fileName);
+  fs.writeFileSync(absolutePath, buffer);
+  return {
+    mediaId,
+    mimeType,
+    path: `/order-media/${fileName}`,
+    absolutePath
+  };
+}
+
+async function handleIncomingReceiptImage({ telefono, sourceMessageId, simulated = false, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null }) {
+  const activeOrder = getActiveOrderByPhone(telefono);
+  const receipt = mediaBuffer
+    ? persistOrderMediaFile({ phone: telefono, mediaId, mimeType: mediaMimeType, filename: mediaFilename, buffer: mediaBuffer })
+    : { mediaId, mimeType: mediaMimeType, path: null, absolutePath: null };
+  const order = activeOrder ? attachReceiptToOrder(activeOrder.id, receipt) : null;
+  const inboundMessage = persistirMensaje({
+    phone: telefono,
+    direction: "in",
+    messageText: limpiarTexto(caption) || (order ? "Comprobante recibido" : "Imagen recibida"),
+    messageType: "image",
+    transcription: null,
+    mediaId,
+    whatsappMessageId: sourceMessageId,
+    orderId: order?.id || null
+  });
+  const respuesta = order
+    ? "Listo 😊 recibí el comprobante y lo asocié a tu pedido."
+    : "Listo 😊 recibí tu imagen. Cuando tenga un pedido activo la asocio como comprobante.";
+  const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: order?.id || null });
+  return {
+    ignored: false,
+    ignoredReason: null,
+    intent: "receipt_image",
+    pedido: order ? construirPedidoDesdeOrder(order) : null,
+    evaluacion: null,
+    order,
+    inboundMessage,
+    respuesta,
+    delivery,
+    sheets: { saved: false, skipped: true, reason: "receipt_only" }
+  };
 }
 
 function inferirNombreDesdeConversacion(phone) {
@@ -3847,11 +4124,17 @@ function construirPedidoDesdeOrder(order) {
       cantidad: item.cantidad || 1,
       precio_unitario: item.precioUnitario,
       subtotal: item.subtotal,
-      price_source: item.priceSource || item.price_source || "public"
+      price_source: item.priceSource || item.price_source || "public",
+      product_notes: item.productNotes || item.product_notes || null,
+      customizations: mergeCustomizations([], item.customizations)
     })),
     direccion: order.direccion || null,
     metodo_pago: order.metodoPago || null,
-    estado: "pendiente"
+    observaciones: order.observaciones || null,
+    notes: order.notes || null,
+    customizations: mergeCustomizations([], order.customizations),
+    receipt: order.receipt || null,
+    estado: order.estado || "pendiente"
   });
 }
 
@@ -4062,6 +4345,9 @@ function combinarPedidoParcialConOpciones(base = {}, incoming = {}, { appendProd
     fecha_entrega: incoming.fecha_entrega || base.fecha_entrega || null,
     metodo_pago: incoming.metodo_pago || base.metodo_pago || null,
     observaciones: incoming.observaciones || base.observaciones || null,
+    notes: incoming.notes || base.notes || null,
+    customizations: mergeCustomizations(base.customizations, incoming.customizations),
+    receipt: incoming.receipt || base.receipt || null,
     estado: incoming.estado || base.estado || "pendiente",
     total: null
   });
@@ -4112,12 +4398,14 @@ async function persistirPedidoFinal({ pedido, telefono, mensajeOriginal, sourceM
 }
 
 async function responderAlCliente({ telefono, respuesta, simulated = false, orderId = null }) {
+  const respuestaFinal = orderId ? appendBusinessHoursNotice(respuesta) : respuesta;
+
   logEvent("responder_al_cliente_called", {
     telefono,
     orderId,
     simulated,
     whatsappEnabled: WHATSAPP_ENABLED,
-    textLength: String(respuesta || "").length
+    textLength: String(respuestaFinal || "").length
   });
 
   if (simulated || !WHATSAPP_ENABLED) {
@@ -4125,7 +4413,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     const savedMessage = persistirMensaje({
       phone: telefono,
       direction: "out",
-      messageText: respuesta,
+      messageText: respuestaFinal,
       whatsappMessageId: simulatedMessageId,
       orderId
     });
@@ -4151,7 +4439,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
       sent: false,
       simulated: true,
       reason: simulated ? "simulate_endpoint" : "whatsapp_disabled",
-      respuesta,
+      respuesta: respuestaFinal,
       message: savedMessage
     };
   }
@@ -4159,16 +4447,16 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
   logEvent("whatsapp_send_started", {
     telefono,
     orderId,
-    textLength: String(respuesta || "").length
+    textLength: String(respuestaFinal || "").length
   });
 
   try {
-    const delivery = await enviarMensajeWhatsApp(telefono, respuesta);
+    const delivery = await enviarMensajeWhatsApp(telefono, respuestaFinal);
     const whatsappMessageId = delivery?.messages?.[0]?.id || null;
     const savedMessage = persistirMensaje({
       phone: telefono,
       direction: "out",
-      messageText: respuesta,
+      messageText: respuestaFinal,
       whatsappMessageId,
       orderId
     });
@@ -4192,7 +4480,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     return {
       sent: true,
       simulated: false,
-      respuesta,
+      respuesta: respuestaFinal,
       message: savedMessage,
       whatsappMessageId
     };
@@ -4207,7 +4495,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     return {
       sent: false,
       simulated: false,
-      respuesta,
+      respuesta: respuestaFinal,
       message: null,
       whatsappMessageId: null,
       error: error.response?.data || error.message
@@ -4215,7 +4503,7 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
   }
 }
 
-async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null }) {
+async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null }) {
   logEvent("mensaje_recibido", { origen, telefono, sourceMessageId, messageType, mediaId: mediaId || null });
 
   const receivedAtMs = Date.now();
@@ -4256,6 +4544,19 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     };
   }
 
+  if (messageType === "image") {
+    return handleIncomingReceiptImage({
+      telefono,
+      sourceMessageId,
+      simulated,
+      mediaId,
+      mediaBuffer,
+      mediaMimeType,
+      mediaFilename,
+      caption: mensaje
+    });
+  }
+
   const previousMessageCount = countMessagesByPhone(telefono);
   const activeOrderBefore = getActiveOrderByPhone(telefono);
   const state = obtenerEstadoConversacion(telefono);
@@ -4292,6 +4593,25 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     whatsappMessageId: sourceMessageId
   });
   appendRecentHistory(state, { role: "user", intent: routingIntent, text: mensaje });
+
+  if (isKnownAdminCommand(mensaje)) {
+    const adminCommand = buildAdminWhatsappResponse(mensaje, telefono);
+    const respuesta = adminCommand.handled
+      ? adminCommand.response
+      : "Este comando no está disponible para este número.";
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return {
+      pedido: null,
+      evaluacion: null,
+      order: null,
+      inboundMessage,
+      respuesta,
+      delivery,
+      firstContact: previousMessageCount === 0,
+      activeOrderBefore,
+      intent: adminCommand.handled ? "admin_command" : "admin_command_denied"
+    };
+  }
 
   logEvent("mensaje_extraido", {
     origen,
@@ -4654,7 +4974,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   return {
     ...resultado,
     inboundMessage,
-    respuesta,
+    respuesta: delivery?.respuesta || respuesta,
     delivery
   };
 }
@@ -5086,7 +5406,9 @@ async function extraerContenidoMensajeWhatsApp(mensaje) {
       text: String(mensaje.text.body || "").trim(),
       transcription: null,
       mediaId: null,
-      mimeType: null
+      mimeType: null,
+      mediaBuffer: null,
+      filename: null
     };
   }
 
@@ -5104,7 +5426,22 @@ async function extraerContenidoMensajeWhatsApp(mensaje) {
       text: transcription,
       transcription,
       mediaId: media.mediaId,
-      mimeType: media.mimeType
+      mimeType: media.mimeType,
+      mediaBuffer: media.buffer,
+      filename: media.filename
+    };
+  }
+
+  if (mensaje?.type === "image" && mensaje?.image?.id) {
+    const media = await obtenerMediaWhatsApp(mensaje.image.id);
+    return {
+      messageType: "image",
+      text: String(mensaje.image.caption || "").trim() || null,
+      transcription: null,
+      mediaId: media.mediaId,
+      mimeType: media.mimeType,
+      mediaBuffer: media.buffer,
+      filename: media.filename
     };
   }
 
@@ -5112,8 +5449,10 @@ async function extraerContenidoMensajeWhatsApp(mensaje) {
     messageType: mensaje?.type || null,
     text: null,
     transcription: null,
-    mediaId: mensaje?.audio?.id || null,
-    mimeType: null
+    mediaId: mensaje?.audio?.id || mensaje?.image?.id || null,
+    mimeType: null,
+    mediaBuffer: null,
+    filename: null
   };
 }
 
@@ -5159,7 +5498,7 @@ app.post("/webhook", async (req, res) => {
       logEvent("webhook_media_processing_error", {
         sourceMessageId: mensaje?.id || null,
         messageType: mensaje?.type || null,
-        mediaId: mensaje?.audio?.id || null,
+        mediaId: mensaje?.audio?.id || mensaje?.image?.id || null,
         error: error.response?.data || error.message
       }, "error");
 
@@ -5195,7 +5534,9 @@ app.post("/webhook", async (req, res) => {
         });
       }
 
-      return res.sendStatus(200);
+      if (extracted.messageType !== "image") {
+        return res.sendStatus(200);
+      }
     }
 
     logEvent("webhook_text_extracted", {
@@ -5241,7 +5582,10 @@ app.post("/webhook", async (req, res) => {
       simulated: false,
       messageType: extracted.messageType,
       transcription: extracted.transcription,
-      mediaId: extracted.mediaId
+      mediaId: extracted.mediaId,
+      mediaBuffer: extracted.mediaBuffer,
+      mediaMimeType: extracted.mimeType,
+      mediaFilename: extracted.filename
     });
 
     logEvent("after_ejecutar_flujo", {
@@ -5273,11 +5617,16 @@ app.post("/simulate-message", async (req, res) => {
   try {
     const messageType = limpiarTexto(req.body?.tipo || req.body?.messageType) || "text";
     const transcription = limpiarTexto(req.body?.transcripcion || req.body?.transcription);
-    const mensaje = limpiarTexto(req.body?.mensaje) || transcription;
+    const mensaje = limpiarTexto(req.body?.mensaje) || transcription || (messageType === "image" ? "Comprobante recibido" : null);
     const telefono = req.body?.telefono;
-    const mediaId = limpiarTexto(req.body?.mediaId) || (messageType === "audio" ? buildSimulatedSourceMessageId("audio") : null);
+    const mediaId = limpiarTexto(req.body?.mediaId) || (["audio", "image"].includes(messageType) ? buildSimulatedSourceMessageId(messageType) : null);
+    const mediaMimeType = limpiarTexto(req.body?.mimeType) || (messageType === "image" ? "image/jpeg" : null);
+    const mediaFilename = limpiarTexto(req.body?.filename) || (messageType === "image" ? "simulated-receipt.jpg" : null);
+    const mediaBuffer = messageType === "image"
+      ? (req.body?.imageBase64 ? Buffer.from(String(req.body.imageBase64), "base64") : Buffer.from("simulated-image"))
+      : null;
 
-    if (!mensaje || !telefono) {
+    if ((!mensaje && messageType !== "image") || !telefono) {
       return res.status(400).json({
         ok: false,
         error: "Faltan mensaje o telefono"
@@ -5316,7 +5665,10 @@ app.post("/simulate-message", async (req, res) => {
       simulated: true,
       messageType,
       transcription: messageType === "audio" ? (transcription || mensaje) : null,
-      mediaId
+      mediaId,
+      mediaBuffer,
+      mediaMimeType,
+      mediaFilename
     });
 
     return res.json({

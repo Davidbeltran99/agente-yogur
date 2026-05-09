@@ -30,6 +30,12 @@ function safeText(value) {
   return String(value ?? "").replace(/[\u{1F300}-\u{1FAFF}]/gu, "").trim();
 }
 
+function formatCustomizationLines(customizations = []) {
+  return Array.isArray(customizations)
+    ? customizations.filter((item) => item?.label && item?.value).map((item) => `${item.label}: ${item.value}`)
+    : [];
+}
+
 async function generateDailyClosurePdf({ closureId, summary }) {
   const filePath = path.join(reportsDir, `${closureId}.pdf`);
 
@@ -86,6 +92,16 @@ async function generateDailyClosurePdf({ closureId, summary }) {
         doc.text(`Tipo de precio: ${safeText(order.customerTypeLabel || order.priceTierLabel || "Público")}`);
         doc.text(`Pago: ${safeText(order.metodoPago || "Sin definir")}`);
         doc.text(`Detalle: ${safeText(order.resumenItems || "Sin detalle")}`);
+        const customizations = formatCustomizationLines(order.customizations);
+        if (customizations.length) {
+          doc.text(`Observaciones: ${safeText(customizations.join(" | "))}`);
+        }
+        if (order.notes) {
+          doc.text(`Notas: ${safeText(order.notes)}`);
+        }
+        if (order.receipt?.path) {
+          doc.text("Comprobante: recibido");
+        }
         doc.text(`Teléfono: ${safeText(order.telefono || "-")}`);
         doc.text(`Fecha: ${formatDate(order.fechaRegistro)}`);
         doc.moveDown(0.6);

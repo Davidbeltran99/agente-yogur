@@ -28,6 +28,10 @@ function getWhatsAppApiConfig() {
 
 function inferWhatsAppMediaExtension(mimeType = "") {
   const normalized = String(mimeType || "").toLowerCase();
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("png")) return "png";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("pdf")) return "pdf";
   if (normalized.includes("ogg")) return "ogg";
   if (normalized.includes("mpeg") || normalized.includes("mp3")) return "mp3";
   if (normalized.includes("wav")) return "wav";
@@ -96,7 +100,7 @@ async function obtenerMediaWhatsApp(mediaId) {
   const mimeType = metadataResponse.data?.mime_type || metadataResponse.data?.mimeType || "application/octet-stream";
 
   if (!mediaUrl) {
-    throw new Error("WhatsApp no devolvió URL de descarga para el audio");
+    throw new Error("WhatsApp no devolvió URL de descarga para la media");
   }
 
   const binaryResponse = await axios.get(mediaUrl, {
@@ -112,7 +116,7 @@ async function obtenerMediaWhatsApp(mediaId) {
     mimeType,
     sha256: metadataResponse.data?.sha256 || null,
     fileSize: metadataResponse.data?.file_size || null,
-    filename: `whatsapp-audio-${normalizedMediaId}.${inferWhatsAppMediaExtension(mimeType)}`,
+    filename: `whatsapp-media-${normalizedMediaId}.${inferWhatsAppMediaExtension(mimeType)}`,
     buffer: Buffer.from(binaryResponse.data)
   };
 }
@@ -267,6 +271,23 @@ function construirLineaOpcionAmbigua(option, index) {
   return `${showNumber ? `${index + 1}. ` : ""}${nombre}${precio ? ` — ${precio}` : ""}`;
 }
 
+function construirTextoPersonalizacion(customizations = []) {
+  const items = Array.isArray(customizations) ? customizations.filter((item) => item?.text) : [];
+  if (!items.length) {
+    return "";
+  }
+
+  if (items.length === 1) {
+    return items[0].text;
+  }
+
+  if (items.length === 2) {
+    return `${items[0].text} y ${items[1].text}`;
+  }
+
+  return `${items.slice(0, -1).map((item) => item.text).join(", ")} y ${items[items.length - 1].text}`;
+}
+
 function construirDetalleProductosAmable(productos = []) {
   if (!productos.length) {
     return null;
@@ -276,7 +297,8 @@ function construirDetalleProductosAmable(productos = []) {
     const cantidad = p.cantidad || "?";
     const nombre = [p.producto || "producto", p.sabor || null].filter(Boolean).join(" ");
     const subtotal = formatearMoneda(p.subtotal);
-    return `• ${cantidad} ${nombre}${subtotal ? ` — ${subtotal}` : ""}`;
+    const personalizacion = construirTextoPersonalizacion(p.customizations);
+    return `• ${cantidad} ${nombre}${personalizacion ? ` (${personalizacion})` : ""}${subtotal ? ` — ${subtotal}` : ""}`;
   }).join("\n");
 }
 
@@ -486,6 +508,8 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     ].filter(Boolean).join("\n");
   }
 
+  const orderCustomizations = construirTextoPersonalizacion(pedido?.customizations);
+
   return [
     pickVariant(`${nombreCliente}-${pedido.total || "pedido"}`, [
       `${construirSaludoNatural(nombreCliente)} Ya te dejé el pedido registrado:`,
@@ -494,7 +518,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     ]),
     null,
     detalle,
-    null,
+    orderCustomizations ? `Observaciones: ${orderCustomizations}` : null,
     `📍 Dirección: ${pedido.direccion || "pendiente por confirmar"}`,
     `💳 Pago: ${pedido.metodo_pago || "pendiente por confirmar"}`,
     null,

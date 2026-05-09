@@ -55,6 +55,30 @@ function parseOptionalNumber(value) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+function parseJsonText(value, fallback = null) {
+  if (!value) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function stringifyJson(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return null;
+  }
+}
+
 function normalizePhone(value) {
   const normalized = normalizeText(value);
   if (!normalized) {
@@ -211,6 +235,13 @@ ensureColumn("catalog_products", "stock", "REAL");
 ensureColumn("messages", "message_type", "TEXT NOT NULL DEFAULT 'text'");
 ensureColumn("messages", "transcription_text", "TEXT");
 ensureColumn("messages", "media_id", "TEXT");
+ensureColumn("orders", "notes", "TEXT");
+ensureColumn("orders", "customizations_json", "TEXT");
+ensureColumn("orders", "receipt_media_id", "TEXT");
+ensureColumn("orders", "receipt_path", "TEXT");
+ensureColumn("orders", "receipt_mime_type", "TEXT");
+ensureColumn("order_items", "product_notes", "TEXT");
+ensureColumn("order_items", "customizations_json", "TEXT");
 
 const insertOrderStatement = db.prepare(`
   INSERT INTO orders (
@@ -222,19 +253,24 @@ const insertOrderStatement = db.prepare(`
     fecha_entrega,
     metodo_pago,
     observaciones,
+    notes,
+    customizations_json,
     estado,
     total,
     customer_type_applied,
     price_tier_applied,
+    receipt_media_id,
+    receipt_path,
+    receipt_mime_type,
     source_message_id,
     created_at,
     updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const insertOrderItemStatement = db.prepare(`
-  INSERT INTO order_items (id, order_id, producto, sabor, cantidad, precio_unitario, subtotal, price_source, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO order_items (id, order_id, producto, sabor, cantidad, precio_unitario, subtotal, price_source, product_notes, customizations_json, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const listOrderRowsBase = `
@@ -247,10 +283,15 @@ const listOrderRowsBase = `
     o.fecha_entrega,
     o.metodo_pago,
     o.observaciones,
+    o.notes,
+    o.customizations_json,
     o.estado,
     o.total,
     o.customer_type_applied,
     o.price_tier_applied,
+    o.receipt_media_id,
+    o.receipt_path,
+    o.receipt_mime_type,
     o.source_message_id,
     o.created_at,
     o.updated_at,
@@ -261,6 +302,8 @@ const listOrderRowsBase = `
     oi.precio_unitario,
     oi.subtotal,
     oi.price_source,
+    oi.product_notes,
+    oi.customizations_json AS item_customizations_json,
     oi.created_at AS item_created_at
   FROM orders o
   LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -274,6 +317,11 @@ const listOrdersByStatusStatement = db.prepare(`${listOrderRowsBase} WHERE o.clo
 const listOrdersIncludingArchivedStatement = db.prepare(`${listOrderRowsBase} ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
 const listOrdersIncludingArchivedByStatusStatement = db.prepare(`${listOrderRowsBase} WHERE o.estado = ? ORDER BY datetime(o.created_at) DESC, datetime(oi.created_at) ASC`);
 const updateOrderStatusStatement = db.prepare(`UPDATE orders SET estado = ?, updated_at = ? WHERE id = ?`);
+const updateOrderReceiptStatement = db.prepare(`
+  UPDATE orders
+  SET receipt_media_id = ?, receipt_path = ?, receipt_mime_type = ?, updated_at = ?
+  WHERE id = ?
+`);
 const countOrdersStatement = db.prepare("SELECT COUNT(*) AS total FROM orders WHERE closure_id IS NULL");
 const getOrderItemsCountStatement = db.prepare("SELECT COUNT(*) AS total FROM order_items WHERE order_id = ?");
 const getOrderExistenceStatement = db.prepare("SELECT id FROM orders WHERE id = ?");
@@ -477,6 +525,7 @@ function hydrateOrders(rows = []) {
 
   for (const row of rows) {
     if (!grouped.has(row.id)) {
+      const customizations = parseJsonText(row.customizations_json, []);
       grouped.set(row.id, {
         id: row.id,
         cliente: row.cliente,
@@ -486,11 +535,20 @@ function hydrateOrders(rows = []) {
         fechaEntrega: row.fecha_entrega,
         metodoPago: row.metodo_pago,
         observaciones: row.observaciones,
+        notes: row.notes,
+        customizations: Array.isArray(customizations) ? customizations : [],
         estado: normalizeStatus(row.estado),
         estadoLabel: humanizeStatus(row.estado),
         total: parseOptionalNumber(row.total),
         customerTypeApplied: normalizeCustomerType(row.customer_type_applied, "public"),
         priceTierApplied: normalizeCustomerType(row.price_tier_applied, "public"),
+        receipt: row.receipt_media_id || row.receipt_path
+          ? {
+              mediaId: normalizeText(row.receipt_media_id),
+              path: normalizeText(row.receipt_path),
+              mimeType: normalizeText(row.receipt_mime_type)
+            }
+          : null,
         sourceMessageId: row.source_message_id,
         fechaRegistro: row.created_at,
         updatedAt: row.updated_at,
@@ -502,6 +560,7 @@ function hydrateOrders(rows = []) {
 
     if (row.item_id) {
       const cantidad = row.cantidad;
+      const itemCustomizations = parseJsonText(row.item_customizations_json, []);
       order.items.push({
         id: row.item_id,
         producto: normalizeText(row.producto),
@@ -509,7 +568,9 @@ function hydrateOrders(rows = []) {
         cantidad: Number.isFinite(Number(cantidad)) ? Number(cantidad) : cantidad,
         precioUnitario: parseOptionalNumber(row.precio_unitario),
         subtotal: parseOptionalNumber(row.subtotal),
-        priceSource: normalizeCustomerType(row.price_source, "public")
+        priceSource: normalizeCustomerType(row.price_source, "public"),
+        productNotes: normalizeText(row.product_notes),
+        customizations: Array.isArray(itemCustomizations) ? itemCustomizations : []
       });
     }
   }
@@ -546,11 +607,14 @@ function hydrateOrders(rows = []) {
       fechaEntrega: order.fechaEntrega,
       metodoPago: order.metodoPago,
       observaciones: order.observaciones,
+      notes: order.notes,
+      customizations: Array.isArray(order.customizations) ? order.customizations : [],
       estado: order.estado,
       estadoLabel: order.estadoLabel,
       total: order.total ?? (computedTotal > 0 ? computedTotal : null),
       customerTypeApplied: order.customerTypeApplied,
       priceTierApplied: order.priceTierApplied,
+      receipt: order.receipt,
       sourceMessageId: order.sourceMessageId,
       items: order.items,
       itemCount: order.items.length
@@ -664,10 +728,15 @@ function saveOrder({
     fechaEntrega: normalizeText(pedido?.fecha_entrega),
     metodoPago: normalizeText(pedido?.metodo_pago),
     observaciones: normalizeText(pedido?.observaciones),
+    notes: normalizeText(pedido?.notes),
+    customizationsJson: stringifyJson(Array.isArray(pedido?.customizations) ? pedido.customizations : []),
     estado: normalizeStatus(pedido?.estado),
     total: parseOptionalNumber(pedido?.total),
     customerTypeApplied: normalizeCustomerType(pedido?.customer_type_applied, "public"),
     priceTierApplied: normalizeCustomerType(pedido?.price_tier_applied, "public"),
+    receiptMediaId: normalizeText(pedido?.receipt?.mediaId),
+    receiptPath: normalizeText(pedido?.receipt?.path),
+    receiptMimeType: normalizeText(pedido?.receipt?.mimeType),
     sourceMessageId: normalizeText(sourceMessageId),
     createdAt,
     updatedAt: createdAt,
@@ -679,6 +748,8 @@ function saveOrder({
       precioUnitario: parseOptionalNumber(item?.precio_unitario),
       subtotal: parseOptionalNumber(item?.subtotal),
       priceSource: normalizeCustomerType(item?.price_source, "public"),
+      productNotes: normalizeText(item?.product_notes ?? item?.productNotes),
+      customizationsJson: stringifyJson(Array.isArray(item?.customizations) ? item.customizations : []),
       createdAt
     }))
   };
@@ -696,10 +767,15 @@ function saveOrder({
         payload.fechaEntrega,
         payload.metodoPago,
         payload.observaciones,
+        payload.notes,
+        payload.customizationsJson,
         payload.estado,
         payload.total,
         payload.customerTypeApplied,
         payload.priceTierApplied,
+        payload.receiptMediaId,
+        payload.receiptPath,
+        payload.receiptMimeType,
         payload.sourceMessageId,
         payload.createdAt,
         payload.updatedAt
@@ -715,6 +791,8 @@ function saveOrder({
           item.precioUnitario,
           item.subtotal,
           item.priceSource,
+          item.productNotes,
+          item.customizationsJson,
           item.createdAt
         );
       }
@@ -749,6 +827,24 @@ function updateOrderStatus(orderId, newStatus) {
   return getOrderById(orderId);
 }
 
+function attachReceiptToOrder(orderId, receipt = {}) {
+  const info = updateOrderReceiptStatement.run(
+    normalizeText(receipt.mediaId),
+    normalizeText(receipt.path),
+    normalizeText(receipt.mimeType),
+    new Date().toISOString(),
+    orderId
+  );
+
+  if (!info.changes) {
+    const error = new Error("Pedido no encontrado");
+    error.code = "ORDER_NOT_FOUND";
+    throw error;
+  }
+
+  return getOrderById(orderId);
+}
+
 function importOrders(orders = []) {
   if (!Array.isArray(orders) || orders.length === 0) {
     return { imported: 0 };
@@ -772,10 +868,15 @@ function importOrders(orders = []) {
           normalizeText(order.fechaEntrega),
           normalizeText(order.metodoPago),
           normalizeText(order.observaciones),
+          normalizeText(order.notes),
+          stringifyJson(Array.isArray(order.customizations) ? order.customizations : []),
           normalizeStatus(order.estado),
           parseOptionalNumber(order.total) ?? (computedTotal > 0 ? computedTotal : null),
           normalizeCustomerType(order.customerTypeApplied ?? order.customer_type_applied, "public"),
           normalizeCustomerType(order.priceTierApplied ?? order.price_tier_applied, "public"),
+          normalizeText(order.receipt?.mediaId),
+          normalizeText(order.receipt?.path),
+          normalizeText(order.receipt?.mimeType),
           normalizeText(order.sourceMessageId),
           normalizeText(order.fechaRegistro) || new Date().toISOString(),
           normalizeText(order.updatedAt) || normalizeText(order.fechaRegistro) || new Date().toISOString()
@@ -799,6 +900,8 @@ function importOrders(orders = []) {
           parseOptionalNumber(item.precioUnitario ?? item.precio_unitario),
           parseOptionalNumber(item.subtotal),
           normalizeCustomerType(item.priceSource ?? item.price_source, "public"),
+          normalizeText(item.productNotes ?? item.product_notes),
+          stringifyJson(Array.isArray(item.customizations) ? item.customizations : []),
           createdAt
         );
       }
@@ -1256,6 +1359,7 @@ module.exports = {
   listOrdersIncludingArchived,
   getOrderById,
   updateOrderStatus,
+  attachReceiptToOrder,
   countOrders,
   getActiveOrderByPhone,
   importOrders,
