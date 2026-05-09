@@ -12,9 +12,32 @@ function normalizarDestinoWhatsApp(valor) {
   return String(valor || "").replace(/\D/g, "");
 }
 
-async function enviarMensajeWhatsApp(para, texto) {
-  const token = process.env.WHATSAPP_TOKEN;
+function getWhatsAppApiConfig() {
+  const token = (process.env.WHATSAPP_TOKEN || "").trim();
   const phoneNumberId = (process.env.PHONE_NUMBER_ID || "").trim();
+
+  if (!token || !phoneNumberId) {
+    throw new Error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en .env");
+  }
+
+  return {
+    token,
+    phoneNumberId
+  };
+}
+
+function inferWhatsAppMediaExtension(mimeType = "") {
+  const normalized = String(mimeType || "").toLowerCase();
+  if (normalized.includes("ogg")) return "ogg";
+  if (normalized.includes("mpeg") || normalized.includes("mp3")) return "mp3";
+  if (normalized.includes("wav")) return "wav";
+  if (normalized.includes("mp4")) return "mp4";
+  if (normalized.includes("webm")) return "webm";
+  return "bin";
+}
+
+async function enviarMensajeWhatsApp(para, texto) {
+  const { token, phoneNumberId } = getWhatsAppApiConfig();
   const destino = normalizarDestinoWhatsApp(para);
   const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`;
   const payload = {
@@ -25,11 +48,6 @@ async function enviarMensajeWhatsApp(para, texto) {
       body: texto
     }
   };
-
-  if (!token || !phoneNumberId) {
-    throw new Error("Faltan WHATSAPP_TOKEN o PHONE_NUMBER_ID en .env");
-  }
-
   logWhatsAppEvent("whatsapp_send_payload_ready", {
     url,
     phoneNumberId,
@@ -56,6 +74,47 @@ async function enviarMensajeWhatsApp(para, texto) {
     }, "error");
     throw error;
   }
+}
+
+async function obtenerMediaWhatsApp(mediaId) {
+  const { token } = getWhatsAppApiConfig();
+  const normalizedMediaId = String(mediaId || "").trim();
+
+  if (!normalizedMediaId) {
+    throw new Error("mediaId es obligatorio para descargar media de WhatsApp");
+  }
+
+  const metadataUrl = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${normalizedMediaId}`;
+  const metadataResponse = await axios.get(metadataUrl, {
+    timeout: 30000,
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  const mediaUrl = metadataResponse.data?.url;
+  const mimeType = metadataResponse.data?.mime_type || metadataResponse.data?.mimeType || "application/octet-stream";
+
+  if (!mediaUrl) {
+    throw new Error("WhatsApp no devolvió URL de descarga para el audio");
+  }
+
+  const binaryResponse = await axios.get(mediaUrl, {
+    timeout: 60000,
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  return {
+    mediaId: normalizedMediaId,
+    mimeType,
+    sha256: metadataResponse.data?.sha256 || null,
+    fileSize: metadataResponse.data?.file_size || null,
+    filename: `whatsapp-audio-${normalizedMediaId}.${inferWhatsAppMediaExtension(mimeType)}`,
+    buffer: Buffer.from(binaryResponse.data)
+  };
 }
 
 function formatearFaltante(campo) {
@@ -299,11 +358,33 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
   const productos = Array.isArray(pedido.productos) ? pedido.productos : [];
   const detalle = construirDetalleProductosAmable(productos);
   const listaProductosDisponibles = construirListaProductosDisponibles(options.availableProducts);
+  const catalogUrl = String(options.catalogUrl || CATALOG_URL || "").trim() || null;
   const nombreCliente = String(pedido?.cliente || "").trim();
   const isDistributor = String(pedido?.customer_type_applied || pedido?.customerTypeApplied || pedido?.price_tier_applied || pedido?.priceTierApplied || "public").trim().toLowerCase() === "distributor";
 
   if (evaluacion.modelError) {
     return "Se me cruzó el mensaje un momento 😕 ¿me lo puedes reenviar?";
+  }
+
+  if (evaluacion.catalogStatus === "not_found") {
+    if (productos.length) {
+      return [
+        construirSaludoNatural(nombreCliente),
+        "Te entendí esto por ahora:",
+        detalle,
+        pedido.total ? `Subtotal parcial: ${formatearMoneda(pedido.total)}` : null,
+        "Pero me falta confirmar otro producto para dejarte el pedido bien 😊",
+        listaProductosDisponibles,
+        catalogUrl ? `Catálogo completo:\n${catalogUrl}` : null,
+        "¿Me lo escribes como aparece en el catálogo o me dices cuál producto exacto quieres?"
+      ].filter(Boolean).join("\n\n");
+    }
+
+    return [
+      "No encontré ese producto en el catálogo actual 😊",
+      catalogUrl ? `Revísalo aquí:\n${catalogUrl}` : null,
+      "Si quieres, escríbeme el nombre exacto y te ayudo a pedirlo."
+    ].filter(Boolean).join("\n\n");
   }
 
   if (evaluacion.priceValidation === "missing_price") {
@@ -317,26 +398,6 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     }
 
     return "No alcancé a confirmar el precio exacto. ¿Me lo envías como aparece en el catálogo para dejarlo bien?";
-  }
-
-  if (evaluacion.catalogStatus === "not_found") {
-    if (productos.length) {
-      return [
-        construirSaludoNatural(nombreCliente),
-        "Te entendí esto por ahora:",
-        detalle,
-        pedido.total ? `Subtotal parcial: ${formatearMoneda(pedido.total)}` : null,
-        "Pero me falta confirmar otro producto para dejarte el pedido bien 😊",
-        listaProductosDisponibles,
-        "¿Me lo escribes como aparece en el catálogo o me dices cuál de estos te gustaría llevar?"
-      ].filter(Boolean).join("\n\n");
-    }
-
-    return [
-      "Quiero ayudarte a pedirlo bien 😊",
-      listaProductosDisponibles,
-      "¿Cuál de estos te gustaría llevar?"
-    ].filter(Boolean).join("\n\n");
   }
 
   if (evaluacion.catalogStatus === "ambiguous") {
@@ -448,6 +509,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
 module.exports = {
   CATALOG_URL,
   enviarMensajeWhatsApp,
+  obtenerMediaWhatsApp,
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,

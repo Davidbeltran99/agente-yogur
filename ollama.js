@@ -10,6 +10,8 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 30000);
 const OPENAI_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS || 160);
 const OPENAI_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE || 0.1);
 const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
+const DEEPGRAM_BASE_URL = (process.env.DEEPGRAM_BASE_URL || "https://api.deepgram.com").replace(/\/$/, "");
 
 function logEvent(event, details = {}, level = "info") {
   structuredLog(event, details, level);
@@ -127,9 +129,75 @@ async function procesarMensaje(mensaje) {
   }
 }
 
+async function transcribirAudioOpenAI({ buffer, mimeType = "audio/ogg", filename = "audio.ogg", language = "es" }) {
+  const apiKey = (process.env.OPENAI_API_KEY || "").trim();
+  if (!apiKey || apiKey === "tu_api_key") {
+    throw new Error("Falta OPENAI_API_KEY válida en .env");
+  }
+
+  const form = new FormData();
+  form.append("model", OPENAI_TRANSCRIPTION_MODEL);
+  form.append("language", language);
+  form.append("file", new Blob([buffer], { type: mimeType }), filename);
+
+  const response = await fetch(`${OPENAI_BASE_URL}/audio/transcriptions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: form,
+    signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS)
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error?.message || data?.error || `OpenAI transcription error ${response.status}`);
+  }
+
+  return String(data?.text || "").trim();
+}
+
+async function transcribirAudioDeepgram({ buffer, mimeType = "audio/ogg", language = "es" }) {
+  const apiKey = (process.env.DEEPGRAM_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new Error("Falta DEEPGRAM_API_KEY en .env");
+  }
+
+  const response = await axios.post(`${DEEPGRAM_BASE_URL}/v1/listen?model=nova-2&smart_format=true&detect_language=false&language=${encodeURIComponent(language)}`,
+    buffer,
+    {
+      timeout: OPENAI_TIMEOUT_MS,
+      headers: {
+        Authorization: `Token ${apiKey}`,
+        "Content-Type": mimeType
+      }
+    }
+  );
+
+  return String(response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "").trim();
+}
+
+async function transcribirAudio(params = {}) {
+  const preferredProvider = String(process.env.AUDIO_TRANSCRIPTION_PROVIDER || "").trim().toLowerCase();
+  const useDeepgram = preferredProvider === "deepgram" || (!preferredProvider && Boolean((process.env.DEEPGRAM_API_KEY || "").trim()));
+
+  try {
+    return useDeepgram
+      ? await transcribirAudioDeepgram(params)
+      : await transcribirAudioOpenAI(params);
+  } catch (error) {
+    if (!useDeepgram && (process.env.DEEPGRAM_API_KEY || "").trim()) {
+      return transcribirAudioDeepgram(params);
+    }
+
+    throw error;
+  }
+}
+
 module.exports = {
   procesarMensaje,
   generarRespuestaAbi,
+  transcribirAudio,
   OPENAI_PROVIDER,
   OPENAI_MODEL,
   OPENAI_BASE_URL

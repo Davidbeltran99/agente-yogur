@@ -204,6 +204,32 @@ function cleanCategory(value) {
   return normalized;
 }
 
+function inferPresentation(name) {
+  const normalized = normalizeCatalogText(name);
+  if (!normalized) {
+    return null;
+  }
+
+  const volumeMatch = normalized.match(/\b(1800\s*ml|1000\s*ml|500\s*g|250\s*g|1\s*kg|1\.8\s*ml)\b/);
+  if (volumeMatch?.[1]) {
+    return volumeMatch[1].replace(/\s+/g, " ").trim();
+  }
+
+  if (/\bgarrafa\b/.test(normalized)) {
+    return "garrafa";
+  }
+
+  if (/\blitro\b/.test(normalized)) {
+    return "litro";
+  }
+
+  if (/\bkilo\b/.test(normalized)) {
+    return "kilo";
+  }
+
+  return null;
+}
+
 function buildCatalogGroupingKey(name) {
   return normalizeCatalogText(name)
     .replace(/\b(publico|public|distribuidor|distributor)\b/g, " ")
@@ -245,6 +271,9 @@ function mergeCatalogProductsByPriceTier(products = []) {
       .map((item) => Number(item?.precio))
       .filter((value) => Number.isFinite(value))
       .sort((a, b) => a - b);
+    const stocks = group
+      .map((item) => Number(item?.stock))
+      .filter((value) => Number.isFinite(value));
     const aliases = new Set();
 
     for (const item of group) {
@@ -268,14 +297,53 @@ function mergeCatalogProductsByPriceTier(products = []) {
       precio_publico: precioPublico,
       precio_distribuidor: precioDistribuidor,
       categoria: cleanCategory(preferred?.categoria),
+      presentacion: normalizeText(preferred?.presentacion) || inferPresentation(preferred?.nombre),
       aliases: Array.from(aliases),
       activo: group.some((item) => item?.activo !== false),
-      stock: preferred?.stock ?? null
+      stock: stocks.length ? Math.max(...stocks) : (preferred?.stock ?? null)
     };
   }).filter((product) => product.id && product.nombre);
 }
 
+function parseInitialProductsFromHtml(html) {
+  const products = [];
+  const seen = new Set();
+  const productPattern = /\{"id":"([^\"]+)","name":"([^\"]+)","description":"[^\"]*","price":([0-9.]+),"category":(\"[^\"]*\"|\$undefined|null),"imageUrl":"[^\"]*","imageUrls":[^,]*,"isVisible":(\d+),"stock":(-?\d+)/g;
+
+  for (const match of html.matchAll(productPattern)) {
+    const id = normalizeText(match[1]);
+    const nombre = normalizeText(match[2]);
+    const precio = Number(String(match[3] || "").replace(/\./g, ""));
+    const categoriaRaw = String(match[4] || "").replace(/^\"|\"$/g, "");
+    const isVisible = Number(match[5]);
+    const stock = Number(match[6]);
+
+    if (!id || !nombre || seen.has(id)) {
+      continue;
+    }
+
+    seen.add(id);
+    products.push({
+      id,
+      nombre,
+      precio: Number.isFinite(precio) ? precio : null,
+      categoria: cleanCategory(categoriaRaw),
+      presentacion: inferPresentation(nombre),
+      aliases: buildAliases({ nombre }),
+      activo: isVisible !== 0,
+      stock: Number.isFinite(stock) ? stock : null
+    });
+  }
+
+  return products;
+}
+
 function parseCatalogProductsFromHtml(html) {
+  const richProducts = parseInitialProductsFromHtml(html);
+  if (richProducts.length) {
+    return mergeCatalogProductsByPriceTier(richProducts);
+  }
+
   const products = [];
   const seen = new Set();
   const cardPattern = /<a href="\/tellolac\/product\/([^"]+)">[\s\S]*?<h2[^>]*>([^<]+)<\/h2>[\s\S]*?<p[^>]*>\$[^0-9]*([0-9.]+)<\/p>/gi;
@@ -295,6 +363,7 @@ function parseCatalogProductsFromHtml(html) {
       nombre,
       precio: Number.isFinite(precio) ? precio : null,
       categoria: null,
+      presentacion: inferPresentation(nombre),
       aliases: [],
       activo: true,
       stock: null

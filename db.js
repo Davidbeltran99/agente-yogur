@@ -129,7 +129,10 @@ db.exec(`
     id TEXT PRIMARY KEY,
     phone TEXT NOT NULL,
     direction TEXT NOT NULL,
+    message_type TEXT NOT NULL DEFAULT 'text',
     message_text TEXT,
+    transcription_text TEXT,
+    media_id TEXT,
     whatsapp_message_id TEXT,
     created_at TEXT NOT NULL,
     order_id TEXT,
@@ -144,8 +147,10 @@ db.exec(`
     precio_publico REAL,
     precio_distribuidor REAL,
     categoria TEXT,
+    presentacion TEXT,
     aliases TEXT,
     activo INTEGER NOT NULL DEFAULT 1,
+    stock REAL,
     source_url TEXT,
     updated_at TEXT NOT NULL
   );
@@ -201,6 +206,11 @@ ensureColumn("orders", "price_tier_applied", "TEXT");
 ensureColumn("order_items", "price_source", "TEXT");
 ensureColumn("catalog_products", "precio_publico", "REAL");
 ensureColumn("catalog_products", "precio_distribuidor", "REAL");
+ensureColumn("catalog_products", "presentacion", "TEXT");
+ensureColumn("catalog_products", "stock", "REAL");
+ensureColumn("messages", "message_type", "TEXT NOT NULL DEFAULT 'text'");
+ensureColumn("messages", "transcription_text", "TEXT");
+ensureColumn("messages", "media_id", "TEXT");
 
 const insertOrderStatement = db.prepare(`
   INSERT INTO orders (
@@ -268,18 +278,18 @@ const countOrdersStatement = db.prepare("SELECT COUNT(*) AS total FROM orders WH
 const getOrderItemsCountStatement = db.prepare("SELECT COUNT(*) AS total FROM order_items WHERE order_id = ?");
 const getOrderExistenceStatement = db.prepare("SELECT id FROM orders WHERE id = ?");
 const insertMessageStatement = db.prepare(`
-  INSERT INTO messages (id, phone, direction, message_text, whatsapp_message_id, created_at, order_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO messages (id, phone, direction, message_type, message_text, transcription_text, media_id, whatsapp_message_id, created_at, order_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const getMessageByWhatsAppIdStatement = db.prepare(`
-  SELECT id, phone, direction, message_text, whatsapp_message_id, created_at, order_id
+  SELECT id, phone, direction, message_type, message_text, transcription_text, media_id, whatsapp_message_id, created_at, order_id
   FROM messages
   WHERE whatsapp_message_id = ?
 `);
 const updateMessageOrderStatement = db.prepare(`UPDATE messages SET order_id = ? WHERE id = ?`);
 const countMessagesByPhoneStatement = db.prepare(`SELECT COUNT(*) AS total FROM messages WHERE phone = ?`);
 const listMessagesByPhoneStatement = db.prepare(`
-  SELECT id, phone, direction, message_text, whatsapp_message_id, created_at, order_id
+  SELECT id, phone, direction, message_type, message_text, transcription_text, media_id, whatsapp_message_id, created_at, order_id
   FROM messages
   WHERE phone = ?
   ORDER BY datetime(created_at) ASC, rowid ASC
@@ -287,26 +297,28 @@ const listMessagesByPhoneStatement = db.prepare(`
 const conversationExistsStatement = db.prepare(`SELECT 1 AS exists_flag FROM messages WHERE phone = ? LIMIT 1`);
 const deactivateCatalogProductsBySourceStatement = db.prepare(`UPDATE catalog_products SET activo = 0, updated_at = ? WHERE source_url = ?`);
 const upsertCatalogProductStatement = db.prepare(`
-  INSERT INTO catalog_products (id, nombre, precio, precio_publico, precio_distribuidor, categoria, aliases, activo, source_url, updated_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO catalog_products (id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     nombre = excluded.nombre,
     precio = excluded.precio,
     precio_publico = excluded.precio_publico,
     precio_distribuidor = excluded.precio_distribuidor,
     categoria = excluded.categoria,
+    presentacion = excluded.presentacion,
     aliases = excluded.aliases,
     activo = excluded.activo,
+    stock = excluded.stock,
     source_url = excluded.source_url,
     updated_at = excluded.updated_at
 `);
 const listCatalogProductsStatement = db.prepare(`
-  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, aliases, activo, source_url, updated_at
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at
   FROM catalog_products
   ORDER BY LOWER(nombre) ASC, rowid ASC
 `);
 const listActiveCatalogProductsStatement = db.prepare(`
-  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, aliases, activo, source_url, updated_at
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at
   FROM catalog_products
   WHERE activo = 1
   ORDER BY LOWER(nombre) ASC, rowid ASC
@@ -805,7 +817,10 @@ function hydrateMessage(row) {
     id: row.id,
     phone: row.phone,
     direction: row.direction,
+    messageType: normalizeText(row.message_type) || "text",
     messageText: row.message_text,
+    transcription: normalizeText(row.transcription_text),
+    mediaId: normalizeText(row.media_id),
     whatsappMessageId: row.whatsapp_message_id,
     createdAt: row.created_at,
     orderId: row.order_id
@@ -837,8 +852,10 @@ function hydrateCatalogProduct(row) {
     precio_publico: parseOptionalNumber(row.precio_publico ?? row.precio),
     precio_distribuidor: parseOptionalNumber(row.precio_distribuidor),
     categoria: normalizeText(row.categoria),
+    presentacion: normalizeText(row.presentacion),
     aliases,
     activo: Boolean(row.activo),
+    stock: parseOptionalNumber(row.stock),
     sourceUrl: normalizeText(row.source_url),
     updatedAt: row.updated_at
   };
@@ -873,8 +890,10 @@ function syncCatalogProducts(products = [], { sourceUrl = null } = {}) {
         parseOptionalNumber(product?.precio_publico ?? product?.precio),
         parseOptionalNumber(product?.precio_distribuidor),
         normalizeText(product?.categoria),
+        normalizeText(product?.presentacion),
         JSON.stringify(aliases),
         product?.activo === false ? 0 : 1,
+        parseOptionalNumber(product?.stock),
         normalizedSourceUrl,
         updatedAt
       );
@@ -1085,7 +1104,10 @@ function saveMessage({
   id = randomUUID(),
   phone,
   direction,
+  messageType = "text",
   messageText,
+  transcription = null,
+  mediaId = null,
   whatsappMessageId = null,
   createdAt = new Date().toISOString(),
   orderId = null
@@ -1094,7 +1116,10 @@ function saveMessage({
     id,
     phone: normalizeText(phone),
     direction: normalizeText(direction),
+    messageType: normalizeText(messageType) || "text",
     messageText: normalizeText(messageText),
+    transcription: normalizeText(transcription),
+    mediaId: normalizeText(mediaId),
     whatsappMessageId: normalizeText(whatsappMessageId),
     createdAt,
     orderId: normalizeText(orderId)
@@ -1113,7 +1138,10 @@ function saveMessage({
       payload.id,
       payload.phone,
       payload.direction,
+      payload.messageType,
       payload.messageText,
+      payload.transcription,
+      payload.mediaId,
       payload.whatsappMessageId,
       payload.createdAt,
       payload.orderId
@@ -1123,7 +1151,10 @@ function saveMessage({
       id: payload.id,
       phone: payload.phone,
       direction: payload.direction,
+      messageType: payload.messageType,
       messageText: payload.messageText,
+      transcription: payload.transcription,
+      mediaId: payload.mediaId,
       whatsappMessageId: payload.whatsappMessageId,
       createdAt: payload.createdAt,
       orderId: payload.orderId

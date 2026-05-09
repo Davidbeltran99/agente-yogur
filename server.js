@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { procesarMensaje, generarRespuestaAbi, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
+const { procesarMensaje, generarRespuestaAbi, transcribirAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -54,6 +54,7 @@ const {
 } = require("./catalog");
 const {
   enviarMensajeWhatsApp,
+  obtenerMediaWhatsApp,
   construirRespuestaPedido,
   construirRespuestaCatalogoInicial,
   construirRespuestaCatalogoInformativo,
@@ -392,6 +393,7 @@ function esIntencionModificarCantidad(texto) {
 
   return /\b(mejor|solo|deja|dejalo|déjalo|pon|ponme|agrega|agregale|suma|sumale|cambia a)\b/.test(normalized)
     || new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)
+    || new RegExp(`^(?:dame|mandame|mándame|quiero)\s+${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)
     || /\b(una mas|uno mas|dos mas|3 mas|4 mas|5 mas|mas)\b/.test(normalized);
 }
 
@@ -469,6 +471,14 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
   }
 
   if (listOrderAnalysis.detected) {
+    if ((hasDraftContext || hasActiveContext) && listOrderAnalysis.parsedCount === 1) {
+      const firstItem = listOrderAnalysis.items?.[0];
+      const parsedProductText = normalizarTextoAnalisis(firstItem?.productText || "");
+      if (parsedProductText && /^(dame|quiero|mandame|mándame|ponme|agrega|agregame|agrégame)$/.test(parsedProductText)) {
+        return "modify_quantity";
+      }
+    }
+
     logEvent("LIST_ORDER_DETECTED", {
       multiLine: listOrderAnalysis.multiLine,
       lines: listOrderAnalysis.lineCount,
@@ -636,6 +646,45 @@ function tokenizarCatalogo(valor, { keepGeneric = false } = {}) {
     .filter(Boolean)
     .filter((token) => !CATALOG_TOKEN_STOPWORDS.has(token))
     .filter((token) => keepGeneric || !GENERIC_CATALOG_TOKENS.has(token));
+}
+
+function extractCatalogIdentityTokens(value, { keepGeneric = false } = {}) {
+  return tokenizarCatalogo(value, { keepGeneric })
+    .map((token) => normalizeFuzzyCatalogToken(token))
+    .filter(Boolean)
+    .filter((token) => !LIST_ORDER_NON_IDENTITY_TOKENS.has(token))
+    .filter((token) => !PRICE_VALUE_TOKENS.includes(token));
+}
+
+function productHasCatalogIdentityOverlap(query, product) {
+  const queryTokens = extractCatalogIdentityTokens(query, { keepGeneric: true });
+  if (!queryTokens.length) {
+    return true;
+  }
+
+  const productTokens = new Set([
+    ...extractCatalogIdentityTokens(product?.nombre, { keepGeneric: true }),
+    ...extractCatalogIdentityTokens(product?.nombre_canonico, { keepGeneric: true }),
+    ...extractCatalogIdentityTokens(product?.nombre_familia, { keepGeneric: true }),
+    ...extractCatalogIdentityTokens(product?.nombre_raiz_familia, { keepGeneric: true }),
+    ...((product?.aliases || []).flatMap((alias) => extractCatalogIdentityTokens(alias, { keepGeneric: true })))
+  ]);
+
+  return queryTokens.some((token) => productTokens.has(token));
+}
+
+function esConsultaProductoProbable(segmento) {
+  const normalized = normalizarTextoAnalisis(segmento);
+  if (!normalized) {
+    return false;
+  }
+
+  if (esSegmentoNoProducto(segmento)) {
+    return false;
+  }
+
+  const identityTokens = extractCatalogIdentityTokens(segmento, { keepGeneric: true });
+  return identityTokens.length > 0 && normalized.split(" ").filter(Boolean).length <= 6;
 }
 
 function includesAnyToken(texto, tokens = []) {
@@ -1481,7 +1530,7 @@ function resolverProductoCatalogo(texto) {
   }
 
   const semanticResolution = resolverProductoSemanticoPorPreferencias(texto, catalog);
-  if (semanticResolution) {
+  if (semanticResolution && (!semanticResolution.product || productHasCatalogIdentityOverlap(candidate, semanticResolution.product))) {
     return semanticResolution;
   }
 
@@ -1506,6 +1555,13 @@ function resolverProductoCatalogo(texto) {
   }
 
   const [best, second] = matches;
+  if (!productHasCatalogIdentityOverlap(candidate, best?.product)) {
+    return {
+      status: "not_found",
+      candidate: limpiarTexto(texto)
+    };
+  }
+
   if (second && Math.abs(best.score - second.score) <= 6) {
     const semanticPreferences = extractSemanticCatalogPreferences(texto);
     const sameFamilyMatches = matches.filter((entry) => entry.product?.nombre_familia === best.product?.nombre_familia);
@@ -2051,12 +2107,13 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
     const resolutionInput = parsedLineItem?.productText || segment;
     const quickMatches = encontrarCoincidenciasCatalogo(resolutionInput, { minScore: 70, limit: 2 });
     const hasQuantity = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment));
+    const looksLikeProductQuery = esConsultaProductoProbable(resolutionInput);
 
     if (esSegmentoNoProducto(segment) && !quickMatches.length && !hasQuantity) {
       continue;
     }
 
-    if (!quickMatches.length && !hasQuantity) {
+    if (!quickMatches.length && !hasQuantity && !looksLikeProductQuery) {
       continue;
     }
 
@@ -2108,9 +2165,6 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
 
       if (!catalogProduct || !esCoincidenciaConfiableParaLineaPedido(parsedLineItem, catalogProduct)) {
         unmatched.push(resolutionInput);
-        if (parsedLineItem) {
-          items.push({ producto: parsedLineItem.productText, sabor: null, cantidad, precio_unitario: null, subtotal: null });
-        }
         continue;
       }
 
@@ -2128,7 +2182,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
       continue;
     }
 
-    if (hasQuantity || quickMatches.length) {
+    if (hasQuantity || quickMatches.length || looksLikeProductQuery) {
       logEvent("PRODUCT_MATCH_CONFIDENCE", {
         input: resolutionInput,
         status: "not_found",
@@ -2137,9 +2191,6 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
       });
       logConfidenceLevel({ source: "catalog_match", stage: "line_item", confidence: 0, input: resolutionInput });
       unmatched.push(resolutionInput);
-      if (parsedLineItem) {
-        items.push({ producto: parsedLineItem.productText, sabor: null, cantidad: parsedLineItem.cantidad || 1, precio_unitario: null, subtotal: null });
-      }
     }
   }
 
@@ -2221,7 +2272,7 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
       }) === index;
     }),
     unmatched: [...new Set(unmatched.map((value) => limpiarTexto(value)).filter(Boolean))],
-    possibleMatch: encontrarCoincidenciasCatalogo(texto, { minScore: 60, limit: 1 }).length > 0
+    possibleMatch: ambiguities.length > 0 || unmatched.length > 0 || encontrarCoincidenciasCatalogo(texto, { minScore: 60, limit: 1 }).length > 0
   };
 }
 
@@ -3019,14 +3070,13 @@ function shouldUseOpenAIForPedido(textoCliente, catalogAnalysis = { items: [] })
   const hasNameCue = /(?:soy|mi nombre es|habla)\s+/i.test(textoCliente);
   const quantityMatches = normalized.match(new RegExp(`\\b${QUANTITY_TOKEN_PATTERN}\\b`, "g")) || [];
   const hasMultipleItemCue = quantityMatches.length >= 2;
-  const hasCatalogMismatch = Boolean(catalogAnalysis.ambiguities?.length || catalogAnalysis.unmatched?.length);
   const missingCatalogMatch = !catalogAnalysis.items?.length && !catalogAnalysis.ambiguities?.length && !catalogAnalysis.unmatched?.length;
 
   if (missingCatalogMatch) {
     return false;
   }
 
-  return hasTemporalCue || hasObservationCue || hasNameCue || hasMultipleItemCue || hasCatalogMismatch;
+  return hasTemporalCue || hasObservationCue || hasNameCue || hasMultipleItemCue;
 }
 
 async function procesarPedidoDesdeTexto(textoCliente, opciones = {}) {
@@ -3197,11 +3247,14 @@ function buildSimulatedSourceMessageId(prefix = "simulate") {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function persistirMensaje({ phone, direction, messageText, whatsappMessageId = null, orderId = null }) {
+function persistirMensaje({ phone, direction, messageText, messageType = "text", transcription = null, mediaId = null, whatsappMessageId = null, orderId = null }) {
   const message = saveMessage({
     phone,
     direction,
+    messageType,
     messageText,
+    transcription,
+    mediaId,
     whatsappMessageId,
     orderId
   });
@@ -3576,6 +3629,16 @@ function aplicarContextoProductoAMensaje(texto, state) {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
       reason: "quantity_for_active_product",
+      selectedProduct: lastActiveProduct,
+      appendProducts: false
+    };
+  }
+
+  if (lastActiveProduct && new RegExp(`^(?:dame|mandame|mándame|ponme|agrega|agregame|agrégame|quiero)\s+${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)) {
+    return {
+      text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
+      used: true,
+      reason: "verb_quantity_for_active_product",
       selectedProduct: lastActiveProduct,
       appendProducts: false
     };
@@ -4152,8 +4215,8 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
   }
 }
 
-async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false }) {
-  logEvent("mensaje_recibido", { origen, telefono, sourceMessageId });
+async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null }) {
+  logEvent("mensaje_recibido", { origen, telefono, sourceMessageId, messageType, mediaId: mediaId || null });
 
   const receivedAtMs = Date.now();
 
@@ -4222,7 +4285,10 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const inboundMessage = persistirMensaje({
     phone: telefono,
     direction: "in",
+    messageType,
     messageText: mensaje,
+    transcription,
+    mediaId,
     whatsappMessageId: sourceMessageId
   });
   appendRecentHistory(state, { role: "user", intent: routingIntent, text: mensaje });
@@ -5013,6 +5079,44 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+async function extraerContenidoMensajeWhatsApp(mensaje) {
+  if (mensaje?.text?.body) {
+    return {
+      messageType: "text",
+      text: String(mensaje.text.body || "").trim(),
+      transcription: null,
+      mediaId: null,
+      mimeType: null
+    };
+  }
+
+  if (mensaje?.type === "audio" && mensaje?.audio?.id) {
+    const media = await obtenerMediaWhatsApp(mensaje.audio.id);
+    const transcription = await transcribirAudio({
+      buffer: media.buffer,
+      mimeType: media.mimeType,
+      filename: media.filename,
+      language: "es"
+    });
+
+    return {
+      messageType: "audio",
+      text: transcription,
+      transcription,
+      mediaId: media.mediaId,
+      mimeType: media.mimeType
+    };
+  }
+
+  return {
+    messageType: mensaje?.type || null,
+    text: null,
+    transcription: null,
+    mediaId: mensaje?.audio?.id || null,
+    mimeType: null
+  };
+}
+
 app.post("/webhook", async (req, res) => {
   try {
     logRuntimeConfigSnapshot("webhook");
@@ -5036,27 +5140,73 @@ app.post("/webhook", async (req, res) => {
       messageType: mensaje?.type || null,
       sourceMessageId: mensaje?.id || null,
       hasTextBody: Boolean(mensaje?.text?.body),
-      extractedTextPath: "req.body.entry[0].changes[0].value.messages[0].text.body"
+      extractedTextPath: mensaje?.type === "audio"
+        ? "req.body.entry[0].changes[0].value.messages[0].audio.id -> media download -> transcription"
+        : "req.body.entry[0].changes[0].value.messages[0].text.body"
     });
 
-    if (!mensaje?.text?.body) {
-      logEvent("webhook_early_return", {
-        reason: "missing_text_body",
-        messageType: mensaje?.type || null,
-        sourceMessageId: mensaje?.id || null
-      }, "warn");
+    const numeroCliente = mensaje.from || value?.contacts?.[0]?.wa_id;
+
+    if (!numeroCliente) {
+      logEvent("webhook_missing_phone", { sourceMessageId: mensaje?.id || null }, "warn");
       return res.sendStatus(200);
     }
 
-    const textoCliente = mensaje.text.body;
-    const numeroCliente = mensaje.from || value?.contacts?.[0]?.wa_id;
+    let extracted;
+    try {
+      extracted = await extraerContenidoMensajeWhatsApp(mensaje);
+    } catch (error) {
+      logEvent("webhook_media_processing_error", {
+        sourceMessageId: mensaje?.id || null,
+        messageType: mensaje?.type || null,
+        mediaId: mensaje?.audio?.id || null,
+        error: error.response?.data || error.message
+      }, "error");
+
+      if (mensaje?.type === "audio") {
+        await responderAlCliente({
+          telefono: numeroCliente,
+          respuesta: "No pude procesar tu audio. ¿Me lo envías en texto, por favor?",
+          simulated: false,
+          orderId: null
+        });
+        return res.sendStatus(200);
+      }
+
+      throw error;
+    }
+
+    const textoCliente = limpiarTexto(extracted.text);
+
+    if (!textoCliente) {
+      logEvent("webhook_early_return", {
+        reason: extracted.messageType === "audio" ? "empty_audio_transcription" : "missing_supported_content",
+        messageType: extracted.messageType,
+        sourceMessageId: mensaje?.id || null,
+        mediaId: extracted.mediaId || null
+      }, "warn");
+
+      if (extracted.messageType === "audio") {
+        await responderAlCliente({
+          telefono: numeroCliente,
+          respuesta: "No pude transcribir tu audio. ¿Me lo envías en texto, por favor?",
+          simulated: false,
+          orderId: null
+        });
+      }
+
+      return res.sendStatus(200);
+    }
 
     logEvent("webhook_text_extracted", {
       sourceMessageId: mensaje.id || null,
       telefono: numeroCliente || null,
+      messageType: extracted.messageType,
       textLength: textoCliente.length,
       preview: textoCliente.slice(0, 120),
-      extractedFrom: "req.body.entry[0].changes[0].value.messages[0].text.body"
+      extractedFrom: extracted.messageType === "audio"
+        ? "whatsapp_audio_transcription"
+        : "req.body.entry[0].changes[0].value.messages[0].text.body"
     });
 
     const dedupe = registrarMensajeProcesado({
@@ -5068,11 +5218,6 @@ app.post("/webhook", async (req, res) => {
 
     if (dedupe.duplicated) {
       logEvent("mensaje_duplicado_omitido", { sourceMessageId: mensaje.id, telefono: numeroCliente, dedupeReason: dedupe.reason }, "warn");
-      return res.sendStatus(200);
-    }
-
-    if (!numeroCliente) {
-      logEvent("webhook_missing_phone", { sourceMessageId: mensaje.id }, "warn");
       return res.sendStatus(200);
     }
 
@@ -5093,7 +5238,10 @@ app.post("/webhook", async (req, res) => {
       telefono: numeroCliente,
       sourceMessageId: mensaje.id,
       origen: "webhook",
-      simulated: false
+      simulated: false,
+      messageType: extracted.messageType,
+      transcription: extracted.transcription,
+      mediaId: extracted.mediaId
     });
 
     logEvent("after_ejecutar_flujo", {
@@ -5123,8 +5271,11 @@ app.post("/webhook", async (req, res) => {
 
 app.post("/simulate-message", async (req, res) => {
   try {
-    const mensaje = req.body?.mensaje;
+    const messageType = limpiarTexto(req.body?.tipo || req.body?.messageType) || "text";
+    const transcription = limpiarTexto(req.body?.transcripcion || req.body?.transcription);
+    const mensaje = limpiarTexto(req.body?.mensaje) || transcription;
     const telefono = req.body?.telefono;
+    const mediaId = limpiarTexto(req.body?.mediaId) || (messageType === "audio" ? buildSimulatedSourceMessageId("audio") : null);
 
     if (!mensaje || !telefono) {
       return res.status(400).json({
@@ -5162,7 +5313,10 @@ app.post("/simulate-message", async (req, res) => {
       telefono,
       sourceMessageId,
       origen: "simulate-message",
-      simulated: true
+      simulated: true,
+      messageType,
+      transcription: messageType === "audio" ? (transcription || mensaje) : null,
+      mediaId
     });
 
     return res.json({
