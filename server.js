@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
+const { analizarImagenPedido, inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -241,6 +241,7 @@ const LIST_ORDER_NON_IDENTITY_TOKENS = new Set([
 const PRICE_VALUE_TOKENS = ["barato", "barata", "baratos", "baratas", "economico", "económico", "economica", "económica", "economicos", "económicos", "economicas", "económicas", "asequible", "asequibles"];
 const SAME_PRODUCT_TOKENS = ["lo mismo", "el mismo", "la misma", "ese", "esa", "el de siempre", "la de siempre", "como siempre"];
 const PARTIAL_ADDRESS_REFERENCE_TOKENS = ["la misma direccion", "la misma dirección", "misma direccion", "misma dirección", "donde siempre"];
+const RECEIPT_IMAGE_KEYWORDS = ["comprobante", "pago", "transferencia", "nequi", "daviplata", "consignacion", "consignación", "soporte", "recibo"];
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
 const SEMANTIC_FAMILY_KEYWORDS = new Map([
@@ -376,7 +377,7 @@ function esConfirmacionCasual(texto) {
     return false;
   }
 
-  return /^(listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
+  return /^(si|sí|correcto|correcta|confirmo|confirmado|listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
 }
 
 function esIntencionAyudaHumana(texto) {
@@ -1769,7 +1770,7 @@ function extraerDireccionDesdeTexto(texto, { lastAddress = null } = {}) {
 
   const keywordMatch = raw.match(new RegExp(`((?:calle|cll|cl|carrera|cra|cr|avenida|av\\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|centro)[^,.]*)`, "i"));
   if (keywordMatch?.[1]) {
-    return limpiarTexto(keywordMatch[1]);
+    return limpiarTexto(String(keywordMatch[1]).replace(/\s+(?:pago|nequi|daviplata|efectivo|transferencia)\b.*$/i, ""));
   }
 
   if (/^(centro|barrio\s+.+)$/i.test(raw)) {
@@ -2537,7 +2538,7 @@ function sanitizeAiResponseAgainstFallback(response, fallback, { routingIntent, 
   return text;
 }
 
-function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido = null, evaluacion = null, adminSummary = null, fallback = null, customerName = null, userMessage = null, availableProducts = [], catalogUrl = null, activeIntent = null }) {
+function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido = null, evaluacion = null, adminSummary = null, fallback = null, customerName = null, userMessage = null, availableProducts = [], catalogUrl = null, activeIntent = null, imageAnalysis = null }) {
   const confirmedProducts = Array.isArray(pedido?.productos)
     ? pedido.productos.map((item) => ({
         name: item.producto,
@@ -2572,6 +2573,13 @@ function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido 
     },
     availableProducts,
     catalogUrl,
+    imageAnalysis: imageAnalysis
+      ? {
+          extractedItems: imageAnalysis.items || [],
+          uncertainLines: imageAnalysis.uncertain_lines || [],
+          overallConfidence: imageAnalysis.overall_confidence || 0
+        }
+      : null,
     tone: "Abi cálida, natural, comercial, corta y estilo WhatsApp"
   };
 }
@@ -3745,6 +3753,212 @@ async function handleIncomingReceiptImage({ telefono, sourceMessageId, simulated
   };
 }
 
+function buildImageOrderNormalizedText(imageAnalysis = {}, caption = null) {
+  const itemLines = (Array.isArray(imageAnalysis.items) ? imageAnalysis.items : [])
+    .map((item) => `${Math.max(1, Number(item?.quantity) || 1)} ${limpiarTexto(item?.product_query || item?.raw_text || "")}`.trim())
+    .filter(Boolean);
+  const normalizedCaption = normalizarTextoAnalisis(caption);
+  const shouldIncludeCaption = Boolean(normalizedCaption)
+    && !["imagen recibida", "pedido de imagen", "imagen", "foto"].includes(normalizedCaption)
+    && !RECEIPT_IMAGE_KEYWORDS.some((keyword) => normalizedCaption.includes(normalizarTextoAnalisis(keyword)));
+  const extras = [shouldIncludeCaption ? limpiarTexto(caption) : null].filter(Boolean);
+
+  return [...itemLines, ...extras].join("\n").trim() || null;
+}
+
+function buildImageOrderConfidence(imageAnalysis = {}) {
+  const confidences = (Array.isArray(imageAnalysis.items) ? imageAnalysis.items : [])
+    .map((item) => Number(item?.confidence))
+    .filter((value) => Number.isFinite(value));
+
+  if (!confidences.length) {
+    return Math.max(0, Math.min(1, Number(imageAnalysis?.overall_confidence) || 0));
+  }
+
+  return confidences.reduce((acc, value) => acc + value, 0) / confidences.length;
+}
+
+function shouldTreatImageAsReceipt({ caption = null, activeOrder = null, imageAnalysis = null } = {}) {
+  const normalizedCaption = normalizarTextoAnalisis(caption);
+  const hasReceiptCue = normalizedCaption
+    ? RECEIPT_IMAGE_KEYWORDS.some((keyword) => normalizedCaption.includes(normalizarTextoAnalisis(keyword)))
+    : false;
+  const hasItems = Boolean(imageAnalysis?.items?.length);
+  const hasUncertain = Boolean(imageAnalysis?.uncertain_lines?.length);
+
+  if (activeOrder && hasReceiptCue) {
+    return true;
+  }
+
+  return Boolean(activeOrder) && !hasItems && !hasUncertain;
+}
+
+function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalysis = null }) {
+  const productLines = Array.isArray(pedido?.productos)
+    ? pedido.productos.map((item) => `• ${item.cantidad || 1} ${item.producto}`)
+    : [];
+  const uncertainLines = Array.isArray(imageAnalysis?.uncertain_lines)
+    ? imageAnalysis.uncertain_lines.map((line) => `• ${line.text}`)
+    : [];
+  const lines = [];
+
+  if (productLines.length) {
+    lines.push("Listo 😊 Leí la imagen y entendí este pedido:", "", ...productLines);
+  }
+
+  if (uncertainLines.length) {
+    if (lines.length) {
+      lines.push("");
+    }
+    lines.push(
+      uncertainLines.length > 1 ? "Hay unas líneas que quiero confirmar:" : "Hay una línea que quiero confirmar:",
+      ...uncertainLines
+    );
+  }
+
+  const missingData = Array.isArray(evaluacion?.faltantes) ? evaluacion.faltantes : [];
+  if (missingData.includes("direccion")) {
+    if (lines.length) {
+      lines.push("");
+    }
+    lines.push("¿Me compartes la dirección de entrega?");
+  }
+  if (!missingData.includes("direccion") && missingData.includes("metodo_pago")) {
+    if (lines.length) {
+      lines.push("");
+    }
+    lines.push("¿Qué método de pago vas a usar?");
+  }
+
+  if (!lines.length) {
+    return "No alcancé a leer bien la imagen 😊 ¿Me la envías un poco más clara o me escribes el pedido?";
+  }
+
+  if (uncertainLines.length) {
+    lines.push("", "¿Me confirmas si está correcto?");
+  }
+
+  return lines.join("\n");
+}
+
+async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = "webhook", simulated = false, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null }) {
+  logEvent("IMAGE_MESSAGE_RECEIVED", {
+    telefono,
+    sourceMessageId,
+    hasCaption: Boolean(limpiarTexto(caption)),
+    mediaId: mediaId || null,
+    mimeType: mediaMimeType || null
+  });
+
+  if (mediaBuffer?.length) {
+    logEvent("IMAGE_MEDIA_DOWNLOADED", {
+      telefono,
+      sourceMessageId,
+      mediaId: mediaId || null,
+      bytes: mediaBuffer.length,
+      mimeType: mediaMimeType || null,
+      simulated
+    });
+  }
+
+  const activeOrder = getActiveOrderByPhone(telefono);
+  let imageAnalysis = {
+    items: [],
+    uncertain_lines: [],
+    extracted_text: null,
+    address: null,
+    payment_method: null,
+    overall_confidence: 0
+  };
+
+  if (mediaBuffer?.length) {
+    try {
+      imageAnalysis = await analizarImagenPedido({
+        buffer: mediaBuffer,
+        mimeType: mediaMimeType,
+        filename: mediaFilename,
+        caption,
+        language: "es"
+      });
+    } catch (error) {
+      logEvent("MODEL_ERROR", {
+        model: OPENAI_MODEL,
+        error: error.message,
+        fallback: "image_order_ocr"
+      }, "warn");
+    }
+  }
+
+  const imageConfidence = buildImageOrderConfidence(imageAnalysis);
+  logEvent("OCR_RESULT", {
+    telefono,
+    sourceMessageId,
+    items: imageAnalysis.items.length,
+    uncertainLines: imageAnalysis.uncertain_lines.length,
+    overallConfidence: imageAnalysis.overall_confidence,
+    extractedTextPreview: limpiarTexto(imageAnalysis.extracted_text)?.slice(0, 180) || null
+  });
+  logEvent("IMAGE_ORDER_ITEMS_EXTRACTED", {
+    telefono,
+    sourceMessageId,
+    totalItems: imageAnalysis.items.length,
+    products: imageAnalysis.items.map((item) => item.product_query).slice(0, 8)
+  });
+  logEvent("IMAGE_ORDER_CONFIDENCE", {
+    telefono,
+    sourceMessageId,
+    confidence: imageConfidence,
+    uncertainLines: imageAnalysis.uncertain_lines.length
+  });
+
+  if (shouldTreatImageAsReceipt({ caption, activeOrder, imageAnalysis })) {
+    return handleIncomingReceiptImage({ telefono, sourceMessageId, simulated, mediaId, mediaBuffer, mediaMimeType, mediaFilename, caption });
+  }
+
+  const normalizedText = buildImageOrderNormalizedText(imageAnalysis, caption);
+  if (!normalizedText) {
+    const inboundMessage = persistirMensaje({
+      phone: telefono,
+      direction: "in",
+      messageType: "image",
+      messageText: limpiarTexto(caption) || "Imagen recibida",
+      transcription: limpiarTexto(imageAnalysis.extracted_text),
+      mediaId,
+      whatsappMessageId: sourceMessageId
+    });
+    const respuesta = buildImageOrderFallback({ pedido: null, evaluacion: { faltantes: [] }, imageAnalysis });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return {
+      pedido: null,
+      evaluacion: { esValido: false, faltantes: ["confirmacion_catalogo"], catalogStatus: "not_found" },
+      order: null,
+      inboundMessage,
+      respuesta,
+      delivery,
+      intent: "image_order_review",
+      sheets: { saved: false, skipped: true, reason: "image_ocr_unresolved" }
+    };
+  }
+
+  return ejecutarFlujoMensaje({
+    mensaje: normalizedText,
+    telefono,
+    sourceMessageId,
+    origen,
+    simulated,
+    messageType: "image",
+    transcription: limpiarTexto(imageAnalysis.extracted_text) || normalizedText,
+    mediaId,
+    mediaBuffer,
+    mediaMimeType,
+    mediaFilename,
+    skipRateLimit: true,
+    skipImageHandling: true,
+    imageAnalysis,
+    imageCaption: caption
+  });
+}
+
 function inferirNombreDesdeConversacion(phone) {
   const messages = listMessagesByPhone(phone)
     .filter((message) => message.direction === "in")
@@ -4702,12 +4916,12 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
   }
 }
 
-async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null }) {
+async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen = "webhook", simulated = false, messageType = "text", transcription = null, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, skipRateLimit = false, skipImageHandling = false, imageAnalysis = null, imageCaption = null }) {
   logEvent("mensaje_recibido", { origen, telefono, sourceMessageId, messageType, mediaId: mediaId || null });
 
   const receivedAtMs = Date.now();
 
-  if (excedeRateLimit(telefono, receivedAtMs)) {
+  if (!skipRateLimit && excedeRateLimit(telefono, receivedAtMs)) {
     logEvent("rate_limit_exceeded", { telefono, origen, sourceMessageId }, "warn");
 
     if (debeNotificarRateLimit(telefono, receivedAtMs)) {
@@ -4743,10 +4957,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     };
   }
 
-  if (messageType === "image") {
-    return handleIncomingReceiptImage({
+  if (messageType === "image" && !skipImageHandling) {
+    return handleIncomingImageMessage({
       telefono,
       sourceMessageId,
+      origen,
       simulated,
       mediaId,
       mediaBuffer,
@@ -4781,9 +4996,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const inboundMessage = persistirMensaje({
     phone: telefono,
     direction: "in",
-    messageType,
-    messageText: mensaje,
-    transcription,
+    messageType: messageType === "image" ? "image" : messageType,
+    messageText: messageType === "image" ? (limpiarTexto(imageCaption) || "Imagen recibida") : mensaje,
+    transcription: messageType === "image" ? (limpiarTexto(transcription) || limpiarTexto(mensaje)) : transcription,
     mediaId,
     whatsappMessageId: sourceMessageId
   });
@@ -5118,7 +5333,13 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     };
 
     if (routingIntentFinal === "payment_method") {
-      pedidoActual = calcularTotalesPedido({ ...pedidoActual, metodo_pago: extraerMetodoPagoDesdeTexto(mensaje) || pedidoActual.metodo_pago || null });
+      pedidoActual = calcularTotalesPedido({
+        ...pedidoActual,
+        metodo_pago: extraerMetodoPagoDesdeTexto(mensaje) || pedidoActual.metodo_pago || null,
+        direccion: extraerDireccionDesdeTexto(mensaje, {
+          lastAddress: pedidoActual.direccion || state.lastResolvedOrder?.direccion || null
+        }) || pedidoActual.direccion || state.lastResolvedOrder?.direccion || null
+      });
     }
 
     if (routingIntentFinal === "address_provided") {
@@ -5126,7 +5347,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
         ...pedidoActual,
         direccion: extraerDireccionDesdeTexto(mensaje, {
           lastAddress: pedidoActual.direccion || state.lastResolvedOrder?.direccion || null
-        }) || pedidoActual.direccion || state.lastResolvedOrder?.direccion || null
+        }) || pedidoActual.direccion || state.lastResolvedOrder?.direccion || null,
+        metodo_pago: extraerMetodoPagoDesdeTexto(mensaje) || pedidoActual.metodo_pago || null
       });
     }
 
@@ -5321,6 +5543,12 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const pedidoCombinado = combinarPedidoParcialConOpciones(basePedido, resultadoActual.pedido || {}, {
     appendProducts: Boolean(contextualizedMessage.appendProducts || gptIntent.intent === "add_item")
   });
+  if (imageAnalysis?.address && !pedidoCombinado.direccion) {
+    pedidoCombinado.direccion = imageAnalysis.address;
+  }
+  if (imageAnalysis?.payment_method && !pedidoCombinado.metodo_pago) {
+    pedidoCombinado.metodo_pago = extraerMetodoPagoDesdeTexto(imageAnalysis.payment_method) || imageAnalysis.payment_method;
+  }
   pedidoCombinado.customer_type_applied = customerProfile.customerType;
   pedidoCombinado.price_tier_applied = customerProfile.customerType;
   if (!pedidoCombinado.cliente && state.customerName) {
@@ -5334,6 +5562,24 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     ambiguities: resultadoActual.evaluacion?.catalogStatus === "ambiguous" ? (resultadoActual.evaluacion?.ambiguousProducts || []) : [],
     unmatched: resultadoActual.evaluacion?.catalogStatus === "not_found" ? (resultadoActual.evaluacion?.unmatchedProducts || ["catalogo"]) : []
   });
+
+  if (imageAnalysis) {
+    const requiresConfirmation = Boolean(imageAnalysis.uncertain_lines?.length);
+    if (requiresConfirmation) {
+      evaluacionCombinada.esValido = false;
+      evaluacionCombinada.catalogStatus = evaluacionCombinada.catalogStatus === "ok" ? "partial" : evaluacionCombinada.catalogStatus;
+      evaluacionCombinada.faltantes = [...new Set([...(evaluacionCombinada.faltantes || []), "confirmacion_catalogo"] )];
+    }
+
+    logEvent("IMAGE_ORDER_VALIDATED", {
+      telefono,
+      sourceMessageId,
+      confirmedProducts: Array.isArray(pedidoCombinado.productos) ? pedidoCombinado.productos.map((item) => item?.producto).filter(Boolean) : [],
+      uncertainLines: imageAnalysis.uncertain_lines?.length || 0,
+      esValido: evaluacionCombinada.esValido,
+      faltantes: evaluacionCombinada.faltantes || []
+    });
+  }
 
   let resultado = {
     pedido: pedidoCombinado,
@@ -5403,9 +5649,11 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     inboundMessage.orderId = resultado.order.id;
   }
 
-  const fallbackRespuesta = construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
-    availableProducts: buildCatalogShortList(5)
-  });
+  const fallbackRespuesta = imageAnalysis
+    ? buildImageOrderFallback({ pedido: resultado.pedido, evaluacion: resultado.evaluacion, imageAnalysis })
+    : construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
+        availableProducts: buildCatalogShortList(5)
+      });
   const respuesta = await generarRespuestaConversacional({
     telefono,
     sourceMessageId,
@@ -5421,7 +5669,8 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       userMessage: mensaje,
       availableProducts: buildCatalogShortList(5),
       catalogUrl: CATALOG_URL,
-      activeIntent: resultado.intent
+      activeIntent: resultado.intent,
+      imageAnalysis
     })
   });
   const delivery = await responderAlCliente({
@@ -5894,9 +6143,16 @@ async function extraerContenidoMensajeWhatsApp(mensaje) {
 
   if (mensaje?.type === "image" && mensaje?.image?.id) {
     const media = await obtenerMediaWhatsApp(mensaje.image.id);
+    logEvent("IMAGE_MEDIA_DOWNLOADED", {
+      sourceMessageId: mensaje?.id || null,
+      mediaId: media.mediaId,
+      bytes: media.buffer?.length || 0,
+      mimeType: media.mimeType || null,
+      simulated: false
+    });
     return {
       messageType: "image",
-      text: String(mensaje.image.caption || "").trim() || null,
+      text: String(mensaje.image.caption || "").trim() || "Imagen recibida",
       transcription: null,
       mediaId: media.mediaId,
       mimeType: media.mimeType,
@@ -5941,7 +6197,9 @@ app.post("/webhook", async (req, res) => {
       hasTextBody: Boolean(mensaje?.text?.body),
       extractedTextPath: mensaje?.type === "audio"
         ? "req.body.entry[0].changes[0].value.messages[0].audio.id -> media download -> transcription"
-        : "req.body.entry[0].changes[0].value.messages[0].text.body"
+        : mensaje?.type === "image"
+          ? "req.body.entry[0].changes[0].value.messages[0].image.id -> media download -> vision/ocr"
+          : "req.body.entry[0].changes[0].value.messages[0].text.body"
     });
 
     const numeroCliente = mensaje.from || value?.contacts?.[0]?.wa_id;
@@ -6003,10 +6261,12 @@ app.post("/webhook", async (req, res) => {
       sourceMessageId: mensaje.id || null,
       telefono: numeroCliente || null,
       messageType: extracted.messageType,
-      textLength: textoCliente.length,
-      preview: textoCliente.slice(0, 120),
+      textLength: String(textoCliente || "").length,
+      preview: String(textoCliente || "").slice(0, 120),
       extractedFrom: extracted.messageType === "audio"
         ? "whatsapp_audio_transcription"
+        : extracted.messageType === "image"
+          ? "whatsapp_image_caption_or_ocr_pipeline"
         : "req.body.entry[0].changes[0].value.messages[0].text.body"
     });
 
@@ -6077,11 +6337,11 @@ app.post("/simulate-message", async (req, res) => {
   try {
     const messageType = limpiarTexto(req.body?.tipo || req.body?.messageType) || "text";
     const transcription = limpiarTexto(req.body?.transcripcion || req.body?.transcription);
-    const mensaje = limpiarTexto(req.body?.mensaje) || transcription || (messageType === "image" ? "Comprobante recibido" : null);
+    const mensaje = limpiarTexto(req.body?.mensaje || req.body?.caption) || transcription || (messageType === "image" ? "Imagen recibida" : null);
     const telefono = req.body?.telefono;
     const mediaId = limpiarTexto(req.body?.mediaId) || (["audio", "image"].includes(messageType) ? buildSimulatedSourceMessageId(messageType) : null);
     const mediaMimeType = limpiarTexto(req.body?.mimeType) || (messageType === "image" ? "image/jpeg" : null);
-    const mediaFilename = limpiarTexto(req.body?.filename) || (messageType === "image" ? "simulated-receipt.jpg" : null);
+    const mediaFilename = limpiarTexto(req.body?.filename) || (messageType === "image" ? "simulated-image.jpg" : null);
     const mediaBuffer = messageType === "image"
       ? (req.body?.imageBase64 ? Buffer.from(String(req.body.imageBase64), "base64") : Buffer.from("simulated-image"))
       : null;
