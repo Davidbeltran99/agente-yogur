@@ -343,7 +343,7 @@ function esDespedida(texto) {
     return false;
   }
 
-  return /^(gracias|muchas gracias|mil gracias|listo gracias|ok gracias|perfecto gracias|bye|chao|adios|hasta luego|hablamos|gracias bye)$/.test(normalized);
+  return /^(gracias|muchas gracias|mil gracias|listo gracias|ok gracias|okey gracias|perfecto gracias|bye|chao|adios|hasta luego|hablamos|gracias bye|okey bye|ok bye)$/.test(normalized);
 }
 
 function esConfirmacionCasual(texto) {
@@ -4210,8 +4210,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     limpiarAclaracionPendiente(state);
     limpiarSuggestionMemory(state);
     actualizarActiveOrderContext(state, { intent: routingIntent });
-    const fallback = construirRespuestaDespedida();
-    const respuesta = await generarRespuestaConversacional({ telefono, sourceMessageId, routingIntent, fallback, context: { customerName: state.customerName || null, userMessage: mensaje } });
+    const respuesta = construirRespuestaDespedida({ customerName: state.customerName || null });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntent };
   }

@@ -233,8 +233,11 @@ function construirRespuestaIdentidad() {
   return "Soy Abi 😊, la asistente virtual de Tellolac. Mi nombre es Abi y te ayudo con productos, precios y pedidos.";
 }
 
-function construirRespuestaDespedida() {
-  return "Con gusto 😊\nQuedo atenta por aquí si quieres pedir algo más. ✨";
+function construirRespuestaDespedida({ customerName = null } = {}) {
+  const nombre = String(customerName || "").trim();
+  return nombre
+    ? `Con gusto ${nombre} 😊\nQuedamos atentos. ¡Que tengas un excelente día!`
+    : "Con gusto 😊\nQuedamos atentos. ¡Que tengas un excelente día!";
 }
 
 function construirRespuestaConfirmacion({ hasDraftContext = false } = {}) {

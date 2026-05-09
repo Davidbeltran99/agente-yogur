@@ -108,6 +108,16 @@
       "steps": [
         { "message": "asesor humano", "expect": { "intent": "human_help", "responseIncludes": ["asesor"] } }
       ]
+    },
+    {
+      "name": "closing_after_confirmed_order",
+      "steps": [
+        { "message": "mi nombre es Carlos", "expect": { "intent": "provide_name", "responseIncludes": ["Carlos"] } },
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "calle 10 #20-30", "expect": { "responseIncludes": ["pagas"] } },
+        { "message": "nequi", "expect": { "orderCreated": true, "responseIncludes": ["Carlos"] } },
+        { "message": "okey bye", "expect": { "intent": "closing", "orderCreated": false, "responseIncludes": ["Carlos", "Quedamos atentos", "excelente día"], "responseExcludes": ["Aloe Litro", "Dirección", "Pago", "Total"] } }
+      ]
     }
   ]
 }

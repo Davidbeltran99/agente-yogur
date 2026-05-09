@@ -69,6 +69,12 @@ function assertStep(step, result, scenarioName, index) {
     }
   }
 
+  if (Array.isArray(expect.responseExcludes)) {
+    for (const fragment of expect.responseExcludes) {
+      assert(!String(result.respuesta || "").toLowerCase().includes(String(fragment).toLowerCase()), `${label}: unexpected response fragment ${fragment}`);
+    }
+  }
+
   if (Array.isArray(expect.pedidoProductsIncludes)) {
     for (const product of expect.pedidoProductsIncludes) {
       assert(pedidoProducts.includes(product), `${label}: missing pedido product ${product}`);
