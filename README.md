@@ -30,9 +30,10 @@ Copia `.env.example` a `.env` y completa:
 - `OPENAI_MAX_TOKENS=160`
 - `OPENAI_TEMPERATURE=0.1`
 - `OPENAI_TIMEOUT_MS=30000`
-- `OPENAI_TTS_MODEL=tts-1`
-- `OPENAI_TTS_VOICE=alloy`
+- `OPENAI_TTS_MODEL=gpt-4o-mini-tts`
+- `OPENAI_TTS_VOICE=coral`
 - `OPENAI_TTS_FORMAT=mp3`
+- `OPENAI_TTS_INSTRUCTIONS=Habla en español colombiano, con voz femenina, cálida, natural y cercana...`
 - `WHATSAPP_AUDIO_RESPONSES_ENABLED=false`
 - `WHATSAPP_AUDIO_REPLY_SEND_TEXT=false`
 
@@ -365,9 +366,10 @@ Abi ya puede transcribir audios entrantes y ahora también puede responder con a
 Variables nuevas:
 
 ```env
-OPENAI_TTS_MODEL=tts-1
-OPENAI_TTS_VOICE=alloy
+OPENAI_TTS_MODEL=gpt-4o-mini-tts
+OPENAI_TTS_VOICE=coral
 OPENAI_TTS_FORMAT=mp3
+OPENAI_TTS_INSTRUCTIONS=Habla en español colombiano, con voz femenina, cálida, natural y cercana. Suena como una asesora real de ventas por WhatsApp: clara, ágil, amable y segura. Evita sonar robótica, exagerada o demasiado comercial. Mantén un ritmo conversacional, con pausas suaves y entonación natural.
 WHATSAPP_AUDIO_RESPONSES_ENABLED=true
 WHATSAPP_AUDIO_REPLY_SEND_TEXT=false
 ```
@@ -383,7 +385,7 @@ Comportamiento:
 
 Lo siguiente que yo haría es:
 
-- personalidad de voz de Abi (tono, ritmo, instrucciones de TTS)
+- seguir afinando la personalidad de voz de Abi (tono, ritmo, instrucciones de TTS)
 - respuestas más cortas para audio natural
 - logs de errores y reintentos
 - protección básica contra mensajes vacíos o formatos no soportados

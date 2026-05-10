@@ -11,9 +11,10 @@ const OPENAI_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS || 160);
 const OPENAI_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE || 0.1);
 const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
-const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "tts-1";
-const OPENAI_TTS_VOICE = process.env.OPENAI_TTS_VOICE || "alloy";
+const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+const OPENAI_TTS_VOICE = process.env.OPENAI_TTS_VOICE || "coral";
 const OPENAI_TTS_FORMAT = process.env.OPENAI_TTS_FORMAT || "mp3";
+const OPENAI_TTS_INSTRUCTIONS = process.env.OPENAI_TTS_INSTRUCTIONS || "Habla en español colombiano, con voz femenina, cálida, natural y cercana. Suena como una asesora real de ventas por WhatsApp: clara, ágil, amable y segura. Evita sonar robótica, exagerada o demasiado comercial. Mantén un ritmo conversacional, con pausas suaves y entonación natural.";
 const DEEPGRAM_BASE_URL = (process.env.DEEPGRAM_BASE_URL || "https://api.deepgram.com").replace(/\/$/, "");
 
 function logEvent(event, details = {}, level = "info") {
@@ -387,7 +388,7 @@ function inferAudioMimeType(format = "mp3") {
   return "audio/mpeg";
 }
 
-async function sintetizarAudio({ text, voice = OPENAI_TTS_VOICE, format = OPENAI_TTS_FORMAT, instructions = null } = {}) {
+async function sintetizarAudio({ text, voice = OPENAI_TTS_VOICE, format = OPENAI_TTS_FORMAT, instructions = OPENAI_TTS_INSTRUCTIONS } = {}) {
   const apiKey = (process.env.OPENAI_API_KEY || "").trim();
   if (!apiKey || apiKey === "tu_api_key") {
     throw new Error("Falta OPENAI_API_KEY válida en .env");
@@ -405,7 +406,8 @@ async function sintetizarAudio({ text, voice = OPENAI_TTS_VOICE, format = OPENAI
     response_format: format
   };
 
-  if (instructions) {
+  const shouldSendInstructions = String(OPENAI_TTS_MODEL || "").trim().toLowerCase().includes("gpt-4o-mini-tts");
+  if (shouldSendInstructions && instructions) {
     payload.instructions = String(instructions).trim().slice(0, 1000);
   }
 
