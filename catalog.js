@@ -235,6 +235,8 @@ function inferPresentation(name) {
 
 function buildCatalogGroupingKey(name) {
   return normalizeCatalogText(name)
+    .replace(/\.(?=\s|$)/g, " ")
+    .replace(/\s*\+\s*/g, " + ")
     .replace(/\b(publico|public|distribuidor|distributor)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -270,10 +272,33 @@ function mergeCatalogProductsByPriceTier(products = []) {
 
   return Array.from(grouped.values()).map((group) => {
     const preferred = pickPreferredProduct(group);
-    const prices = group
-      .map((item) => Number(item?.precio))
-      .filter((value) => Number.isFinite(value))
+    const publicPrices = group
+      .map((item) => {
+        const value = item?.precio_publico ?? item?.precio;
+        return value === undefined || value === null || value === "" ? null : Number(value);
+      })
+      .filter((value) => Number.isFinite(value));
+    const distributorPrices = group
+      .map((item) => {
+        const value = item?.precio_distribuidor;
+        return value === undefined || value === null || value === "" ? null : Number(value);
+      })
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const rawPrices = group
+      .map((item) => {
+        const value = item?.precio;
+        return value === undefined || value === null || value === "" ? null : Number(value);
+      })
+      .filter((value) => Number.isFinite(value));
+    const prices = [...publicPrices, ...distributorPrices, ...rawPrices]
+      .filter((value, index, values) => values.indexOf(value) === index)
       .sort((a, b) => a - b);
+    const precioPublico = publicPrices.length
+      ? [...publicPrices].sort((a, b) => a - b)[publicPrices.length - 1]
+      : (prices.length ? prices[prices.length - 1] : null);
+    const precioDistribuidor = distributorPrices.length
+      ? [...distributorPrices].sort((a, b) => a - b)[0]
+      : (prices.length > 1 && prices[0] < precioPublico ? prices[0] : null);
     const stocks = group
       .map((item) => Number(item?.stock))
       .filter((value) => Number.isFinite(value));
@@ -289,9 +314,6 @@ function mergeCatalogProductsByPriceTier(products = []) {
         aliases.add(normalizedName);
       }
     }
-
-    const precioDistribuidor = prices.length > 1 ? prices[0] : null;
-    const precioPublico = prices.length ? prices[prices.length - 1] : null;
 
     return {
       id: preferred?.id,
