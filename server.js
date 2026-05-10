@@ -248,6 +248,7 @@ const RECEIPT_IMAGE_KEYWORDS = ["comprobante", "pago", "transferencia", "nequi",
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
 const IMAGE_CONTEXT_TTL_MS = Number(process.env.IMAGE_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const PENDING_PRODUCT_TTL_MS = Number(process.env.PENDING_PRODUCT_TTL_MS || 30 * 60 * 1000);
 const IMAGE_ORDER_AUTO_PERSIST_ON_HIGH_CONFIDENCE = String(process.env.IMAGE_ORDER_AUTO_PERSIST_ON_HIGH_CONFIDENCE || "false").toLowerCase() === "true";
 const IMAGE_ORDER_AUTO_PERSIST_MIN_CONFIDENCE = Number(process.env.IMAGE_ORDER_AUTO_PERSIST_MIN_CONFIDENCE || 0.94);
 const CATALOG_SNAPSHOT_SOURCE_URL = "local://catalog_snapshot.json";
@@ -298,6 +299,7 @@ const PRODUCT_RESOLUTION_FAMILY_RULES = {
   },
   kefir: {
     variants: [
+      { key: "1800", aliases: ["1800", "1800 ml", "1800ml", "garrafa", "grande"], pattern: /\b(1800\s*ml|garrafa)\b/ },
       { key: "1000", aliases: ["1000", "1000 ml", "1000ml", "litro"], pattern: /\b(1000\s*ml|litro)\b/ }
     ]
   },
@@ -1575,7 +1577,9 @@ function buildResolverCandidates(products = [], normalizedQuery = "", { families
     if (familyHit) score += 55;
     if (containsHit) score += 32;
     score += overlap.length * 14;
-    if (!variantHit) score -= 12;
+    if (requestedVariantNumbers.length) {
+      score += variantHit ? 28 : -18;
+    }
 
     return {
       product,
@@ -1588,7 +1592,8 @@ function buildResolverCandidates(products = [], normalizedQuery = "", { families
       haystack
     };
   }).filter((entry) => entry.exactAlias || entry.containsHit || entry.overlap.length || entry.score > 0)
-    .sort((a, b) => (b.score - a.score)
+    .sort((a, b) => ((requestedVariantNumbers.length ? Number(b.variantHit) - Number(a.variantHit) : 0))
+      || (b.score - a.score)
       || ((b.overlap.length || 0) - (a.overlap.length || 0))
       || ((parseOptionalNumber(a.product?.precio) ?? Number.MAX_SAFE_INTEGER) - (parseOptionalNumber(b.product?.precio) ?? Number.MAX_SAFE_INTEGER)));
 }
@@ -1693,7 +1698,14 @@ function resolveProductFromCatalog(query, context = {}) {
   }
 
   if (variantMatcher && workingPool.length) {
-    const variantMatches = workingPool.filter((product) => variantMatcher.pattern.test(normalizeCanonicalCatalogName(product?.nombre)));
+    const variantMatches = workingPool.filter((product) => {
+      const variantHaystack = [
+        product?.nombre,
+        product?.presentacion,
+        ...(Array.isArray(product?.aliases) ? product.aliases : [])
+      ].map((value) => normalizeCanonicalCatalogName(value)).filter(Boolean);
+      return variantHaystack.some((value) => variantMatcher.pattern.test(value));
+    });
     logProductResolverCandidates({ query: candidate, mode: "family_variant", candidates: variantMatches.map((product) => product?.nombre) });
     logEvent("MATCH_CANDIDATES", {
       query: candidate,
@@ -3576,6 +3588,7 @@ const CUSTOMIZATION_DEFINITIONS = [
   { key: "azucar", label: "Azúcar", value: "poca", pattern: /\b(?:con\s+)?poca\s+az[uú]car\b/i, text: () => "con poca azúcar" },
   { key: "azucar", label: "Azúcar", value: "baja", pattern: /\bbajo\s+en\s+az[uú]car\b/i, text: () => "bajo en azúcar" },
   { key: "azucar", label: "Azúcar", value: "menos", pattern: /\bmenos\s+az[uú]car\b/i, text: () => "menos azúcar" },
+  { key: "dulzor", label: "Dulzor", value: "dulce", pattern: /\bdulce\b/i, text: () => "dulce" },
   { key: "dulzor", label: "Dulzor", value: "más", pattern: /\bm[aá]s\s+dulce\b/i, text: () => "más dulce" },
   { key: "dulzor", label: "Dulzor", value: "poco", pattern: /\bpoco\s+dulce\b/i, text: () => "poco dulce" },
   { key: "colorante", label: "Colorante", value: "poco", pattern: /\b(?:con\s+)?poco\s+colorante\b/i, text: () => "con poco colorante" },
@@ -5327,20 +5340,28 @@ function actualizarActiveOrderContext(state, { pedido = null, intent = null } = 
   }
 
   const suggestionMemory = obtenerSuggestionMemoryActiva(state);
-  const productos = Array.isArray(pedido?.productos)
-    ? pedido.productos.filter((item) => item?.producto)
-    : (Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.filter((item) => item?.producto) : []);
+  const pedidoSnapshot = pedido ? normalizarPedido(pedido) : construirPedidoDesdeEstado(state);
+  const productos = Array.isArray(pedidoSnapshot?.productos)
+    ? pedidoSnapshot.productos.filter((item) => item?.producto)
+    : (Array.isArray(state.activeOrderContext?.products)
+      ? state.activeOrderContext.products.filter((item) => item?.producto)
+      : []);
 
   const updatedAt = Date.now();
   state.activeOrderContext = {
     products: productos.map((item) => ({
       producto: item.producto,
-      cantidad: Number(item.cantidad) || 1
+      cantidad: Number(item.cantidad) || 1,
+      precio_unitario: parseOptionalNumber(item.precio_unitario ?? item.precioUnitario),
+      subtotal: parseOptionalNumber(item.subtotal),
+      price_source: limpiarTexto(item.price_source) || null,
+      product_notes: limpiarTexto(item.product_notes ?? item.productNotes) || buildNotesFromCustomizations(item.customizations),
+      customizations: mergeCustomizations([], item.customizations)
     })),
     suggestions: suggestionMemory?.options?.map((option) => option.nombre) || [],
-    direccion: pedido?.direccion || state.pendingPedido?.direccion || state.activeOrderContext?.direccion || null,
-    metodo_pago: pedido?.metodo_pago || state.lastPaymentMethod || state.pendingPedido?.metodo_pago || null,
-    customerName: pedido?.cliente || state.customerName || null,
+    direccion: pedidoSnapshot?.direccion || state.pendingPedido?.direccion || state.activeOrderContext?.direccion || null,
+    metodo_pago: pedidoSnapshot?.metodo_pago || state.lastPaymentMethod || state.pendingPedido?.metodo_pago || state.activeOrderContext?.metodo_pago || null,
+    customerName: pedidoSnapshot?.cliente || state.customerName || state.activeOrderContext?.customerName || null,
     intent: intent || state.lastIntent || null,
     updated_at: updatedAt,
     expires_at: updatedAt + ACTIVE_ORDER_CONTEXT_TTL_MS
@@ -5356,7 +5377,7 @@ function actualizarActiveOrderContext(state, { pedido = null, intent = null } = 
 
   logEvent("ACTIVE_ORDER_CONTEXT", {
     intent: state.activeOrderContext.intent,
-    products: state.activeOrderContext.products.map((item) => `${item.cantidad} ${item.producto}`),
+    products: state.activeOrderContext.products.map((item) => `${item.cantidad} ${item.producto}${item.product_notes ? ` — Nota: ${item.product_notes}` : ""}`),
     suggestions: state.activeOrderContext.suggestions,
     hasAddress: Boolean(state.activeOrderContext.direccion),
     hasPayment: Boolean(state.activeOrderContext.metodo_pago),
@@ -5409,13 +5430,29 @@ function resolverReferenciaProductoEnOpciones(texto, options = []) {
     const family = normalizeCatalogSemanticFamilyName(option?.familia || option?.nombreCanonico || option?.nombre);
     return family && normalized.includes(family);
   });
+  const requestedVariantNumbers = Array.from(normalized.matchAll(/\b(1800|1000|500|250|120)\b/g)).map((match) => match[1]);
   const wantsLarge = includesAnyToken(normalized, SIZE_LARGE_TOKENS);
   const wantsSmall = includesAnyToken(normalized, SIZE_SMALL_TOKENS);
   const wantsValue = includesAnyToken(normalized, PRICE_VALUE_TOKENS);
 
-  if (familyMatches.length === 1) {
+  if (familyMatches.length === 1 && !requestedVariantNumbers.length) {
     const option = familyMatches[0];
     return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "family_reference", confidence: 90 };
+  }
+
+  const matchingPool = familyMatches.length ? familyMatches : options;
+
+  if (requestedVariantNumbers.length) {
+    const variantOption = matchingPool.find((option) => {
+      const haystack = [option?.nombre, option?.nombreCanonico, option?.presentacion, ...(option?.aliases || [])]
+        .map((value) => normalizeCatalogText(value))
+        .filter(Boolean);
+      return requestedVariantNumbers.every((variant) => haystack.some((value) => value.includes(variant)));
+    }) || null;
+    if (variantOption) {
+      return { option: variantOption, index: options.findIndex((candidate) => candidate?.id === variantOption?.id), reason: "variant_numeric_reference", confidence: 92 };
+    }
+    return null;
   }
 
   if (familyMatches.length > 1 && !wantsLarge && !wantsSmall && !wantsValue) {
@@ -5423,17 +5460,17 @@ function resolverReferenciaProductoEnOpciones(texto, options = []) {
     return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "family_reference_ranked", confidence: 78 };
   }
 
-  const matchingPool = familyMatches.length ? familyMatches : options;
-
   if (wantsLarge) {
-    const option = matchingPool.find((entry) => entry.variant === "large") || matchingPool[matchingPool.length - 1] || null;
+    const option = matchingPool.find((entry) => entry.variant === "large")
+      || (matchingPool.length === 1 ? matchingPool[0] : null);
     if (option) {
       return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "variant_large_reference", confidence: 88 };
     }
   }
 
   if (wantsSmall) {
-    const option = matchingPool.find((entry) => entry.variant === "small") || matchingPool[0] || null;
+    const option = matchingPool.find((entry) => entry.variant === "small")
+      || (matchingPool.length === 1 ? matchingPool[0] : null);
     if (option) {
       return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "variant_small_reference", confidence: 88 };
     }
@@ -5473,6 +5510,38 @@ function resolverReferenciaProductoEnOpciones(texto, options = []) {
   }
 
   return null;
+}
+
+function obtenerFamiliasOpcionesClarificacion(options = []) {
+  return new Set(
+    (Array.isArray(options) ? options : [])
+      .map((option) => normalizeCatalogSemanticFamilyName(
+        option?.familia
+        || buildProductReference(option?.nombre)?.familia
+        || option?.nombreCanonico
+        || option?.nombre
+      ))
+      .filter(Boolean)
+  );
+}
+
+function mensajeApuntaAFamiliaFueraDeOpciones(texto, options = []) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  const messageFamilies = detectProductResolverFamilies(normalized);
+  if (!messageFamilies.size) {
+    return false;
+  }
+
+  const optionFamilies = obtenerFamiliasOpcionesClarificacion(options);
+  if (!optionFamilies.size) {
+    return false;
+  }
+
+  return Array.from(messageFamilies).some((family) => !optionFamilies.has(family));
 }
 
 function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = null, intent = null } = {}) {
@@ -5520,6 +5589,10 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     }
   }
 
+  if (evaluacion?.catalogStatus === "ok" || evaluacion?.esValido) {
+    limpiarPendingProduct(state);
+  }
+
   if (evaluacion?.esValido && Array.isArray(pedido?.productos) && pedido.productos.length) {
     state.lastResolvedOrder = {
       cliente: pedido.cliente || state.customerName || null,
@@ -5551,6 +5624,7 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
     hasShownOrderGuide: state.hasShownOrderGuide || false,
     lastImageStatus: state.lastImageContext?.status || null,
     pendingItems: Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0,
+    pendingProduct: obtenerPendingProductActivo(state)?.family || null,
     hasSuggestionMemory: Boolean(obtenerSuggestionMemoryActiva(state)),
     lastProduct: state.lastProductReference?.nombre || null
   });
@@ -5570,15 +5644,60 @@ function aplicarContextoProductoAMensaje(texto, state) {
   }
 
   const activeContext = obtenerActiveOrderContext(state);
-  const lastActiveProduct = activeContext?.products?.[activeContext.products.length - 1]?.producto || state?.lastProductReference?.nombre || null;
+  const activeContextFamilies = new Set(
+    (Array.isArray(activeContext?.products) ? activeContext.products : [])
+      .map((item) => obtenerFamiliaItemPedido(item))
+      .filter(Boolean)
+  );
+  const canUseLastProductContext = activeContextFamilies.size <= 1;
+  const lastActiveProduct = canUseLastProductContext
+    ? (activeContext?.products?.[activeContext.products.length - 1]?.producto || state?.lastProductReference?.nombre || null)
+    : null;
   const normalizedActiveProduct = normalizarTextoAnalisis(lastActiveProduct || "");
   const explicitCatalogMatches = encontrarCoincidenciasCatalogo(raw, { minScore: 70, limit: 3 });
   const mentionsDifferentCatalogProduct = explicitCatalogMatches.some((entry) => {
     const productName = normalizarTextoAnalisis(entry?.product?.nombre || "");
     return productName && (!normalizedActiveProduct || productName !== normalizedActiveProduct);
   });
+  const pendingProduct = obtenerPendingProductActivo(state);
   if (esIntencionReorden(raw)) {
     return { text: raw, used: false };
+  }
+
+  if (pendingProduct?.family) {
+    const familiesInMessage = detectProductResolverFamilies(normalized);
+    const mentionsDifferentFamily = familiesInMessage.size > 0 && !familiesInMessage.has(pendingProduct.family);
+    const hasPendingResolutionCue = !mentionsDifferentFamily && (
+      familiesInMessage.has(pendingProduct.family)
+      || /^de\s+\d{3,4}$/.test(normalized)
+      || /^(grande|garrafa|litro|1000(?:\s*ml)?|1800(?:\s*ml)?)$/.test(normalized)
+      || extractCustomizationsFromText(raw).length > 0
+      || new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)
+    );
+
+    if (hasPendingResolutionCue) {
+      const incomingCustomizations = extractCustomizationsFromText(raw);
+      let contextualText = familiesInMessage.has(pendingProduct.family)
+        ? raw
+        : `${pendingProduct.family} ${raw}`.trim();
+
+      if (!incomingCustomizations.length && Array.isArray(pendingProduct.customizations) && pendingProduct.customizations.length) {
+        contextualText = `${contextualText} ${buildNotesFromCustomizations(pendingProduct.customizations)}`.trim();
+      }
+
+      if (!encontrarCantidadEnSegmento(normalized)) {
+        contextualText = `${pendingProduct.quantity || 1} ${contextualText}`.trim();
+      }
+
+      return {
+        text: contextualText,
+        used: true,
+        reason: "pending_product_reference",
+        selectedProduct: pendingProduct.family,
+        appendProducts: false,
+        pendingProductResolved: true
+      };
+    }
   }
 
   if (new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized) && lastActiveProduct) {
@@ -5611,7 +5730,9 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
-  const sameProductReference = state?.lastProductReference?.nombre || lastActiveProduct || null;
+  const sameProductReference = canUseLastProductContext
+    ? (state?.lastProductReference?.nombre || lastActiveProduct || null)
+    : null;
   if (sameProductReference && !mentionsDifferentCatalogProduct && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${sameProductReference}`,
@@ -5622,7 +5743,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
-  const hasFamilyReference = Boolean(state?.lastProductReference?.familia);
+  const hasFamilyReference = canUseLastProductContext && Boolean(state?.lastProductReference?.familia);
   const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
   const hasValueCue = includesAnyToken(normalized, PRICE_VALUE_TOKENS);
   if (hasFamilyReference && !mentionsDifferentCatalogProduct) {
@@ -5669,6 +5790,10 @@ function aplicarContextoProductoAMensaje(texto, state) {
   }
 
   const suggestionMemory = obtenerSuggestionMemoryActiva(state);
+  if (mensajeApuntaAFamiliaFueraDeOpciones(raw, suggestionMemory?.options || [])) {
+    return { text: raw, used: false };
+  }
+
   const suggestionResolution = resolverReferenciaProductoEnOpciones(raw, suggestionMemory?.options || []);
   if (suggestionResolution?.option?.nombre) {
     logEvent("PRODUCT_MATCH_CONFIDENCE", {
@@ -5705,6 +5830,70 @@ function limpiarAclaracionPendiente(state) {
   if (state) {
     state.pendingClarification = null;
   }
+}
+
+function limpiarPendingProduct(state) {
+  if (state) {
+    state.pendingProduct = null;
+  }
+}
+
+function obtenerPendingProductActivo(state, now = Date.now()) {
+  if (!state?.pendingProduct) {
+    return null;
+  }
+
+  if (Number(state.pendingProduct.expires_at) <= now) {
+    limpiarPendingProduct(state);
+    return null;
+  }
+
+  return state.pendingProduct;
+}
+
+function construirEstadoPendingProduct({ family = null, requested = null, quantity = 1, customizations = [] } = {}) {
+  const createdAt = Date.now();
+  const normalizedFamily = normalizeCatalogSemanticFamilyName(family);
+  const mergedCustomizations = mergeCustomizations([], customizations);
+  return {
+    family: normalizedFamily || null,
+    requested: limpiarTexto(requested) || null,
+    note: buildNotesFromCustomizations(mergedCustomizations),
+    quantity: Number.isFinite(Number(quantity)) && Number(quantity) > 0 ? Number(quantity) : 1,
+    customizations: mergedCustomizations,
+    created_at: createdAt,
+    expires_at: createdAt + PENDING_PRODUCT_TTL_MS
+  };
+}
+
+function construirPendingProductDesdeEvaluacion({ state, mensaje = "", evaluacion = null } = {}) {
+  const source = limpiarTexto(
+    evaluacion?.ambiguousProducts?.[0]?.input
+    || evaluacion?.unmatchedProducts?.[0]
+    || mensaje
+  );
+  if (!source) {
+    return null;
+  }
+
+  const normalizedSource = normalizarTextoAnalisis(source);
+  const families = detectProductResolverFamilies(normalizedSource);
+  const activePending = obtenerPendingProductActivo(state);
+  const family = families.size === 1
+    ? Array.from(families)[0]
+    : (activePending?.family || null);
+
+  if (!family) {
+    return null;
+  }
+
+  const customizations = extractCustomizationsFromText(source);
+  return construirEstadoPendingProduct({
+    family,
+    requested: source,
+    quantity: resolverCantidadContextual(source, { defaultQuantity: activePending?.quantity || 1 }) || 1,
+    customizations: customizations.length ? customizations : (activePending?.customizations || [])
+  });
 }
 
 function obtenerAclaracionPendienteActiva(state, now = Date.now()) {
@@ -5750,7 +5939,7 @@ function extraerIndiceOpcionAclaracion(texto, totalOpciones = 0) {
     return null;
   }
 
-  const numericMatch = normalized.match(/(?:^|\b)(\d+)(?:$|\b)/);
+  const numericMatch = normalized.match(/^(?:opcion|opción|numero|número|la)?\s*(\d+)$/i);
   if (numericMatch) {
     const index = Number.parseInt(numericMatch[1], 10);
     return index >= 1 && index <= totalOpciones ? index - 1 : -1;
@@ -5773,28 +5962,42 @@ function extraerIndiceOpcionAclaracion(texto, totalOpciones = 0) {
 }
 
 function construirPedidoDesdeEstado(state) {
-  if (state?.pendingPedido) {
-    return normalizarPedido(state.pendingPedido);
-  }
-
   const activeContext = obtenerActiveOrderContext(state);
   const customerType = normalizeCustomerType(state?.customerType, "public");
-  if (!activeContext?.products?.length) {
-    return normalizarPedido({ cliente: state?.customerName || null, customer_type_applied: customerType, price_tier_applied: customerType });
+  const activePedido = activeContext?.products?.length
+    ? calcularTotalesPedido({
+        cliente: state?.customerName || activeContext.customerName || null,
+        customer_type_applied: customerType,
+        price_tier_applied: customerType,
+        productos: activeContext.products.map((item) => ({
+          producto: item.producto,
+          cantidad: item.cantidad || 1,
+          precio_unitario: parseOptionalNumber(item.precio_unitario),
+          subtotal: parseOptionalNumber(item.subtotal),
+          price_source: item.price_source || null,
+          product_notes: item.product_notes || null,
+          customizations: mergeCustomizations([], item.customizations)
+        })),
+        direccion: activeContext.direccion || null,
+        metodo_pago: activeContext.metodo_pago || null,
+        estado: "pendiente"
+      })
+    : null;
+
+  if (state?.pendingPedido) {
+    return activePedido
+      ? combinarPedidoParcialConOpciones(activePedido, normalizarPedido(state.pendingPedido), {
+          appendProducts: false,
+          pendingProduct: obtenerPendingProductActivo(state)
+        })
+      : normalizarPedido(state.pendingPedido);
   }
 
-  return calcularTotalesPedido({
-    cliente: state?.customerName || activeContext.customerName || null,
-    customer_type_applied: customerType,
-    price_tier_applied: customerType,
-    productos: activeContext.products.map((item) => ({
-      producto: item.producto,
-      cantidad: item.cantidad || 1
-    })),
-    direccion: activeContext.direccion || null,
-    metodo_pago: activeContext.metodo_pago || null,
-    estado: "pendiente"
-  });
+  if (activePedido) {
+    return activePedido;
+  }
+
+  return normalizarPedido({ cliente: state?.customerName || null, customer_type_applied: customerType, price_tier_applied: customerType });
 }
 
 function buscarUltimoPedidoCliente(telefono) {
@@ -5927,9 +6130,38 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
     return null;
   }
 
+  if (mensajeApuntaAFamiliaFueraDeOpciones(mensaje, clarification.opciones)) {
+    return null;
+  }
+
   const resolution = resolverReferenciaProductoEnOpciones(mensaje, clarification.opciones);
-  const selectedIndex = resolution?.index ?? null;
-  if (selectedIndex === null || selectedIndex < 0) {
+  let selectedIndex = resolution?.index ?? null;
+  let selectedOption = resolution?.option || (selectedIndex !== null && selectedIndex >= 0 ? clarification.opciones[selectedIndex] : null);
+
+  if (!selectedOption) {
+    const optionFamilies = new Set((clarification.opciones || [])
+      .map((option) => normalizeCatalogSemanticFamilyName(option?.familia || option?.nombreCanonico || option?.nombre))
+      .filter(Boolean));
+    const directResolution = resolverProductoCatalogo(mensaje);
+    const directFamily = normalizeCatalogSemanticFamilyName(
+      directResolution?.status === "matched"
+        ? (directResolution.product?.nombre_raiz_familia || directResolution.product?.nombre_familia || directResolution.product?.nombre)
+        : null
+    );
+
+    if (directResolution?.status === "matched" && (!optionFamilies.size || optionFamilies.has(directFamily))) {
+      selectedOption = {
+        id: directResolution.product?.id || directResolution.product?.nombre,
+        nombre: directResolution.product?.nombre,
+        precio: directResolution.product?.precio,
+        familia: directFamily,
+        indice: null
+      };
+      selectedIndex = clarification.opciones.findIndex((option) => option?.nombre === selectedOption.nombre);
+    }
+  }
+
+  if (!selectedOption) {
     const respuesta = `Por favor responde con el número de la opción: ${clarification.opciones.map((option) => option.indice).join(" o ")}.`;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return {
@@ -5943,8 +6175,6 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
       intent: "ambiguous_product"
     };
   }
-
-  const selectedOption = resolution?.option || clarification.opciones[selectedIndex];
   if (!selectedOption) {
     return null;
   }
@@ -5956,12 +6186,16 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
     reason: resolution?.reason || "pending_clarification"
   });
 
+  const resolutionCustomizations = mergeCustomizations(
+    clarification.customizations || [],
+    extractCustomizationsFromText(mensaje)
+  );
   const pedidoResuelto = agregarProductoAPedido(clarification.pedido_parcial || {}, {
     producto: selectedOption.nombre,
     cantidad: clarification.cantidad || 1,
     precio_unitario: parseOptionalNumber(selectedOption.precio),
-    product_notes: buildNotesFromCustomizations(clarification.customizations || []),
-    customizations: mergeCustomizations([], clarification.customizations || [])
+    product_notes: buildNotesFromCustomizations(resolutionCustomizations),
+    customizations: resolutionCustomizations
   });
   if (!pedidoResuelto.cliente && state.customerName) {
     pedidoResuelto.cliente = state.customerName;
@@ -5991,6 +6225,7 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
     order = persisted.order;
     sheets = persisted.sheets;
     state.pendingPedido = null;
+    limpiarPendingProduct(state);
   } else {
     state.pendingPedido = pedidoResuelto;
   }
@@ -6030,16 +6265,123 @@ function tieneBorradorPedido(state) {
   ));
 }
 
+function esIntencionReinicioPedido(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  return /\b(borrar todo|cancelar pedido|empezar de nuevo)\b/.test(normalized);
+}
+
+function obtenerFamiliaItemPedido(item = {}) {
+  return normalizeCatalogSemanticFamilyName(
+    buildProductReference(item?.producto)?.familia
+    || findCatalogProductByName(item?.producto)?.nombre_raiz_familia
+    || findCatalogProductByName(item?.producto)?.nombre_familia
+    || item?.producto
+  ) || null;
+}
+
+function combinarLineaPedido(baseItem = {}, incomingItem = {}) {
+  const mergedCustomizations = mergeCustomizations(baseItem?.customizations, incomingItem?.customizations);
+  return {
+    ...baseItem,
+    ...incomingItem,
+    producto: incomingItem?.producto || baseItem?.producto || null,
+    sabor: incomingItem?.sabor || baseItem?.sabor || null,
+    cantidad: Number.isFinite(Number(incomingItem?.cantidad)) && Number(incomingItem.cantidad) > 0
+      ? Number(incomingItem.cantidad)
+      : (Number.isFinite(Number(baseItem?.cantidad)) && Number(baseItem.cantidad) > 0 ? Number(baseItem.cantidad) : 1),
+    precio_unitario: parseOptionalNumber(incomingItem?.precio_unitario ?? incomingItem?.precioUnitario)
+      ?? parseOptionalNumber(baseItem?.precio_unitario ?? baseItem?.precioUnitario),
+    subtotal: parseOptionalNumber(incomingItem?.subtotal) ?? parseOptionalNumber(baseItem?.subtotal),
+    price_source: incomingItem?.price_source || baseItem?.price_source || null,
+    product_notes: limpiarTexto(incomingItem?.product_notes ?? incomingItem?.productNotes)
+      || limpiarTexto(baseItem?.product_notes ?? baseItem?.productNotes)
+      || buildNotesFromCustomizations(mergedCustomizations),
+    customizations: mergedCustomizations
+  };
+}
+
+function fusionarProductosPedido(baseProducts = [], incomingProducts = [], { appendProducts = false, pendingProduct = null, appendDuplicateMatches = false } = {}) {
+  if (appendProducts && appendDuplicateMatches && !pendingProduct) {
+    return consolidarItemsPedido([...(Array.isArray(baseProducts) ? baseProducts : []), ...(Array.isArray(incomingProducts) ? incomingProducts : [])]);
+  }
+
+  const merged = Array.isArray(baseProducts) ? baseProducts.map((item) => ({ ...item, customizations: mergeCustomizations([], item?.customizations) })) : [];
+
+  for (const incomingItem of Array.isArray(incomingProducts) ? incomingProducts : []) {
+    if (!incomingItem?.producto && !incomingItem?.cantidad) {
+      continue;
+    }
+
+    const incomingName = normalizeCatalogText(incomingItem?.producto);
+    const incomingFamily = obtenerFamiliaItemPedido(incomingItem);
+    const exactIndex = merged.findIndex((item) => normalizeCatalogText(item?.producto) === incomingName);
+    const familyMatches = incomingFamily
+      ? merged.map((item, index) => ({ index, family: obtenerFamiliaItemPedido(item) })).filter((entry) => entry.family === incomingFamily)
+      : [];
+    const replacementIndex = exactIndex >= 0
+      ? exactIndex
+      : (familyMatches.length === 1 ? familyMatches[0].index : -1);
+
+    if (replacementIndex >= 0) {
+      merged[replacementIndex] = combinarLineaPedido(merged[replacementIndex], incomingItem);
+      continue;
+    }
+
+    if (pendingProduct?.family && incomingFamily && incomingFamily === pendingProduct.family) {
+      const pendingIndex = merged.findIndex((item) => obtenerFamiliaItemPedido(item) === pendingProduct.family);
+      if (pendingIndex >= 0) {
+        merged[pendingIndex] = combinarLineaPedido(merged[pendingIndex], incomingItem);
+        continue;
+      }
+    }
+
+    merged.push({ ...incomingItem, customizations: mergeCustomizations([], incomingItem?.customizations) });
+  }
+
+  return consolidarItemsPedido(merged);
+}
+
 function combinarPedidoParcial(base = {}, incoming = {}) {
   return combinarPedidoParcialConOpciones(base, incoming, { appendProducts: false });
 }
 
-function combinarPedidoParcialConOpciones(base = {}, incoming = {}, { appendProducts = false } = {}) {
+function combinarPedidoParcialConOpciones(base = {}, incoming = {}, { appendProducts = false, sourceText = null, pendingProduct = null, allowReplace = false } = {}) {
   const incomingProducts = Array.isArray(incoming.productos) ? incoming.productos.filter((item) => item?.producto || item?.cantidad) : [];
   const baseProducts = Array.isArray(base.productos) ? base.productos.filter((item) => item?.producto || item?.cantidad) : [];
-  const mergedProducts = appendProducts
-    ? consolidarItemsPedido([...baseProducts, ...incomingProducts])
-    : (incomingProducts.length ? incomingProducts : baseProducts);
+  const explicitReset = allowReplace || esIntencionReinicioPedido(sourceText || "");
+  const appendDuplicateMatches = /\b(mas|más|otro|otra|otros|otras)\b/.test(normalizarTextoAnalisis(sourceText || ""));
+
+  logEvent("ORDER_CONTEXT_MERGE_STARTED", {
+    appendProducts,
+    appendDuplicateMatches,
+    explicitReset,
+    baseProducts: baseProducts.map((item) => item?.producto).filter(Boolean),
+    incomingProducts: incomingProducts.map((item) => item?.producto).filter(Boolean),
+    pendingFamily: pendingProduct?.family || null,
+    sourceText: limpiarTexto(sourceText) || null
+  });
+
+  if (!explicitReset && baseProducts.length && incomingProducts.length && !appendProducts && incomingProducts.length < baseProducts.length) {
+    logEvent("ORDER_CONTEXT_REPLACED_BLOCKED", {
+      sourceText: limpiarTexto(sourceText) || null,
+      baseProducts: baseProducts.map((item) => item?.producto).filter(Boolean),
+      incomingProducts: incomingProducts.map((item) => item?.producto).filter(Boolean),
+      reason: "implicit_order_replacement"
+    }, "warn");
+  }
+
+  const mergedProducts = explicitReset
+    ? (incomingProducts.length ? consolidarItemsPedido(incomingProducts) : [])
+    : fusionarProductosPedido(baseProducts, incomingProducts, { appendProducts, pendingProduct, appendDuplicateMatches });
+
+  logEvent("ORDER_CONTEXT_MERGE_COMPLETED", {
+    appendProducts,
+    appendDuplicateMatches,
+    explicitReset,
+    resultProducts: mergedProducts.map((item) => `${item?.cantidad || 1} ${item?.producto}`).filter(Boolean),
+    resultCount: mergedProducts.length,
+    pendingFamily: pendingProduct?.family || null
+  });
 
   return calcularTotalesPedido({
     cliente: incoming.cliente || base.cliente || null,
@@ -6315,6 +6657,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     });
     state.pendingPedido = null;
     limpiarAclaracionPendiente(state);
+    limpiarPendingProduct(state);
     actualizarMemoriaConversacional(state, { pedido: pedidoConfirmado, evaluacion: evaluacionConfirmada, intent: "order_request" });
     const respuesta = construirRespuestaPedido(pedidoConfirmado, evaluacionConfirmada, { availableProducts: buildCatalogShortList(5) });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: persisted.order?.id || null });
@@ -6345,6 +6688,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     });
     state.pendingPedido = null;
     limpiarAclaracionPendiente(state);
+    limpiarPendingProduct(state);
     actualizarMemoriaConversacional(state, { pedido: pedidoConfirmado, evaluacion: evaluacionConfirmada, intent: "order_request" });
     const respuesta = construirRespuestaPedido(pedidoConfirmado, evaluacionConfirmada, { availableProducts: buildCatalogShortList(5) });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: persisted.order?.id || null });
@@ -6660,6 +7004,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
     limpiarAclaracionPendiente(state);
+    limpiarPendingProduct(state);
     limpiarSuggestionMemory(state);
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
     const respuesta = construirRespuestaDespedida({ customerName: state.customerName || null });
@@ -6831,6 +7176,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
         sourceMessageId
       });
       state.pendingPedido = null;
+      limpiarPendingProduct(state);
       actualizarMemoriaConversacional(state, { pedido: pedidoActual, evaluacion: evaluacionContextual, intent: "order_request" });
       const fallback = construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
       const respuesta = await generarRespuestaConversacional({
@@ -7054,13 +7400,16 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     customerType: customerProfile.customerType
   });
 
-  const basePedido = state.pendingPedido
+  const pendingProductBeforeMerge = obtenerPendingProductActivo(state);
+  const basePedido = construirPedidoDesdeEstado(state)
     || ((contextualizedMessage.appendProducts || gptIntent.intent === "add_item" || /\bdonde siempre\b/i.test(normalizarTextoAnalisis(mensaje)))
       ? construirPedidoDesdeOrder(activeOrderBefore || state.lastResolvedOrder)
       : null)
     || { cliente: state.customerName || null, customer_type_applied: customerProfile.customerType, price_tier_applied: customerProfile.customerType };
   const pedidoCombinado = combinarPedidoParcialConOpciones(basePedido, resultadoActual.pedido || {}, {
-    appendProducts: Boolean(contextualizedMessage.appendProducts || gptIntent.intent === "add_item")
+    appendProducts: Boolean(contextualizedMessage.appendProducts || gptIntent.intent === "add_item"),
+    sourceText: contextualizedMessage.text || mensaje,
+    pendingProduct: pendingProductBeforeMerge
   });
   if (imageAnalysis?.address && !pedidoCombinado.direccion) {
     pedidoCombinado.direccion = imageAnalysis.address;
@@ -7167,6 +7516,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       resultado.sheets = persisted.sheets;
       state.pendingPedido = null;
       limpiarAclaracionPendiente(state);
+      limpiarPendingProduct(state);
       actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: "order_request" });
     } catch (error) {
       throw error;
@@ -7184,6 +7534,36 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       });
     } else {
       limpiarAclaracionPendiente(state);
+    }
+
+    const resolvedPendingFamily = pendingProductBeforeMerge?.family
+      && Array.isArray(resultadoActual.pedido?.productos)
+      && resultadoActual.pedido.productos.some((item) => obtenerFamiliaItemPedido(item) === pendingProductBeforeMerge.family);
+    const nextPendingProduct = construirPendingProductDesdeEvaluacion({
+      state,
+      mensaje: contextualizedMessage.text || mensaje,
+      evaluacion: resultadoActual.evaluacion || evaluacionCombinada
+    });
+
+    if (resolvedPendingFamily) {
+      logEvent("PENDING_PRODUCT_RESOLVED", {
+        input: contextualizedMessage.text || mensaje,
+        family: pendingProductBeforeMerge.family,
+        requested: pendingProductBeforeMerge.requested || null,
+        reason: contextualizedMessage.reason || "pending_product_merge"
+      });
+      limpiarPendingProduct(state);
+    } else if (nextPendingProduct && evaluacionCombinada.catalogStatus !== "ok") {
+      state.pendingProduct = nextPendingProduct;
+      logEvent("PENDING_PRODUCT_CREATED", {
+        input: contextualizedMessage.text || mensaje,
+        family: nextPendingProduct.family,
+        requested: nextPendingProduct.requested,
+        quantity: nextPendingProduct.quantity,
+        note: nextPendingProduct.note || null
+      });
+    } else if (evaluacionCombinada.catalogStatus === "ok") {
+      limpiarPendingProduct(state);
     }
 
     actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: resultado.intent });

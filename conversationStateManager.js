@@ -5,6 +5,7 @@ function createDefaultConversationState({ customerName = null, customerType = "p
     registeredCustomerId,
     pendingPedido: null,
     pendingClarification: null,
+    pendingProduct: null,
     lastPaymentMethod: null,
     lastProductReference: null,
     lastIntent: null,

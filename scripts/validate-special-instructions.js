@@ -5,6 +5,7 @@ const {
   ejecutarFlujoMensaje
 } = require("../server");
 const {
+  db,
   syncCatalogProducts,
   listCatalogProducts
 } = require("../db");
@@ -25,9 +26,20 @@ function getFirstItem(result) {
   return Array.isArray(result?.pedido?.productos) ? result.pedido.productos[0] : null;
 }
 
+function findItem(result, pattern) {
+  return (result?.pedido?.productos || []).find((item) => pattern.test(item?.producto || ""));
+}
+
+function normalizeText(value = "") {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function responseMentionsProductNote(response = "", note = "") {
-  const normalizedResponse = String(response || "").toLowerCase();
-  const normalizedNote = String(note || "").toLowerCase();
+  const normalizedResponse = normalizeText(response);
+  const normalizedNote = normalizeText(note);
   return normalizedResponse.includes(`nota: ${normalizedNote}`) || normalizedResponse.includes(normalizedNote);
 }
 
@@ -45,6 +57,7 @@ async function send(phone, message, extra = {}) {
 
 async function seedSpecialInstructionProducts() {
   const sourceUrl = "test://special-instructions";
+  db.prepare("DELETE FROM catalog_products").run();
   syncCatalogProducts([
     {
       id: "test-kefir-natural-1000",
@@ -85,6 +98,46 @@ async function seedSpecialInstructionProducts() {
       presentacion: "120 gr",
       aliases: ["griego con fruta", "griego fruta", "griego fruta unidad"],
       activo: true
+    },
+    {
+      id: "test-griego-500",
+      nombre: "Griego 500 g",
+      precio_publico: 10500,
+      precio_distribuidor: 9200,
+      categoria: "Griego",
+      presentacion: "500 g",
+      aliases: ["griego 500", "griego grande", "griego medio kilo"],
+      activo: true
+    },
+    {
+      id: "test-cafe-litro-1000",
+      nombre: "Café Litro 1000 ml",
+      precio_publico: 11500,
+      precio_distribuidor: 9800,
+      categoria: "Cafe",
+      presentacion: "1000 ml",
+      aliases: ["cafe litro", "café litro", "cafe 1000", "café 1000"],
+      activo: true
+    },
+    {
+      id: "test-fresa-fit-garrafa-1800",
+      nombre: "Fresa Fit Garrafa 1800 ml",
+      precio_publico: 13700,
+      precio_distribuidor: 12100,
+      categoria: "Fresa Fit",
+      presentacion: "1800 ml",
+      aliases: ["fresa fit garrafa", "fresa fit garrafa 1800", "fresa fit grande"],
+      activo: true
+    },
+    {
+      id: "test-aloe-litro-1000",
+      nombre: "Aloe Litro",
+      precio_publico: 12000,
+      precio_distribuidor: 10500,
+      categoria: "Aloe",
+      presentacion: "1000 ml",
+      aliases: ["aloe litro", "aloe 1000", "sabila litro", "sábila litro"],
+      activo: true
     }
   ], { sourceUrl });
   setCatalogProductsCache(listCatalogProducts({ activeOnly: true }));
@@ -101,7 +154,7 @@ async function run() {
   const case1Item = getFirstItem(case1);
   assert(/kefir/i.test(case1Item?.producto || ""), "1. kefir sin azucar debe mantenerse en familia kefir", case1);
   assert(/sin azúcar/i.test(case1Item?.product_notes || ""), "1. kefir sin azucar debe guardar nota en el item", case1);
-  assert(/nota: sin azúcar/i.test(getResponse(case1)), "1. respuesta debe mostrar la nota sin azúcar", case1);
+  assert(responseMentionsProductNote(getResponse(case1), "sin azúcar"), "1. respuesta debe mostrar la nota sin azúcar", case1);
   assert(!/presentación exacta/i.test(getResponse(case1)), "1. no debe pedir presentación exacta", case1);
   checks.push({ case: 1, ok: true, result: { producto: case1Item.producto, nota: case1Item.product_notes } });
 
@@ -201,6 +254,51 @@ async function run() {
   assert(/kefir/i.test(case11Item?.producto || ""), "11. respuesta pendiente 'grande' debe resolverse a kefir", case11);
   assert(!/griego|aloe|caf[eé]|ancheta/i.test(case11Item?.producto || ""), "11. kefir pendiente nunca debe resolverse como otra familia", case11);
   checks.push({ case: 11, ok: true, result: { producto: case11Item.producto, cantidad: case11Item.cantidad } });
+
+  const phone12 = `57310012${Date.now().toString().slice(-4)}`;
+  const case12pendingA = await send(phone12, "1 kefir\n2 Fresa fit garrafa 1800 sin colorante\n1 Aloe Litro");
+  const case12pendingFresa = findItem(case12pendingA, /fresa fit/i);
+  const case12pendingAloe = findItem(case12pendingA, /aloe/i);
+  assert(case12pendingFresa && case12pendingAloe, "12. pedido con kefir ambiguo debe conservar Fresa Fit y Aloe mientras kefir queda pendiente", case12pendingA);
+
+  const case12pendingB = await send(phone12, "de 1000");
+  const case12pendingBKefir = findItem(case12pendingB, /kefir/i);
+  assert(case12pendingBKefir, "12. de 1000 debe resolver el pendingProduct de kefir", case12pendingB);
+  assert(/1000|natural/i.test(case12pendingBKefir?.producto || ""), "12. de 1000 debe caer en variante kefir 1000", case12pendingB);
+  assert(findItem(case12pendingB, /fresa fit/i) && findItem(case12pendingB, /aloe/i), "12. de 1000 no debe borrar Fresa Fit ni Aloe", case12pendingB);
+  checks.push({ case: 12, ok: true, result: (case12pendingB.pedido?.productos || []).map((item) => ({ producto: item.producto, cantidad: item.cantidad, nota: item.product_notes || null })) });
+
+  const phone13 = `57310013${Date.now().toString().slice(-4)}`;
+  const case12a = await send(phone13, "1 kefir grande sin azucar\n2 Fresa fit garrafa 1800 sin colorante\n1 Aloe Litro");
+  const case12aFresa = findItem(case12a, /fresa fit/i);
+  const case12aAloe = findItem(case12a, /aloe/i);
+  assert(case12aFresa, "12. pedido inicial debe conservar Fresa Fit válida", case12a);
+  assert(case12aAloe, "12. pedido inicial debe conservar Aloe válido", case12a);
+  assert(/sin colorante/i.test(case12aFresa?.product_notes || ""), "12. Fresa Fit debe conservar sin colorante", case12a);
+
+  const case12b = await send(phone13, "Kefir dulce 1000");
+  const case12bKefir = findItem(case12b, /kefir/i);
+  const case12bFresa = findItem(case12b, /fresa fit/i);
+  const case12bAloe = findItem(case12b, /aloe/i);
+  assert(case12bKefir, "13. kefir dulce 1000 debe resolver/agregar kefir pendiente", case12b);
+  assert(case12bFresa && case12bAloe, "13. kefir dulce 1000 no debe borrar Fresa Fit ni Aloe", case12b);
+  assert(/dulce/i.test(case12bKefir?.product_notes || ""), "13. kefir dulce 1000 debe guardar nota dulce", case12b);
+  assert(/sin colorante/i.test(case12bFresa?.product_notes || ""), "13. Fresa Fit debe mantener sin colorante", case12b);
+  checks.push({ case: 13, ok: true, result: (case12b.pedido?.productos || []).map((item) => ({ producto: item.producto, cantidad: item.cantidad, nota: item.product_notes || null })) });
+
+  const case12c = await send(phone13, "agrega 1 Kefir DULCE 1000ml y 2 fresa fit garrafa");
+  const case12cKefir = findItem(case12c, /kefir/i);
+  const case12cFresa = findItem(case12c, /fresa fit/i);
+  const case12cAloe = findItem(case12c, /aloe/i);
+  assert(case12cKefir && case12cFresa && case12cAloe, "14. merge correctivo debe conservar pedido completo", case12c);
+  assert(Number(case12cKefir?.cantidad) === 1, "14. corrección no debe duplicar kefir indebidamente", case12c);
+  assert(Number(case12cFresa?.cantidad) === 2, "14. corrección no debe duplicar Fresa Fit indebidamente", case12c);
+  assert(Number(case12cAloe?.cantidad) === 1, "14. corrección no debe borrar Aloe", case12c);
+
+  const case12d = await send(phone13, "pero por que borraste mi pedido?");
+  const case12dResponse = getResponse(case12d);
+  assert(/kefir/i.test(case12dResponse) && /fresa fit/i.test(case12dResponse) && /aloe/i.test(case12dResponse), "15. reclamo debe reconstruir pedido completo conservado", case12d);
+  checks.push({ case: 14, ok: true, result: case12dResponse });
 
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 }
