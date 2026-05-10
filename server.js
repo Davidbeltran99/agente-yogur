@@ -1224,17 +1224,17 @@ function normalizarScoreAConfianza(score = 0) {
   return 32;
 }
 
-function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}) {
+function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = null, catalog = null } = {}) {
   const candidate = limpiarTextoProductoSolicitado(texto);
   if (!candidate) {
     return [];
   }
 
   const normalizedCandidate = normalizeFuzzyCatalogPhrase(candidate);
-
+  const catalogEntries = Array.isArray(catalog) ? catalog.filter(Boolean) : getCatalogProductsCache();
   const matches = [];
 
-  for (const product of getCatalogProductsCache()) {
+  for (const product of catalogEntries) {
     let bestScore = 0;
 
     for (const alias of product.aliases || []) {
@@ -1251,10 +1251,13 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
   const sortedMatches = matches
     .sort((a, b) => (b.score - a.score)
       || ((a.product?.nombre_canonico || a.product?.nombre || "").length - (b.product?.nombre_canonico || b.product?.nombre || "").length)
-      || ((parseOptionalNumber(a.product?.precio) ?? Number.MAX_SAFE_INTEGER) - (parseOptionalNumber(b.product?.precio) ?? Number.MAX_SAFE_INTEGER)))
-    .slice(0, limit);
+      || ((parseOptionalNumber(a.product?.precio) ?? Number.MAX_SAFE_INTEGER) - (parseOptionalNumber(b.product?.precio) ?? Number.MAX_SAFE_INTEGER)));
 
-  const bestMatch = sortedMatches[0] || null;
+  const limitedMatches = Number.isFinite(limit) && limit > 0
+    ? sortedMatches.slice(0, limit)
+    : sortedMatches;
+
+  const bestMatch = limitedMatches[0] || null;
   logFuzzyMatchResult({
     query: candidate,
     normalizedQuery: normalizedCandidate,
@@ -1264,7 +1267,7 @@ function encontrarCoincidenciasCatalogo(texto, { minScore = 70, limit = 5 } = {}
     status: bestMatch ? "matched" : "not_found"
   });
 
-  return sortedMatches;
+  return limitedMatches;
 }
 
 function buildCanonicalCatalogEntries() {
@@ -1605,7 +1608,7 @@ function logProductResolverDecision(details = {}) {
 function resolveProductFromCatalog(query, context = {}) {
   const candidate = limpiarTexto(query);
   const normalizedQuery = normalizeProductResolverQuery(query);
-  const catalog = Array.isArray(context.catalog) ? context.catalog : getCatalogProductsCache();
+  const catalog = Array.isArray(context.catalog) ? context.catalog.filter(Boolean) : getCatalogProductsCache();
   const families = detectProductResolverFamilies(normalizedQuery);
   const lockedFamily = families.size === 1 ? Array.from(families)[0] : null;
   const directPool = families.size
@@ -1615,6 +1618,39 @@ function resolveProductFromCatalog(query, context = {}) {
     ? filterFamilyProductsForResolver(directPool, lockedFamily, normalizedQuery)
     : directPool;
   const variantMatcher = lockedFamily ? getProductResolverVariantMatcher(lockedFamily, normalizedQuery) : null;
+
+  const finishResolution = (result) => {
+    const decisionPayload = {
+      ...result,
+      product: result.product?.nombre || null,
+      candidates: Array.isArray(result.candidates)
+        ? result.candidates.map((option) => option?.nombre || option?.product?.nombre || null).filter(Boolean)
+        : undefined
+    };
+    logProductResolverDecision(decisionPayload);
+    if (result.product) {
+      logEvent("FINAL_PRODUCT_MATCH", {
+        query: candidate,
+        normalizedQuery,
+        product: result.product?.nombre || null,
+        reason: result.reason || null,
+        confidence: result.confidence || null,
+        catalogSize: catalog.length,
+        workingPoolSize: workingPool.length
+      });
+    }
+    logEvent("FULL_CATALOG_SCAN_FINISHED", {
+      query: candidate,
+      normalizedQuery,
+      status: result.status,
+      reason: result.reason || null,
+      catalogSize: catalog.length,
+      workingPoolSize: workingPool.length,
+      scannedCount: workingPool.length,
+      candidateCount: Array.isArray(result.candidates) ? result.candidates.length : (result.product ? 1 : 0)
+    });
+    return result;
+  };
 
   if (lockedFamily) {
     logEvent("PRODUCT_FAMILY_LOCK", {
@@ -1637,112 +1673,128 @@ function resolveProductFromCatalog(query, context = {}) {
     catalogSize: catalog.length,
     workingPoolSize: workingPool.length
   });
+  logEvent("FULL_CATALOG_SCAN_STARTED", {
+    query: candidate,
+    normalizedQuery,
+    families: Array.from(families),
+    lockedFamily,
+    catalogSize: catalog.length,
+    workingPoolSize: workingPool.length
+  });
+  logEvent("CATALOG_ITEMS_SCANNED_COUNT", {
+    query: candidate,
+    normalizedQuery,
+    catalogSize: catalog.length,
+    scannedCount: workingPool.length
+  });
 
   if (!normalizedQuery) {
-    const result = { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: "empty_query" };
-    logProductResolverDecision(result);
-    return result;
+    return finishResolution({ status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: "empty_query" });
   }
 
   if (variantMatcher && workingPool.length) {
     const variantMatches = workingPool.filter((product) => variantMatcher.pattern.test(normalizeCanonicalCatalogName(product?.nombre)));
+    logProductResolverCandidates({ query: candidate, mode: "family_variant", candidates: variantMatches.map((product) => product?.nombre) });
+    logEvent("MATCH_CANDIDATES", {
+      query: candidate,
+      normalizedQuery,
+      stage: "family_variant",
+      candidateCount: variantMatches.length,
+      candidates: variantMatches.slice(0, 10).map((product) => product?.nombre || null)
+    });
+
     if (variantMatches.length === 1) {
-      const result = { status: "resolved", query: candidate, normalizedQuery, product: variantMatches[0], reason: `family_variant:${variantMatcher.key}`, confidence: 97 };
-      logProductResolverCandidates({ query: candidate, mode: "family_variant", candidates: variantMatches.map((product) => product?.nombre) });
-      logProductResolverDecision({ ...result, product: result.product?.nombre || null });
-      return result;
+      return finishResolution({ status: "resolved", query: candidate, normalizedQuery, product: variantMatches[0], reason: `family_variant:${variantMatcher.key}`, confidence: 97 });
     }
 
     if (variantMatches.length > 1) {
       const options = buildCatalogAmbiguityOptions(variantMatches);
-      const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: `family_variant_ambiguous:${variantMatcher.key}`, confidence: 82 };
-      logProductResolverCandidates({ query: candidate, mode: "family_variant_ambiguous", candidates: options.map((product) => product?.nombre) });
-      logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
-      return result;
+      return finishResolution({ status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: `family_variant_ambiguous:${variantMatcher.key}`, confidence: 82 });
     }
   }
 
   const deterministicCandidates = buildResolverCandidates(workingPool, normalizedQuery, { families });
-  logProductResolverCandidates({
+  const deterministicPreview = deterministicCandidates.slice(0, 10).map((entry) => ({
+    product: entry.product?.nombre || null,
+    score: entry.score,
+    overlap: entry.overlap,
+    exactAlias: entry.exactAlias,
+    containsHit: entry.containsHit,
+    variantHit: entry.variantHit
+  }));
+  logProductResolverCandidates({ query: candidate, mode: "deterministic_contains", candidates: deterministicPreview });
+  logEvent("MATCH_CANDIDATES", {
     query: candidate,
-    mode: "deterministic_contains",
-    candidates: deterministicCandidates.slice(0, 5).map((entry) => ({
-      product: entry.product?.nombre || null,
-      score: entry.score,
-      overlap: entry.overlap
-    }))
+    normalizedQuery,
+    stage: "deterministic_contains",
+    candidateCount: deterministicCandidates.length,
+    candidates: deterministicPreview
   });
 
   if (deterministicCandidates.length === 1) {
     const winner = deterministicCandidates[0];
-    const result = { status: "resolved", query: candidate, normalizedQuery, product: winner.product, reason: "deterministic_single", confidence: 95 };
-    logProductResolverDecision({ ...result, product: winner.product?.nombre || null });
-    return result;
+    return finishResolution({ status: "resolved", query: candidate, normalizedQuery, product: winner.product, reason: "deterministic_single", confidence: 95 });
   }
 
   if (deterministicCandidates.length > 1) {
     const [best, second] = deterministicCandidates;
     const exactAliasCandidates = deterministicCandidates.filter((entry) => entry.exactAlias);
     if (exactAliasCandidates.length === 1) {
-      const result = { status: "resolved", query: candidate, normalizedQuery, product: exactAliasCandidates[0].product, reason: "deterministic_exact_alias", confidence: 97 };
-      logProductResolverDecision({ ...result, product: result.product?.nombre || null });
-      return result;
+      return finishResolution({ status: "resolved", query: candidate, normalizedQuery, product: exactAliasCandidates[0].product, reason: "deterministic_exact_alias", confidence: 97 });
     }
 
     const exactOnly = deterministicCandidates.filter((entry) => entry.exactAlias || entry.containsHit || entry.overlap.length === best.overlap.length);
     const queryLooksGenericFamily = families.size === 1 && getProductResolverTokens(normalizedQuery).every((token) => normalizeCatalogText(Array.from(families)[0]).includes(token) || token === Array.from(families)[0]);
 
     if (!queryLooksGenericFamily && best.score >= ((second?.score || 0) + 18)) {
-      const result = { status: "resolved", query: candidate, normalizedQuery, product: best.product, reason: "deterministic_best", confidence: 90 };
-      logProductResolverDecision({ ...result, product: best.product?.nombre || null });
-      return result;
+      return finishResolution({ status: "resolved", query: candidate, normalizedQuery, product: best.product, reason: "deterministic_best", confidence: 90 });
     }
 
     const options = buildCatalogAmbiguityOptions((exactOnly.length ? exactOnly : deterministicCandidates).map((entry) => entry.product));
     if (options.length === 1) {
       const matchedProduct = workingPool.find((product) => product?.id === options[0].id) || best.product || null;
-      const result = matchedProduct ? { status: "resolved", query: candidate, normalizedQuery, product: matchedProduct, reason: "deterministic_single_option", confidence: 90 } : { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: "deterministic_empty" };
-      logProductResolverDecision({ ...result, product: result.product?.nombre || null });
-      return result;
+      return finishResolution(matchedProduct
+        ? { status: "resolved", query: candidate, normalizedQuery, product: matchedProduct, reason: "deterministic_single_option", confidence: 90 }
+        : { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: "deterministic_empty" });
     }
 
-    const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "deterministic_ambiguous", confidence: 78 };
-    logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
-    return result;
+    return finishResolution({ status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "deterministic_ambiguous", confidence: 78 });
   }
 
   const fuzzyMatches = encontrarCoincidenciasCatalogo(query, {
     minScore: families.size ? 68 : 72,
-    limit: 3
-  }).filter((entry) => !families.size || Array.from(families).some((family) => matchesCatalogFamily(entry.product, family)));
+    limit: null,
+    catalog: workingPool
+  });
+  const fuzzyPreview = fuzzyMatches.slice(0, 10).map((entry) => ({ product: entry.product?.nombre || null, score: entry.score, confidence: entry.confidence }));
 
   logProductResolverCandidates({
     query: candidate,
     mode: "fuzzy",
-    candidates: fuzzyMatches.map((entry) => ({ product: entry.product?.nombre || null, score: entry.score, confidence: entry.confidence }))
+    candidates: fuzzyPreview
+  });
+  logEvent("MATCH_CANDIDATES", {
+    query: candidate,
+    normalizedQuery,
+    stage: "fuzzy_global",
+    candidateCount: fuzzyMatches.length,
+    candidates: fuzzyPreview
   });
 
   if (!fuzzyMatches.length) {
-    const result = { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: families.size ? "family_not_found" : "catalog_not_found" };
-    logProductResolverDecision(result);
-    return result;
+    return finishResolution({ status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: families.size ? "family_not_found" : "catalog_not_found" });
   }
 
   if (fuzzyMatches.length === 1 || ((fuzzyMatches[0]?.score || 0) - (fuzzyMatches[1]?.score || 0)) >= 10) {
-    const result = { status: "resolved", query: candidate, normalizedQuery, product: fuzzyMatches[0].product, reason: "fuzzy_best", confidence: fuzzyMatches[0].confidence };
-    logProductResolverDecision({ ...result, product: result.product?.nombre || null });
-    return result;
+    return finishResolution({ status: "resolved", query: candidate, normalizedQuery, product: fuzzyMatches[0].product, reason: "fuzzy_best", confidence: fuzzyMatches[0].confidence });
   }
 
   const options = buildCatalogAmbiguityOptions(fuzzyMatches.map((entry) => entry.product));
   if (options.length === 1) {
-    const result = { status: "resolved", query: candidate, normalizedQuery, product: fuzzyMatches[0].product, reason: "fuzzy_single_option", confidence: fuzzyMatches[0].confidence };
-    logProductResolverDecision({ ...result, product: result.product?.nombre || null });
-    return result;
+    return finishResolution({ status: "resolved", query: candidate, normalizedQuery, product: fuzzyMatches[0].product, reason: "fuzzy_single_option", confidence: fuzzyMatches[0].confidence });
   }
-  const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "fuzzy_ambiguous", confidence: fuzzyMatches[0].confidence };
-  logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
-  return result;
+
+  return finishResolution({ status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "fuzzy_ambiguous", confidence: fuzzyMatches[0].confidence });
 }
 
 function resolverProductoCatalogo(texto) {
@@ -2131,12 +2183,21 @@ function parseListOrderLine(segmento) {
     return null;
   }
 
-  const verbStartMatch = raw.match(new RegExp(`^(?:quiero|necesito|agrega(?:me)?|agrégame|dame|mandame|mándame|ponme|enviame|envíame)\\s+(${QUANTITY_TOKEN_PATTERN})\\b\\s+(.+)$`, "i"));
+  const normalizedRaw = normalizarTextoAnalisis(raw);
+  const verbStartMatch = raw.match(new RegExp(`^(?:quiero|necesito|agrega(?:me|le)?|agrégame|dame|mandame|mándame|ponme|enviame|envíame|suma(?:le)?|añade|anade)\\s+(${QUANTITY_TOKEN_PATTERN})\\b\\s+(.+)$`, "i"));
   if (verbStartMatch?.[1] && verbStartMatch?.[2]) {
     const cantidad = obtenerNumeroDesdeToken(verbStartMatch[1]);
     const producto = limpiarTexto(verbStartMatch[2]);
     if (cantidad && producto) {
       return { raw, cantidad, productText: producto, quantityPosition: "verb_start" };
+    }
+  }
+
+  const verbImplicitMatch = raw.match(/^(?:quiero|necesito|agrega(?:me|le)?|agrégame|dame|mandame|mándame|ponme|enviame|envíame|suma(?:le)?|añade|anade)\s+(.+)$/i);
+  if (verbImplicitMatch?.[1]) {
+    const producto = limpiarTexto(verbImplicitMatch[1]);
+    if (producto) {
+      return { raw, cantidad: 1, productText: producto, quantityPosition: "verb_implicit", implicitQuantity: true };
     }
   }
 
@@ -2157,6 +2218,13 @@ function parseListOrderLine(segmento) {
     if (cantidad && producto && !looksLikePresentationTail) {
       return { raw, cantidad, productText: producto, quantityPosition: "end" };
     }
+  }
+
+  const hasCatalogHint = encontrarCoincidenciasCatalogo(raw, { minScore: 70, limit: 1 }).length > 0;
+  const looksLikePureProductLine = hasCatalogHint
+    && !/\b(direccion|metodo de pago|pago|efectivo|transferencia|nequi|bancolombia|gracias|hola|buenas|buenos dias|buenas tardes)\b/i.test(normalizedRaw);
+  if (looksLikePureProductLine) {
+    return { raw, cantidad: 1, productText: limpiarTexto(raw), quantityPosition: "implicit_line", implicitQuantity: true };
   }
 
   return null;
@@ -4342,9 +4410,54 @@ async function handleIncomingReceiptImage({ telefono, sourceMessageId, simulated
   };
 }
 
+function extractImageAnalysisCatalogLines(imageAnalysis = {}) {
+  const extractedTextLines = String(imageAnalysis?.extracted_text || "")
+    .split(/\r?\n+/)
+    .map((line) => limpiarTexto(line))
+    .filter(Boolean);
+  const uncertainLines = (Array.isArray(imageAnalysis?.uncertain_lines) ? imageAnalysis.uncertain_lines : [])
+    .map((line) => limpiarTexto(line?.text || line?.raw_text || line))
+    .filter(Boolean);
+  const itemLines = (Array.isArray(imageAnalysis?.items) ? imageAnalysis.items : [])
+    .map((item) => limpiarTexto(item?.raw_text || item?.product_query || ""))
+    .filter(Boolean);
+
+  const baseLines = extractedTextLines.length
+    ? extractedTextLines
+    : (uncertainLines.length ? uncertainLines : itemLines);
+  const supplementalLines = extractedTextLines.length
+    ? uncertainLines
+    : (uncertainLines.length ? itemLines : []);
+
+  const deduped = [];
+  const seen = new Set();
+  for (const line of [...baseLines, ...supplementalLines]) {
+    const normalized = normalizarTextoAnalisis(line);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    deduped.push(line);
+  }
+
+  return deduped;
+}
+
 function buildImageOrderNormalizedText(imageAnalysis = {}, caption = null) {
-  const itemLines = (Array.isArray(imageAnalysis.items) ? imageAnalysis.items : [])
-    .map((item) => `${Math.max(1, Number(item?.quantity) || 1)} ${limpiarTexto(item?.product_query || item?.raw_text || "")}`.trim())
+  const quantityByLine = new Map((Array.isArray(imageAnalysis.items) ? imageAnalysis.items : [])
+    .map((item) => {
+      const normalized = normalizarTextoAnalisis(limpiarTexto(item?.product_query || item?.raw_text || ""));
+      const quantity = Math.max(1, Number(item?.quantity) || 1);
+      return normalized ? [normalized, quantity] : null;
+    })
+    .filter(Boolean));
+  const itemLines = extractImageAnalysisCatalogLines(imageAnalysis)
+    .map((line) => {
+      const normalized = normalizarTextoAnalisis(line);
+      const quantity = quantityByLine.get(normalized);
+      const alreadyHasQuantity = /^\s*\d+\b/.test(line);
+      return quantity && !alreadyHasQuantity ? `${quantity} ${line}`.trim() : line;
+    })
     .filter(Boolean);
   const normalizedCaption = normalizarTextoAnalisis(caption);
   const shouldIncludeCaption = Boolean(normalizedCaption)
@@ -5225,6 +5338,12 @@ function aplicarContextoProductoAMensaje(texto, state) {
 
   const activeContext = obtenerActiveOrderContext(state);
   const lastActiveProduct = activeContext?.products?.[activeContext.products.length - 1]?.producto || state?.lastProductReference?.nombre || null;
+  const normalizedActiveProduct = normalizarTextoAnalisis(lastActiveProduct || "");
+  const explicitCatalogMatches = encontrarCoincidenciasCatalogo(raw, { minScore: 70, limit: 3 });
+  const mentionsDifferentCatalogProduct = explicitCatalogMatches.some((entry) => {
+    const productName = normalizarTextoAnalisis(entry?.product?.nombre || "");
+    return productName && (!normalizedActiveProduct || productName !== normalizedActiveProduct);
+  });
   if (esIntencionReorden(raw)) {
     return { text: raw, used: false };
   }
@@ -5249,7 +5368,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
-  if (esIntencionAgregarMas(raw) && lastActiveProduct) {
+  if (esIntencionAgregarMas(raw) && lastActiveProduct && !mentionsDifferentCatalogProduct) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
@@ -5260,7 +5379,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
   }
 
   const sameProductReference = state?.lastProductReference?.nombre || lastActiveProduct || null;
-  if (sameProductReference && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
+  if (sameProductReference && !mentionsDifferentCatalogProduct && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${sameProductReference}`,
       used: true,
@@ -5273,7 +5392,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
   const hasFamilyReference = Boolean(state?.lastProductReference?.familia);
   const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
   const hasValueCue = includesAnyToken(normalized, PRICE_VALUE_TOKENS);
-  if (hasFamilyReference) {
+  if (hasFamilyReference && !mentionsDifferentCatalogProduct) {
     const alreadyMentionsFamily = getCatalogProductsCache().some((product) => {
       const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia);
       return family && normalized.includes(family);

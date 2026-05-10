@@ -144,7 +144,7 @@ async function inferConversationIntent(contexto = {}) {
 
 function normalizarResultadoImagenPedido(payload = {}) {
   const items = Array.isArray(payload.items)
-    ? payload.items.slice(0, 20).map((item) => {
+    ? payload.items.map((item) => {
         const quantity = Number(item?.quantity);
         const confidence = Math.max(0, Math.min(1, Number(item?.confidence) || 0));
         const rawText = String(item?.raw_text || "").trim().slice(0, 180);
@@ -164,7 +164,6 @@ function normalizarResultadoImagenPedido(payload = {}) {
 
   const uncertainLines = Array.isArray(payload.uncertain_lines)
     ? payload.uncertain_lines
-      .slice(0, 12)
       .map((line) => {
         if (!line) {
           return null;
@@ -188,7 +187,7 @@ function normalizarResultadoImagenPedido(payload = {}) {
       .filter((line) => line?.text)
     : [];
 
-  const extractedText = String(payload.extracted_text || payload.ocr_text || "").trim().slice(0, 2000) || null;
+  const extractedText = String(payload.extracted_text || payload.ocr_text || "").trim() || null;
   const overallConfidence = items.length
     ? items.reduce((acc, item) => acc + (Number(item.confidence) || 0), 0) / items.length
     : 0;
@@ -207,10 +206,13 @@ async function analizarImagenPedido({ buffer, mimeType = "image/jpeg", filename 
   const systemPrompt = [
     "Lees imágenes de pedidos comerciales para Tellolac.",
     "Extrae SOLO lo visible en la imagen.",
+    "Recorre toda la imagen de arriba a abajo y devuelve todas las líneas visibles de productos, cantidades, sabores y presentaciones.",
+    "No te detengas después del primer match válido ni resumas el pedido.",
     "No inventes productos, cantidades, sabores, direcciones ni pagos.",
     "Si algo no se entiende, márcalo en uncertain_lines.",
     "Devuelve únicamente JSON válido.",
     "Formato: { items: [{ raw_text, product_query, quantity, confidence }], uncertain_lines: [{ text, confidence }], extracted_text: string, address: string|null, payment_method: string|null, overall_confidence: number }.",
+    "items y extracted_text deben cubrir todo lo visible; extracted_text debe incluir todas las líneas detectadas aunque algunas queden inciertas.",
     "product_query debe ser una consulta comercial corta y útil para cruzar contra catálogo.",
     "confidence y overall_confidence deben estar entre 0 y 1.",
     "Idioma principal: español."
@@ -219,7 +221,7 @@ async function analizarImagenPedido({ buffer, mimeType = "image/jpeg", filename 
   const userContent = [
     {
       type: "text",
-      text: `Lee esta imagen de un pedido comercial escrito a mano. Extrae productos, cantidades, tamaños, sabores y presentaciones. Devuelve JSON estructurado. No inventes productos. Si algo no se entiende, márcalo como uncertain. Caption opcional: ${String(caption || "ninguno")}. Archivo: ${filename}. Idioma: ${language}.`
+      text: `Lee esta imagen de un pedido comercial escrito a mano. Recorre toda la imagen y extrae todos los productos, cantidades, tamaños, sabores y presentaciones visibles. Devuelve JSON estructurado. No inventes productos. Si algo no se entiende, márcalo como uncertain. Caption opcional: ${String(caption || "ninguno")}. Archivo: ${filename}. Idioma: ${language}.`
     },
     {
       type: "image_url",
@@ -235,7 +237,7 @@ async function analizarImagenPedido({ buffer, mimeType = "image/jpeg", filename 
       { role: "user", content: userContent }
     ],
     temperature: 0.1,
-    maxTokens: 500,
+    maxTokens: 700,
     responseFormat: { type: "json_object" }
   });
 
