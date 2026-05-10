@@ -1,7 +1,14 @@
 const axios = require("axios");
 const { structuredLog } = require("./logger");
 
-const CATALOG_URL = "https://catalogo.treinta.co/tellolac";
+const APP_BASE_URL = String(
+  process.env.CATALOG_BASE_URL
+  || process.env.APP_BASE_URL
+  || process.env.PUBLIC_BASE_URL
+  || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "")
+  || "https://agente-yogur-production.up.railway.app"
+).trim().replace(/\/$/, "");
+const CATALOG_URL = `${APP_BASE_URL}/catalogo`;
 const WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || "v20.0";
 
 function logWhatsAppEvent(event, details = {}, level = "info") {
@@ -223,7 +230,7 @@ function formatearFaltante(campo) {
 }
 
 function construirLineaCatalogoSugerido() {
-  return `También puedes ver todo el catálogo aquí:\n${CATALOG_URL}`;
+  return `Aquí también puedes hacer tu pedido por catálogo:\n${CATALOG_URL}`;
 }
 
 function formatearMoneda(valor) {
@@ -441,7 +448,7 @@ function construirRespuestaCatalogoInformativo({ customerName = null, featuredPr
     segmento === "store" ? "Estas opciones te pueden servir para surtir:" : "Algunos productos son:",
     lines.join("\n") || null,
     guide,
-    `También puedes ver el catálogo completo aquí:\n${CATALOG_URL}`,
+    `Aquí también puedes hacer tu pedido por catálogo:\n${CATALOG_URL}`,
     segmento === "formal"
       ? "Si quiere, se lo dejo armado de una. ¿Cuál le gustaría pedir?"
       : "Si quieres, te lo dejo armado de una. ¿Cuál te gustaría pedir?"
@@ -459,7 +466,7 @@ function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [
     segmento === "store" ? "Manejamos productos que te pueden servir para surtir o vender." : "En Tellolac manejamos productos lácteos, aloe, café y anchetas.",
     "Algunos productos son:",
     lines.join("\n") || null,
-    `Catálogo completo:\n${CATALOG_URL}`,
+    `Aquí también puedes hacer tu pedido por catálogo:\n${CATALOG_URL}`,
     segmento === "formal"
       ? "Si quiere, le dejo el pedido armado de una. ¿Le gustaría pedir alguno?"
       : "Si quieres, te dejo el pedido armado de una. ¿Te gustaría pedir alguno?"
@@ -481,7 +488,7 @@ function construirRespuestaPreciosInformativo({ customerName = null, featuredPro
     segmento === "formal"
       ? "Si quiere, se lo dejo agregado de una con la cantidad que necesite."
       : "Si quieres, te lo dejo agregado de una con la cantidad que necesites.",
-    `Catálogo completo:\n${CATALOG_URL}`
+    `Aquí también puedes hacer tu pedido por catálogo:\n${CATALOG_URL}`
   ].filter(Boolean).join("\n\n");
 }
 
@@ -497,7 +504,7 @@ function construirRespuestaPrecioDistribuidorRestringido({ customerName = null, 
     lines.join("\n") || null,
     "Si quieres, también te lo cotizo con precio público y te dejo el pedido armado.",
     "Si ya estás registrado con otro número, me lo indicas y lo revisamos.",
-    `Catálogo completo:\n${CATALOG_URL}`
+    `Aquí también puedes hacer tu pedido por catálogo:\n${CATALOG_URL}`
   ].filter(Boolean).join("\n\n");
 }
 
@@ -782,7 +789,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         pedido.total ? `Subtotal parcial: ${formatearMoneda(pedido.total)}` : null,
         "Me falta confirmar otro producto para dejarlo bien 😊",
         shortGuide || listaProductosDisponibles,
-        catalogUrl ? `Catálogo completo:\n${catalogUrl}` : null,
+        catalogUrl ? `Aquí también puedes hacer tu pedido por catálogo:\n${catalogUrl}` : null,
         "Si quieres, te ayudo a escribirlo con cantidad y presentación."
       ].filter(Boolean).join("\n\n");
     }
@@ -790,7 +797,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     return [
       "No encontré ese producto en el catálogo actual 😊",
       shortGuide || "Puedes pedirme con cantidad y presentación, por ejemplo: “1 aloe grande” o “2 griegos pequeños”.",
-      catalogUrl ? `Revísalo aquí:\n${catalogUrl}` : null,
+      catalogUrl ? `Aquí también puedes hacer tu pedido por catálogo:\n${catalogUrl}` : null,
       "Si quieres, te ayudo a encontrarlo."
     ].filter(Boolean).join("\n\n");
   }
