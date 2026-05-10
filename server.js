@@ -1012,7 +1012,7 @@ function limpiarTextoProductoSolicitado(valor) {
     .replace(/\b(de|del|la|el|los|las)\b/g, " ")
     .replace(/^\s*(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b\s*/g, "")
     .replace(/\b\d{2,3}\.\d{3}\b(?!\s*ml\b)/g, " ")
-    .replace(/\b\d{4,6}\b(?!\s*ml\b)/g, " ")
+    .replace(/(?<!\bde\s)\b\d{4,6}\b(?!\s*ml\b)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1457,7 +1457,9 @@ function resolverCantidadContextual(texto, { defaultQuantity = null } = {}) {
 }
 
 function normalizeProductResolverQuery(texto) {
-  return normalizeCanonicalCatalogName(limpiarTextoProductoSolicitado(texto))
+  const original = normalizeCanonicalCatalogName(String(texto || ""));
+  const requestedVariants = Array.from(original.matchAll(/\b(1800|1000|500|250|120)\b/g)).map((match) => match[1]);
+  let normalized = normalizeCanonicalCatalogName(limpiarTextoProductoSolicitado(texto))
     .replace(/\byogou?rt\b/g, "yogur")
     .replace(/\byogurth\b/g, "yogur")
     .replace(/\bgari?ego\b/g, "griego")
@@ -1471,6 +1473,12 @@ function normalizeProductResolverQuery(texto) {
     .replace(/\b(detalles|detalle)\b/g, "ancheta")
     .replace(/\s+/g, " ")
     .trim();
+
+  if (requestedVariants.length) {
+    normalized = `${normalized} ${requestedVariants.filter((variant) => !normalized.includes(variant)).join(" ")}`.trim();
+  }
+
+  return normalized;
 }
 
 function detectProductResolverFamilies(normalizedQuery = "") {
@@ -1599,13 +1607,28 @@ function resolveProductFromCatalog(query, context = {}) {
   const normalizedQuery = normalizeProductResolverQuery(query);
   const catalog = Array.isArray(context.catalog) ? context.catalog : getCatalogProductsCache();
   const families = detectProductResolverFamilies(normalizedQuery);
+  const lockedFamily = families.size === 1 ? Array.from(families)[0] : null;
   const directPool = families.size
     ? catalog.filter((product) => Array.from(families).some((family) => matchesCatalogFamily(product, family)))
     : catalog;
-  const workingPool = families.size === 1
-    ? filterFamilyProductsForResolver(directPool, Array.from(families)[0], normalizedQuery)
+  const workingPool = lockedFamily
+    ? filterFamilyProductsForResolver(directPool, lockedFamily, normalizedQuery)
     : directPool;
-  const variantMatcher = families.size === 1 ? getProductResolverVariantMatcher(Array.from(families)[0], normalizedQuery) : null;
+  const variantMatcher = lockedFamily ? getProductResolverVariantMatcher(lockedFamily, normalizedQuery) : null;
+
+  if (lockedFamily) {
+    logEvent("PRODUCT_FAMILY_LOCK", {
+      query: candidate,
+      family: lockedFamily,
+      normalizedQuery
+    });
+    logEvent("FAMILY_CATALOG_FILTER", {
+      query: candidate,
+      family: lockedFamily,
+      catalogSize: catalog.length,
+      filteredSize: workingPool.length
+    });
+  }
 
   logProductResolverInput({
     query: candidate,
@@ -1659,6 +1682,13 @@ function resolveProductFromCatalog(query, context = {}) {
 
   if (deterministicCandidates.length > 1) {
     const [best, second] = deterministicCandidates;
+    const exactAliasCandidates = deterministicCandidates.filter((entry) => entry.exactAlias);
+    if (exactAliasCandidates.length === 1) {
+      const result = { status: "resolved", query: candidate, normalizedQuery, product: exactAliasCandidates[0].product, reason: "deterministic_exact_alias", confidence: 97 };
+      logProductResolverDecision({ ...result, product: result.product?.nombre || null });
+      return result;
+    }
+
     const exactOnly = deterministicCandidates.filter((entry) => entry.exactAlias || entry.containsHit || entry.overlap.length === best.overlap.length);
     const queryLooksGenericFamily = families.size === 1 && getProductResolverTokens(normalizedQuery).every((token) => normalizeCatalogText(Array.from(families)[0]).includes(token) || token === Array.from(families)[0]);
 
@@ -1669,6 +1699,13 @@ function resolveProductFromCatalog(query, context = {}) {
     }
 
     const options = buildCatalogAmbiguityOptions((exactOnly.length ? exactOnly : deterministicCandidates).map((entry) => entry.product));
+    if (options.length === 1) {
+      const matchedProduct = workingPool.find((product) => product?.id === options[0].id) || best.product || null;
+      const result = matchedProduct ? { status: "resolved", query: candidate, normalizedQuery, product: matchedProduct, reason: "deterministic_single_option", confidence: 90 } : { status: "not_found", query: candidate, normalizedQuery, candidates: [], reason: "deterministic_empty" };
+      logProductResolverDecision({ ...result, product: result.product?.nombre || null });
+      return result;
+    }
+
     const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "deterministic_ambiguous", confidence: 78 };
     logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
     return result;
@@ -1698,6 +1735,11 @@ function resolveProductFromCatalog(query, context = {}) {
   }
 
   const options = buildCatalogAmbiguityOptions(fuzzyMatches.map((entry) => entry.product));
+  if (options.length === 1) {
+    const result = { status: "resolved", query: candidate, normalizedQuery, product: fuzzyMatches[0].product, reason: "fuzzy_single_option", confidence: fuzzyMatches[0].confidence };
+    logProductResolverDecision({ ...result, product: result.product?.nombre || null });
+    return result;
+  }
   const result = { status: "ambiguous", query: candidate, normalizedQuery, candidates: options, reason: "fuzzy_ambiguous", confidence: fuzzyMatches[0].confidence };
   logProductResolverDecision({ ...result, candidates: options.map((product) => product?.nombre) });
   return result;
@@ -2089,6 +2131,15 @@ function parseListOrderLine(segmento) {
     return null;
   }
 
+  const verbStartMatch = raw.match(new RegExp(`^(?:quiero|necesito|agrega(?:me)?|agrégame|dame|mandame|mándame|ponme|enviame|envíame)\\s+(${QUANTITY_TOKEN_PATTERN})\\b\\s+(.+)$`, "i"));
+  if (verbStartMatch?.[1] && verbStartMatch?.[2]) {
+    const cantidad = obtenerNumeroDesdeToken(verbStartMatch[1]);
+    const producto = limpiarTexto(verbStartMatch[2]);
+    if (cantidad && producto) {
+      return { raw, cantidad, productText: producto, quantityPosition: "verb_start" };
+    }
+  }
+
   const startMatch = raw.match(new RegExp(`^(${QUANTITY_TOKEN_PATTERN})\\b\\s+(.+)$`, "i"));
   if (startMatch?.[1] && startMatch?.[2]) {
     const cantidad = obtenerNumeroDesdeToken(startMatch[1]);
@@ -2102,7 +2153,8 @@ function parseListOrderLine(segmento) {
   if (endMatch?.[1] && endMatch?.[2]) {
     const cantidad = obtenerNumeroDesdeToken(endMatch[2]);
     const producto = limpiarTexto(endMatch[1]);
-    if (cantidad && producto) {
+    const looksLikePresentationTail = /\\bde\\s*$/i.test(producto || "") || /\\b(ml|g|gr|litro|garrafa|kilo|kg)\\s*$/i.test(producto || "") || cantidad > 24;
+    if (cantidad && producto && !looksLikePresentationTail) {
       return { raw, cantidad, productText: producto, quantityPosition: "end" };
     }
   }
@@ -2260,10 +2312,44 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
         subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
         price_source: resolvedPrice.priceSource
       };
+      if (shouldApplySegmentCustomizations) {
+        logSpecialInstructionScope({ sourceText: noteSourceText || segment, product: resolvedItem.producto, customizations: segmentCustomizations });
+      }
       items.push(shouldApplySegmentCustomizations
         ? applyProductCustomizations(resolvedItem, segmentCustomizations, { sourceText: noteSourceText || segment, baseQuery: noteBaseQuery || baseResolutionInput })
         : resolvedItem);
       continue;
+    }
+
+    if ((resolution.status === "ambiguous" || resolution.status === "suggested") && Array.isArray(resolution.matches) && resolution.matches.length === 1) {
+      const singleOption = resolution.matches[0];
+      const matchedProduct = findCatalogProductByName(singleOption?.nombre);
+      if (matchedProduct) {
+        const cantidad = parsedLineItem?.cantidad || encontrarCantidadEnSegmento(normalizarTextoAnalisis(segment)) || 1;
+        const resolvedPrice = resolveCatalogPriceForCustomer(matchedProduct, customerType);
+        const precioUnitario = parseOptionalNumber(resolvedPrice.unitPrice);
+        const resolvedItem = {
+          producto: matchedProduct.nombre,
+          sabor: null,
+          cantidad,
+          precio_unitario: precioUnitario,
+          subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
+          price_source: resolvedPrice.priceSource
+        };
+        logEvent("PRODUCT_MATCH_CONFIDENCE", {
+          input: usedBaseResolution ? baseResolutionInput : resolutionInput,
+          status: "matched",
+          confidence: resolution.confidence || 82,
+          product: matchedProduct.nombre
+        });
+        if (shouldApplySegmentCustomizations) {
+          logSpecialInstructionScope({ sourceText: noteSourceText || segment, product: resolvedItem.producto, customizations: segmentCustomizations });
+        }
+        items.push(shouldApplySegmentCustomizations
+          ? applyProductCustomizations(resolvedItem, segmentCustomizations, { sourceText: noteSourceText || segment, baseQuery: noteBaseQuery || baseResolutionInput })
+          : resolvedItem);
+        continue;
+      }
     }
 
     if (resolution.status === "ambiguous" || resolution.status === "suggested") {
@@ -2305,6 +2391,9 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
         subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
         price_source: resolvedPrice.priceSource
       };
+      if (segmentCustomizations.length && !productAlreadySatisfiesCustomizations(catalogProduct, segmentCustomizations)) {
+        logSpecialInstructionScope({ sourceText: segment, product: resolvedItem.producto, customizations: segmentCustomizations });
+      }
       items.push(segmentCustomizations.length && !productAlreadySatisfiesCustomizations(catalogProduct, segmentCustomizations)
         ? applyProductCustomizations(resolvedItem, segmentCustomizations, { sourceText: segment, baseQuery: baseResolutionInput })
         : resolvedItem);
@@ -2354,6 +2443,9 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
             subtotal: precioUnitario !== null ? precioUnitario * cantidad : null,
             price_source: resolvedPrice.priceSource
           };
+            if (candidateCustomizations.length && !productAlreadySatisfiesCustomizations(resolution.product, candidateCustomizations)) {
+              logSpecialInstructionScope({ sourceText: candidate, product: resolvedItem.producto, customizations: candidateCustomizations });
+            }
             items.push(candidateCustomizations.length && !productAlreadySatisfiesCustomizations(resolution.product, candidateCustomizations)
               ? applyProductCustomizations(resolvedItem, candidateCustomizations, { sourceText: candidate, baseQuery: baseCandidate })
               : resolvedItem);
@@ -3441,6 +3533,12 @@ function mergeCustomizations(base = [], incoming = []) {
 }
 
 function extractOrderCustomizations(texto = "") {
+  const normalized = String(texto || "");
+  const segments = segmentarPosiblesProductos(normalized).flatMap((segment) => expandirSegmentoMultiProducto(segment)).filter(Boolean);
+  if (segments.length > 1) {
+    return [];
+  }
+
   return extractCustomizationsFromText(texto);
 }
 
@@ -3535,6 +3633,18 @@ function logSpecialInstructionDetected({ sourceText = null, baseQuery = null, cu
   logEvent("SPECIAL_INSTRUCTION_DETECTED", {
     sourceText: limpiarTexto(sourceText) || null,
     baseQuery: limpiarTexto(baseQuery) || null,
+    instructions: customizations.map((item) => item?.text || item?.value).filter(Boolean)
+  });
+}
+
+function logSpecialInstructionScope({ sourceText = null, product = null, customizations = [] } = {}) {
+  if (!Array.isArray(customizations) || !customizations.length) {
+    return;
+  }
+
+  logEvent("SPECIAL_INSTRUCTION_SCOPE", {
+    sourceText: limpiarTexto(sourceText) || null,
+    product: limpiarTexto(product) || null,
     instructions: customizations.map((item) => item?.text || item?.value).filter(Boolean)
   });
 }
@@ -4712,11 +4822,18 @@ function buildProductReference(productName) {
     return null;
   }
 
+  const inferredFamilies = Array.from(detectProductResolverFamilies(normalizeCatalogText([
+    product?.nombre,
+    product?.nombre_canonico,
+    ...(Array.isArray(product?.aliases) ? product.aliases : [])
+  ].filter(Boolean).join(" "))));
+  const family = inferredFamilies[0] || normalizeCatalogSemanticFamilyName(product.nombre_raiz_familia || product.nombre_familia) || product.nombre_raiz_familia || product.nombre_familia;
+
   return {
     id: product.id,
     nombre: product.nombre,
     nombreCanonico: product.nombre_canonico,
-    familia: product.nombre_raiz_familia || product.nombre_familia,
+    familia: family,
     variant: isLargeVariant(product) ? "large" : (isSmallVariant(product) ? "small" : null)
   };
 }
@@ -4740,6 +4857,71 @@ function buildSuggestedProductEntry(option, index = 0) {
     variant: reference.variant,
     precio: parseOptionalNumber(option?.precio),
     aliases: Array.isArray(option?.aliases) ? option.aliases : []
+  };
+}
+
+function getRequestedCatalogFamily(texto = "") {
+  const families = Array.from(extractSemanticCatalogPreferences(texto).families || []);
+  return families.length === 1 ? families[0] : null;
+}
+
+function getCatalogProductsForFamily(familyName, customerType = "public") {
+  const family = normalizeCatalogSemanticFamilyName(familyName);
+  if (!family) {
+    return [];
+  }
+
+  return getCatalogProductsCache()
+    .filter((product) => matchesCatalogFamily(product, family))
+    .map((product) => {
+      const resolvedPrice = resolveCatalogPriceForCustomer(product, customerType);
+      return {
+        ...product,
+        precio_resuelto: parseOptionalNumber(resolvedPrice.unitPrice),
+        price_source: resolvedPrice.priceSource
+      };
+    })
+    .sort((a, b) => {
+      const aLarge = isLargeVariant(a) ? 1 : 0;
+      const bLarge = isLargeVariant(b) ? 1 : 0;
+      if (bLarge !== aLarge) {
+        return bLarge - aLarge;
+      }
+
+      const aPrice = a.precio_resuelto ?? parseOptionalNumber(a?.precio) ?? Number.MAX_SAFE_INTEGER;
+      const bPrice = b.precio_resuelto ?? parseOptionalNumber(b?.precio) ?? Number.MAX_SAFE_INTEGER;
+      return bPrice - aPrice;
+    });
+}
+
+function buildFamilyCatalogResponse({ familyName, customerName = null, customerType = "public" } = {}) {
+  const familyProducts = getCatalogProductsForFamily(familyName, customerType);
+  const familyLabel = familyName === "kefir" ? "kéfir" : familyName;
+
+  if (!familyProducts.length) {
+    return {
+      response: `No veo ${familyLabel} disponible en el catálogo actual. ¿Quieres que revise otra opción?`,
+      products: []
+    };
+  }
+
+  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+  const lines = familyProducts.map((product) => {
+    const price = formatCurrency(product?.precio_resuelto ?? product?.precio ?? 0);
+    const presentation = limpiarTexto(product?.presentacion);
+    return `• ${product.nombre}${presentation && !normalizeCatalogText(product.nombre).includes(normalizeCatalogText(presentation)) ? ` ${presentation}` : ""}${price ? ` — ${price}` : ""}`;
+  });
+
+  return {
+    response: [
+      saludo,
+      `De ${familyLabel} tenemos estas opciones:`,
+      "",
+      lines.join("\n"),
+      "",
+      "¿Cuál deseas agregar?"
+    ].join("\n"),
+    products: familyProducts
   };
 }
 
@@ -5100,6 +5282,12 @@ function aplicarContextoProductoAMensaje(texto, state) {
     if (!alreadyMentionsFamily && (hasVariantCue || hasValueCue)) {
       const contextualProduct = resolverProductoContextualPorFamilia(raw, state.lastProductReference.familia);
       if (contextualProduct?.nombre) {
+        logEvent("PENDING_PRODUCT_RESOLVED", {
+          input: raw,
+          family: state.lastProductReference.familia,
+          product: contextualProduct.nombre,
+          reason: hasValueCue ? "family_value_context_reference" : "family_variant_context_reference"
+        });
         return {
           text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${contextualProduct.nombre}`,
           used: true,
@@ -5109,6 +5297,12 @@ function aplicarContextoProductoAMensaje(texto, state) {
         };
       }
 
+      logEvent("PENDING_PRODUCT_RESOLVED", {
+        input: raw,
+        family: state.lastProductReference.familia,
+        product: null,
+        reason: "family_context_reference"
+      });
       return {
         text: `${state.lastProductReference.familia} ${raw}`.trim(),
         used: true,
@@ -5402,6 +5596,13 @@ async function intentarResolverAclaracionPendiente({ state, mensaje, telefono, s
   if (!selectedOption) {
     return null;
   }
+
+  logEvent("PENDING_PRODUCT_RESOLVED", {
+    input: mensaje,
+    family: buildProductReference(selectedOption.nombre)?.familia || null,
+    product: selectedOption.nombre,
+    reason: resolution?.reason || "pending_clarification"
+  });
 
   const pedidoResuelto = agregarProductoAPedido(clarification.pedido_parcial || {}, {
     producto: selectedOption.nombre,
@@ -5988,7 +6189,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   const aclaracionResuelta = await intentarResolverAclaracionPendiente({
     state,
-    mensaje,
+    mensaje: contextualizedMessage.used && contextualizedMessage.text ? contextualizedMessage.text : mensaje,
     telefono,
     sourceMessageId,
     simulated,
@@ -6258,8 +6459,31 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     const featuredCatalog = buildCatalogFeaturedProducts(customerProfile.customerType);
     const normalizedCatalogQuery = normalizarTextoAnalisis(contextualizedMessage.text || mensaje);
     const explicitCatalogAsk = /\b(catalogo|catalogo|catalog|productos|portafolio)\b/i.test(normalizedCatalogQuery);
+    const requestedFamily = getRequestedCatalogFamily(contextualizedMessage.text || mensaje);
     const targetedCatalogResolution = explicitCatalogAsk ? null : resolveProductFromCatalog(contextualizedMessage.text || mensaje);
     const guideMode = getOrderGuideMode({ texto: mensaje, routingIntent: routingIntentFinal, state });
+
+    if (requestedFamily) {
+      const familyCatalog = buildFamilyCatalogResponse({
+        familyName: requestedFamily,
+        customerName: state.customerName || null,
+        customerType: customerProfile.customerType
+      });
+      guardarSuggestionMemory(state, familyCatalog.products.map((product) => ({ nombre: product?.nombre || product })), { type: "catalog_family", reason: requestedFamily });
+      if (familyCatalog.products[0]) {
+        state.lastProductReference = {
+          id: familyCatalog.products[0].id,
+          nombre: familyCatalog.products[0].nombre,
+          nombreCanonico: familyCatalog.products[0].nombre_canonico,
+          familia: requestedFamily,
+          variant: isLargeVariant(familyCatalog.products[0]) ? "large" : (isSmallVariant(familyCatalog.products[0]) ? "small" : null)
+        };
+      }
+      actualizarActiveOrderContext(state, { intent: routingIntentFinal });
+      const respuesta = familyCatalog.response;
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+      return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
+    }
 
     if (targetedCatalogResolution?.status === "ambiguous" && targetedCatalogResolution.candidates?.length) {
       guardarSuggestionMemory(state, targetedCatalogResolution.candidates, { type: "ambiguity_suggestion", reason: contextualizedMessage.text || mensaje });
