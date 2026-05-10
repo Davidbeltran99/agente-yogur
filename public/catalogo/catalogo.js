@@ -13,6 +13,7 @@ const state = {
   customerType: "public",
   customerName: null,
   phone: "",
+  phoneValidated: false,
   cart: []
 };
 
@@ -169,9 +170,14 @@ function renderClientInfo() {
     clientNameBadge.classList.add("hidden");
   }
 
+  if (!state.phoneValidated) {
+    clientHelpText.textContent = "Ingresa tu número dentro del carrito y valídalo para habilitar el envío por WhatsApp.";
+    return;
+  }
+
   clientHelpText.textContent = getEffectiveCustomerType() === "distributor"
     ? "Se detectó tu número como distribuidor activo. El total se calcula con ese precio."
-    : "Si ya eres distribuidor registrado, detecta tu número para ver el precio correcto.";
+    : "Número validado. Si más adelante eres distribuidor registrado, aquí verás ese precio automáticamente.";
 }
 
 function renderCart() {
@@ -198,9 +204,18 @@ function renderCart() {
 
   const count = state.cart.reduce((sum, item) => sum + item.quantity, 0);
   const total = state.cart.reduce((sum, item) => sum + item.subtotal, 0);
+  const canCheckout = Boolean(state.cart.length && state.phoneValidated && whatsappNumber);
   cartTotal.textContent = formatCurrency(total);
   cartFabCount.textContent = String(count);
   cartFabCountMobile.textContent = String(count);
+  checkoutButton.disabled = !canCheckout;
+  checkoutHelp.textContent = !whatsappNumber
+    ? "Falta configurar el número destino del catálogo."
+    : !state.phoneValidated
+      ? "Ingresa y valida tu número para habilitar el envío."
+      : !state.cart.length
+        ? "Agrega al menos un producto para continuar."
+        : "Abi recibirá tu pedido con preparaciones y total aproximado.";
 }
 
 function addToCart(productId) {
@@ -253,20 +268,27 @@ async function loadProducts() {
   renderProducts();
   renderClientInfo();
   renderCart();
-  checkoutHelp.textContent = whatsappNumber
-    ? "Al confirmar, se abrirá WhatsApp con tu pedido listo para Abi."
-    : "Configura el número de WhatsApp del catálogo para habilitar el envío directo.";
+}
+
+function normalizePhoneInput(value) {
+  return String(value || "").replace(/\D/g, "");
 }
 
 async function identifyClient() {
-  const phone = phoneInput.value.trim();
+  const phone = normalizePhoneInput(phoneInput.value);
   state.phone = phone;
+  state.phoneValidated = false;
   if (!phone) {
     state.customerType = "public";
     state.customerName = null;
     renderClientInfo();
+    renderCart();
     await loadProducts();
     return;
+  }
+
+  if (phone.length < 10) {
+    throw new Error("Ingresa un número de WhatsApp válido para continuar.");
   }
 
   identifyButton.disabled = true;
@@ -284,6 +306,9 @@ async function identifyClient() {
 
     state.customerType = payload.customerType === "distributor" ? "distributor" : "public";
     state.customerName = payload.customerName || null;
+    state.phone = payload.phone || phone;
+    state.phoneValidated = true;
+    phoneInput.value = state.phone;
     await loadProducts();
   } finally {
     identifyButton.disabled = false;
@@ -310,6 +335,10 @@ function buildWhatsappMessage() {
 function openCheckout() {
   if (!state.cart.length) {
     alert("Agrega al menos un producto al carrito antes de enviarlo a WhatsApp.");
+    return;
+  }
+  if (!state.phoneValidated) {
+    alert("Primero ingresa y valida tu número de WhatsApp.");
     return;
   }
   if (!whatsappNumber) {
@@ -383,6 +412,15 @@ identifyButton.addEventListener("click", () => {
     console.error(error);
     alert(error.message || "No se pudo detectar el cliente");
   });
+});
+
+phoneInput.addEventListener("input", () => {
+  state.phone = normalizePhoneInput(phoneInput.value);
+  state.phoneValidated = false;
+  state.customerType = "public";
+  state.customerName = null;
+  renderClientInfo();
+  renderCart();
 });
 
 phoneInput.addEventListener("keydown", (event) => {
