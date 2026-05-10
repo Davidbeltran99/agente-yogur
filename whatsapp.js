@@ -80,6 +80,92 @@ async function enviarMensajeWhatsApp(para, texto) {
   }
 }
 
+async function subirMediaWhatsApp({ buffer, mimeType = "application/octet-stream", filename = "media.bin" }) {
+  const { token, phoneNumberId } = getWhatsAppApiConfig();
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/media`;
+
+  if (!buffer?.length) {
+    throw new Error("Buffer obligatorio para subir media a WhatsApp");
+  }
+
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("file", new Blob([buffer], { type: mimeType }), filename);
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`
+    },
+    body: form,
+    signal: AbortSignal.timeout(60000)
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error?.message || data?.error || `WhatsApp media upload error ${response.status}`);
+  }
+
+  return {
+    id: data?.id || null,
+    phoneNumberId,
+    filename,
+    mimeType
+  };
+}
+
+async function enviarAudioWhatsApp(para, { buffer, mimeType = "audio/mpeg", filename = "abi.mp3" } = {}) {
+  const { token, phoneNumberId } = getWhatsAppApiConfig();
+  const destino = normalizarDestinoWhatsApp(para);
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`;
+  const uploaded = await subirMediaWhatsApp({ buffer, mimeType, filename });
+  const payload = {
+    messaging_product: "whatsapp",
+    to: destino,
+    type: "audio",
+    audio: {
+      id: uploaded.id
+    }
+  };
+
+  logWhatsAppEvent("whatsapp_audio_send_payload_ready", {
+    url,
+    phoneNumberId,
+    to: destino,
+    mediaId: uploaded.id,
+    mimeType,
+    filename
+  });
+
+  try {
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    return {
+      ...response.data,
+      uploadedMediaId: uploaded.id,
+      uploadedMimeType: mimeType,
+      uploadedFilename: filename
+    };
+  } catch (error) {
+    logWhatsAppEvent("whatsapp_audio_request_failed", {
+      status: error.response?.status || null,
+      data: error.response?.data || null,
+      phoneNumberId,
+      to: destino,
+      url,
+      mediaId: uploaded.id,
+      mimeType,
+      filename
+    }, "error");
+    throw error;
+  }
+}
+
 async function obtenerMediaWhatsApp(mediaId) {
   const { token } = getWhatsAppApiConfig();
   const normalizedMediaId = String(mediaId || "").trim();
@@ -606,6 +692,8 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
 module.exports = {
   CATALOG_URL,
   enviarMensajeWhatsApp,
+  enviarAudioWhatsApp,
+  subirMediaWhatsApp,
   obtenerMediaWhatsApp,
   construirRespuestaGuiaPedido,
   construirRespuestaPedido,

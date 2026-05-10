@@ -22,7 +22,8 @@ function createDefaultConversationState({ customerName = null, customerType = "p
     flowState: "awaiting_products",
     flowUpdatedAt: Date.now(),
     recentHistory: [],
-    lastResolvedOrder: null
+    lastResolvedOrder: null,
+    nextReplyAsAudio: false
   };
 }
 

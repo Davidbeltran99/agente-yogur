@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { analizarImagenPedido, inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
+const { analizarImagenPedido, inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, sintetizarAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -56,6 +56,7 @@ const {
 } = require("./catalog");
 const {
   enviarMensajeWhatsApp,
+  enviarAudioWhatsApp,
   obtenerMediaWhatsApp,
   construirRespuestaGuiaPedido,
   construirRespuestaPedido,
@@ -100,6 +101,8 @@ const ADMIN_WHATSAPP_NUMBERS = new Set(String(process.env.ADMIN_WHATSAPP_NUMBERS
   .map((value) => normalizePhone(value))
   .filter(Boolean));
 const ADMIN_NOTIFY_ENABLED = parseBooleanEnv(process.env.ADMIN_NOTIFY_ENABLED, false);
+const WHATSAPP_AUDIO_RESPONSES_ENABLED = parseBooleanEnv(process.env.WHATSAPP_AUDIO_RESPONSES_ENABLED, false);
+const WHATSAPP_AUDIO_REPLY_SEND_TEXT = parseBooleanEnv(process.env.WHATSAPP_AUDIO_REPLY_SEND_TEXT, false);
 const BUSINESS_HOURS_ENABLED = parseBooleanEnv(process.env.BUSINESS_HOURS_ENABLED, false);
 const BUSINESS_OPEN_HOUR = Number(process.env.BUSINESS_OPEN_HOUR || 7);
 const BUSINESS_CLOSE_HOUR = Number(process.env.BUSINESS_CLOSE_HOUR || 20);
@@ -507,6 +510,26 @@ function esReferenciaAmbigua(texto, state) {
   return Boolean((suggestionMemory?.options || []).length || (activeContext?.products || []).length || state?.lastProductReference?.nombre);
 }
 
+function tieneContextoAccionableConfirmable(state) {
+  const activeContext = obtenerActiveOrderContext(state);
+  const suggestionMemory = obtenerSuggestionMemoryActiva(state);
+  const actionableSuggestionTypes = new Set(["ambiguity_suggestion", "soft_suggestion", "catalog_family", "price_suggestion"]);
+
+  return Boolean(
+    tieneBorradorPedido(state)
+    || obtenerAclaracionPendienteActiva(state)
+    || obtenerPendingProductActivo(state)
+    || hasPendingImageConfirmation(state)
+    || hasPendingFinalConfirmation(state)
+    || (activeContext && (
+      (Array.isArray(activeContext.products) && activeContext.products.length > 0)
+      || activeContext.direccion
+      || activeContext.metodo_pago
+    ))
+    || (suggestionMemory && actionableSuggestionTypes.has(suggestionMemory.tipo) && Array.isArray(suggestionMemory.options) && suggestionMemory.options.length > 0)
+  );
+}
+
 function detectarIntencionConversacional(texto, { hasDraftContext = false, hasActiveContext = false, customerName = null, awaitingName = false, state = null } = {}) {
   const listOrderAnalysis = analizarPedidoFormatoLista(texto);
 
@@ -598,7 +621,7 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
   }
 
   if (esConfirmacionCasual(texto)) {
-    return (hasDraftContext || hasActiveContext) ? "order_missing_data" : "general_chat";
+    return tieneContextoAccionableConfirmable(state) ? "order_missing_data" : "general_chat";
   }
 
   if (hasDraftContext || hasActiveContext) {
@@ -686,6 +709,9 @@ function parseOptionalNumber(value) {
 function normalizeCanonicalCatalogName(value) {
   return normalizeCatalogText(value)
     .replace(/\b1\s*[.,]\s*8\s*ml\b/g, "1800 ml")
+    .replace(/\b(\d{2,4})\s*ml\b/g, "$1 ml")
+    .replace(/\b(\d{2,4})\s*gr\b/g, "$1 g")
+    .replace(/\b(\d{2,4})g\b/g, "$1 g")
     .replace(/\b1800ml\b/g, "1800 ml")
     .replace(/\b1000ml\b/g, "1000 ml")
     .replace(/\b1000g\b/g, "1000 g")
@@ -936,27 +962,109 @@ function extractRequestedPrice(texto) {
   return Number.isFinite(price) && price >= 5000 ? price : null;
 }
 
-function setCatalogProductsCache(products = []) {
-  catalogProductsCache = Array.isArray(products)
-    ? products.map((product) => {
-        const productoOriginal = limpiarTexto(product?.nombre);
-        const nombreCanonico = normalizeCanonicalCatalogName(productoOriginal);
-        const nombreFamilia = normalizeCatalogFamilyName(productoOriginal);
+function pickPreferredRuntimeCatalogProduct(products = []) {
+  return [...products].sort((a, b) => {
+    const aLive = /^https?:\/\//i.test(String(a?.sourceUrl || a?.source_url || "").trim()) ? 1 : 0;
+    const bLive = /^https?:\/\//i.test(String(b?.sourceUrl || b?.source_url || "").trim()) ? 1 : 0;
+    if (aLive !== bLive) {
+      return bLive - aLive;
+    }
 
-        return {
-          ...product,
-          producto_original: productoOriginal,
-          nombre_canonico: nombreCanonico,
-          nombre_familia: nombreFamilia,
-          nombre_raiz_familia: normalizeCatalogSemanticFamilyName(productoOriginal),
-          aliases: [...new Set([
-            normalizeCatalogText(product?.nombre),
-            nombreCanonico,
-            ...(Array.isArray(product?.aliases) ? product.aliases.map((alias) => normalizeCatalogText(alias)) : [])
-          ].filter(Boolean))]
-        };
-      })
-    : [];
+    const aClean = String(a?.nombre || "").includes(".") ? 0 : 1;
+    const bClean = String(b?.nombre || "").includes(".") ? 0 : 1;
+    if (aClean !== bClean) {
+      return bClean - aClean;
+    }
+
+    return String(b?.nombre || "").length - String(a?.nombre || "").length;
+  })[0] || products[0] || null;
+}
+
+function mergeRuntimeCatalogProducts(products = []) {
+  const grouped = new Map();
+
+  for (const product of Array.isArray(products) ? products : []) {
+    const productoOriginal = limpiarTexto(product?.nombre);
+    const nombreFamilia = normalizeCatalogFamilyName(productoOriginal) || normalizeCanonicalCatalogName(productoOriginal);
+    const presentacion = normalizeCanonicalCatalogName(limpiarTexto(product?.presentacion) || "");
+    const key = [nombreFamilia, presentacion].filter(Boolean).join("|");
+
+    if (!key) {
+      continue;
+    }
+
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+
+    grouped.get(key).push(product);
+  }
+
+  return Array.from(grouped.values()).map((group) => {
+    const preferred = pickPreferredRuntimeCatalogProduct(group);
+    const aliases = new Set();
+    const publicPrices = [];
+    const distributorPrices = [];
+
+    for (const item of group) {
+      const publicPrice = parseOptionalNumber(item?.precio_publico ?? item?.precio);
+      const distributorPrice = parseOptionalNumber(item?.precio_distribuidor);
+      if (publicPrice !== null) {
+        publicPrices.push(publicPrice);
+      }
+      if (distributorPrice !== null) {
+        distributorPrices.push(distributorPrice);
+      }
+
+      for (const alias of Array.isArray(item?.aliases) ? item.aliases : []) {
+        const normalizedAlias = normalizeCatalogText(alias);
+        if (normalizedAlias) {
+          aliases.add(normalizedAlias);
+        }
+      }
+
+      const normalizedName = normalizeCatalogText(item?.nombre);
+      if (normalizedName) {
+        aliases.add(normalizedName);
+      }
+    }
+
+    const precioPublico = publicPrices.length ? Math.max(...publicPrices) : null;
+    const precioDistribuidor = distributorPrices.length
+      ? Math.min(...distributorPrices)
+      : (publicPrices.length > 1 ? Math.min(...publicPrices) : parseOptionalNumber(preferred?.precio_distribuidor));
+
+    return {
+      ...preferred,
+      precio: precioPublico,
+      precio_publico: precioPublico,
+      precio_distribuidor: precioDistribuidor,
+      aliases: Array.from(aliases)
+    };
+  });
+}
+
+function setCatalogProductsCache(products = []) {
+  const mergedProducts = mergeRuntimeCatalogProducts(products);
+
+  catalogProductsCache = mergedProducts.map((product) => {
+    const productoOriginal = limpiarTexto(product?.nombre);
+    const nombreCanonico = normalizeCanonicalCatalogName(productoOriginal);
+    const nombreFamilia = normalizeCatalogFamilyName(productoOriginal);
+
+    return {
+      ...product,
+      producto_original: productoOriginal,
+      nombre_canonico: nombreCanonico,
+      nombre_familia: nombreFamilia,
+      nombre_raiz_familia: normalizeCatalogSemanticFamilyName(productoOriginal),
+      aliases: [...new Set([
+        normalizeCatalogText(product?.nombre),
+        nombreCanonico,
+        ...(Array.isArray(product?.aliases) ? product.aliases.map((alias) => normalizeCatalogText(alias)) : [])
+      ].filter(Boolean))]
+    };
+  });
 }
 
 function getCatalogProductsCache() {
@@ -2326,12 +2434,27 @@ function esSegmentoNoProducto(segmento) {
 
   const hasPurchaseIntent = /\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|me regalas|dame|enviame|enviarme|agrega|agregame|agregale|suma|sumale|ponme|mandame)\b/i.test(normalized);
   const hasQuantity = /\b(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i.test(normalized);
+  const hasCatalogIdentity = extractCatalogIdentityTokens(segmento, { keepGeneric: true }).length > 0;
+  const hasAddressCue = /\b(direccion|dirección|calle|carrera|cra|barrio|casa|apartamento|apto|torre|conjunto)\b/i.test(normalized);
+  const hasPaymentCue = /\b(pago|nequi|daviplata|efectivo|transferencia|bancolombia)\b/i.test(normalized);
+  const hasNonProductCue = hasAddressCue
+    || hasPaymentCue
+    || /\b(entrega|hoy|manana|mañana|pm|am)\b/i.test(normalized);
+  const isGreetingOrIntro = /^(?:hola|buenas|buenos dias|buenas tardes|buenas noches|soy\b|mi nombre es\b|hola soy\b)/i.test(normalized);
 
-  if (hasPurchaseIntent || hasQuantity) {
+  if ((hasAddressCue || hasPaymentCue || isGreetingOrIntro) && !hasCatalogIdentity && !hasPurchaseIntent) {
+    return true;
+  }
+
+  if (hasPurchaseIntent) {
     return false;
   }
 
-  return /\b(direccion|dirección|pago|nequi|daviplata|efectivo|transferencia|calle|carrera|cra|barrio|entrega|hoy|manana|mañana|pm|am)\b/i.test(normalized);
+  if (hasQuantity && hasCatalogIdentity) {
+    return false;
+  }
+
+  return hasNonProductCue || isGreetingOrIntro;
 }
 
 function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerType = "public") {
@@ -2350,6 +2473,13 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
   }
 
   for (const segment of segments) {
+    const normalizedSegment = normalizarTextoAnalisis(segment);
+    const forceNonProductSegment = /\b(direccion|dirección|calle|carrera|cra|barrio|pago|nequi|daviplata|efectivo|transferencia)\b/i.test(normalizedSegment)
+      && !/\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|dame|agrega|ponme|mandame)\b/i.test(normalizedSegment);
+    if (forceNonProductSegment) {
+      continue;
+    }
+
     const parsedLineItem = parseListOrderLine(segment);
     const resolutionInput = parsedLineItem?.productText || segment;
     const segmentCustomizations = extractCustomizationsFromText(segment);
@@ -2495,7 +2625,24 @@ function analizarProductosCatalogoDesdeTexto(texto, aiProducts = [], customerTyp
   if (Array.isArray(aiProducts) && aiProducts.length && (!items.length || ambiguities.length || unmatched.length || items.length < aiProducts.length)) {
     for (const aiItem of aiProducts) {
       let resolved = false;
-      const candidateSegments = [...new Set(construirCandidatosProductoIA(aiItem).flatMap((candidate) => expandirSegmentoMultiProducto(candidate)).map((candidate) => limpiarTexto(candidate)).filter(Boolean))];
+      const candidateSegments = [...new Set(construirCandidatosProductoIA(aiItem)
+        .flatMap((candidate) => expandirSegmentoMultiProducto(candidate))
+        .map((candidate) => limpiarTexto(candidate))
+        .filter(Boolean))].filter((candidate) => {
+          const candidateCustomizations = extractCustomizationsFromText(candidate);
+          const baseCandidate = stripCustomizationsFromText(candidate, candidateCustomizations) || candidate;
+          const normalizedCandidate = normalizarTextoAnalisis(candidate);
+          const quickMatches = encontrarCoincidenciasCatalogo(baseCandidate, { minScore: 70, limit: 1 });
+          const hasQuantity = encontrarCantidadEnSegmento(normalizedCandidate);
+          const looksLikeProductQuery = esConsultaProductoProbable(baseCandidate);
+          const forceNonProductCandidate = /\b(direccion|dirección|calle|carrera|cra|barrio|pago|nequi|daviplata|efectivo|transferencia)\b/i.test(normalizedCandidate)
+            && !/\b(quiero|quisiera|necesito|pedido|pedir|ordeno|encargo|comprar|dame|agrega|ponme|mandame)\b/i.test(normalizedCandidate);
+          return !forceNonProductCandidate && !(esSegmentoNoProducto(candidate) && !quickMatches.length && !hasQuantity && !looksLikeProductQuery);
+        });
+
+      if (!candidateSegments.length) {
+        continue;
+      }
 
       for (const candidate of candidateSegments) {
         const candidateCustomizations = extractCustomizationsFromText(candidate);
@@ -2603,6 +2750,10 @@ function extraerProductosDesdeTexto(texto, aiProducts = []) {
 function detectarIntencionPedido(texto) {
   const normalized = normalizarTextoAnalisis(texto);
   if (!normalized) {
+    return false;
+  }
+
+  if (esConfirmacionCasual(texto) || esDespedida(texto) || esMensajeBienvenida(texto) || esPreguntaIdentidad(texto) || esIntencionNombre(texto)) {
     return false;
   }
 
@@ -3682,7 +3833,7 @@ function productAlreadySatisfiesCustomizations(product, customizations = []) {
       return haystack.includes("fruta");
     }
 
-    if (customization?.key === "natural") {
+    if (customization?.key === "base" && customization?.value === "natural") {
       return haystack.includes("natural");
     }
 
@@ -4097,8 +4248,10 @@ function shouldUseOpenAIForPedido(textoCliente, catalogAnalysis = { items: [] })
     return false;
   }
 
-  const hasTemporalCue = /\b(hoy|manana|mañana|tarde|noche|am|pm|hora|horas|despues|después|antes)\b/.test(normalized)
-    || /\b\d{1,2}(:\d{2})?\b/.test(textoCliente);
+  const hasExplicitTimeCue = /\b\d{1,2}:\d{2}\b/.test(textoCliente)
+    || /\b(?:a\s+las\s+)?\d{1,2}\s*(?:am|pm)\b/i.test(textoCliente);
+  const hasTemporalKeywordCue = /\b(hoy|manana|mañana|tarde|noche|am|pm|hora|horas|despues|después|antes)\b/.test(normalized);
+  const hasTemporalCue = hasTemporalKeywordCue || hasExplicitTimeCue;
   const hasObservationCue = /\b(sin azucar|sin azúcar|poca azucar|poca azúcar|bajo en azucar|bajo en azúcar|sin colorante|poco colorante|con fruta|sin fruta|natural|surtido|con hielo|sin hielo|nota|observacion|observación|por favor no|sin tapa)\b/.test(normalized);
   const hasNameCue = /(?:soy|mi nombre es|habla)\s+/i.test(textoCliente);
   const quantityMatches = normalized.match(new RegExp(`\\b${QUANTITY_TOKEN_PATTERN}\\b`, "g")) || [];
@@ -4106,6 +4259,26 @@ function shouldUseOpenAIForPedido(textoCliente, catalogAnalysis = { items: [] })
   const missingCatalogMatch = !catalogAnalysis.items?.length && !catalogAnalysis.ambiguities?.length && !catalogAnalysis.unmatched?.length;
 
   if (missingCatalogMatch) {
+    return false;
+  }
+
+  const hasCatalogItems = Array.isArray(catalogAnalysis.items) && catalogAnalysis.items.length > 0;
+  const hasAddressCue = /\b(direccion|dirección|calle|carrera|cra|barrio|casa|apartamento|apto|torre|conjunto)\b/.test(normalized);
+  const hasPaymentCue = /\b(pago|nequi|daviplata|efectivo|transferencia|bancolombia)\b/.test(normalized);
+  const extractedName = extraerClienteDesdeTexto(textoCliente);
+  const extractedAddress = extraerDireccionDesdeTexto(textoCliente);
+  const extractedPayment = extraerMetodoPagoDesdeTexto(textoCliente);
+  const extractedDate = extraerFechaEntregaDesdeTexto(textoCliente);
+  const extractedItemCustomizations = extractCustomizationsFromText(textoCliente);
+  const extractedOrderCustomizations = extractOrderCustomizations(textoCliente);
+  const canResolveDeterministically = hasCatalogItems
+    && (!hasNameCue || Boolean(extractedName))
+    && (!hasAddressCue || Boolean(extractedAddress))
+    && (!hasPaymentCue || Boolean(extractedPayment))
+    && (!hasTemporalCue || Boolean(extractedDate))
+    && (!hasObservationCue || Boolean(extractedItemCustomizations.length || extractedOrderCustomizations.length));
+
+  if (canResolveDeterministically) {
     return false;
   }
 
@@ -5483,7 +5656,7 @@ function resolverReferenciaProductoEnOpciones(texto, options = []) {
     }
   }
 
-  if (sameReference) {
+  if (sameReference && options.length === 1) {
     const option = matchingPool[0] || options[0] || null;
     if (option) {
       return { option, index: options.findIndex((candidate) => candidate?.id === option?.id), reason: "same_reference_ranked", confidence: 82 };
@@ -5505,7 +5678,7 @@ function resolverReferenciaProductoEnOpciones(texto, options = []) {
     return { option: aliasMatches[0].option, index: aliasMatches[0].index, reason: "fuzzy_option_reference", confidence: normalizarScoreAConfianza(aliasMatches[0].score) };
   }
 
-  if (sameReference && options.length > 0) {
+  if (sameReference && options.length === 1) {
     return { option: options[0], index: 0, reason: "same_reference_fallback", confidence: 74 };
   }
 
@@ -5660,6 +5833,8 @@ function aplicarContextoProductoAMensaje(texto, state) {
     return productName && (!normalizedActiveProduct || productName !== normalizedActiveProduct);
   });
   const pendingProduct = obtenerPendingProductActivo(state);
+  const activeClarification = obtenerAclaracionPendienteActiva(state);
+  const hasPendingProductClarification = activeClarification?.tipo === "product_disambiguation";
   if (esIntencionReorden(raw)) {
     return { text: raw, used: false };
   }
@@ -5700,7 +5875,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     }
   }
 
-  if (new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized) && lastActiveProduct) {
+  if (!hasPendingProductClarification && new RegExp(`^${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized) && lastActiveProduct) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
@@ -5710,7 +5885,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
-  if (lastActiveProduct && new RegExp(`^(?:dame|mandame|mándame|ponme|agrega|agregame|agrégame|quiero)\s+${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)) {
+  if (!hasPendingProductClarification && lastActiveProduct && new RegExp(`^(?:dame|mandame|mándame|ponme|agrega|agregame|agrégame|quiero)\s+${QUANTITY_TOKEN_PATTERN}$`, "i").test(normalized)) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
@@ -5720,7 +5895,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
     };
   }
 
-  if (esIntencionAgregarMas(raw) && lastActiveProduct && !mentionsDifferentCatalogProduct) {
+  if (!hasPendingProductClarification && esIntencionAgregarMas(raw) && lastActiveProduct && !mentionsDifferentCatalogProduct) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${lastActiveProduct}`,
       used: true,
@@ -5733,7 +5908,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
   const sameProductReference = canUseLastProductContext
     ? (state?.lastProductReference?.nombre || lastActiveProduct || null)
     : null;
-  if (sameProductReference && !mentionsDifferentCatalogProduct && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
+  if (!hasPendingProductClarification && sameProductReference && !mentionsDifferentCatalogProduct && SAME_PRODUCT_TOKENS.some((token) => normalized.includes(normalizarTextoAnalisis(token)))) {
     return {
       text: `${resolverCantidadContextual(normalized, { defaultQuantity: 1 })} ${sameProductReference}`,
       used: true,
@@ -5746,7 +5921,7 @@ function aplicarContextoProductoAMensaje(texto, state) {
   const hasFamilyReference = canUseLastProductContext && Boolean(state?.lastProductReference?.familia);
   const hasVariantCue = includesAnyToken(normalized, [...SIZE_SMALL_TOKENS, ...SIZE_LARGE_TOKENS]);
   const hasValueCue = includesAnyToken(normalized, PRICE_VALUE_TOKENS);
-  if (hasFamilyReference && !mentionsDifferentCatalogProduct) {
+  if (!hasPendingProductClarification && hasFamilyReference && !mentionsDifferentCatalogProduct) {
     const alreadyMentionsFamily = getCatalogProductsCache().some((product) => {
       const family = normalizeCatalogSemanticFamilyName(product?.nombre_raiz_familia || product?.nombre_familia);
       return family && normalized.includes(family);
@@ -6455,12 +6630,21 @@ async function persistirPedidoFinal({ pedido, telefono, mensajeOriginal, sourceM
 
 async function responderAlCliente({ telefono, respuesta, simulated = false, orderId = null }) {
   const respuestaFinal = orderId ? appendBusinessHoursNotice(respuesta) : respuesta;
+  const state = obtenerEstadoConversacion(telefono);
+  const replyAsAudioRequested = Boolean(state?.nextReplyAsAudio);
+  if (state) {
+    state.nextReplyAsAudio = false;
+  }
+  const shouldReplyAsAudio = replyAsAudioRequested && WHATSAPP_AUDIO_RESPONSES_ENABLED && !simulated && WHATSAPP_ENABLED;
 
   logEvent("responder_al_cliente_called", {
     telefono,
     orderId,
     simulated,
     whatsappEnabled: WHATSAPP_ENABLED,
+    audioResponsesEnabled: WHATSAPP_AUDIO_RESPONSES_ENABLED,
+    replyAsAudioRequested,
+    shouldReplyAsAudio,
     textLength: String(respuestaFinal || "").length
   });
 
@@ -6498,6 +6682,71 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
       respuesta: respuestaFinal,
       message: savedMessage
     };
+  }
+
+  let audioResult = null;
+  if (shouldReplyAsAudio) {
+    try {
+      logEvent("whatsapp_audio_reply_started", {
+        telefono,
+        orderId,
+        textLength: String(respuestaFinal || "").length
+      });
+
+      const synthesizedAudio = await sintetizarAudio({ text: respuestaFinal });
+      const audioDelivery = await enviarAudioWhatsApp(telefono, synthesizedAudio);
+      const audioWhatsappMessageId = audioDelivery?.messages?.[0]?.id || null;
+      const audioMessage = persistirMensaje({
+        phone: telefono,
+        direction: "out",
+        messageType: "audio",
+        messageText: respuestaFinal,
+        mediaId: audioDelivery?.uploadedMediaId || null,
+        whatsappMessageId: audioWhatsappMessageId,
+        orderId
+      });
+
+      logEvent("whatsapp_audio_reply_completed", {
+        telefono,
+        orderId,
+        messageId: audioMessage?.id || null,
+        whatsappMessageId: audioWhatsappMessageId,
+        mediaId: audioDelivery?.uploadedMediaId || null,
+        mimeType: synthesizedAudio?.mimeType || null,
+        voice: synthesizedAudio?.voice || null,
+        format: synthesizedAudio?.format || null
+      });
+
+      runDeliveryHook({
+        mode: "real_audio",
+        telefono,
+        orderId,
+        messageId: audioMessage?.id || null,
+        whatsappMessageId: audioWhatsappMessageId,
+        delivery: audioDelivery
+      });
+
+      audioResult = {
+        sent: true,
+        simulated: false,
+        respuesta: respuestaFinal,
+        message: audioMessage,
+        whatsappMessageId: audioWhatsappMessageId,
+        mediaId: audioDelivery?.uploadedMediaId || null,
+        audio: true,
+        delivery: audioDelivery
+      };
+
+      if (!WHATSAPP_AUDIO_REPLY_SEND_TEXT) {
+        return audioResult;
+      }
+    } catch (error) {
+      logEvent("whatsapp_audio_reply_failed", {
+        telefono,
+        orderId,
+        error: error.response?.data || error.message
+      }, "warn");
+    }
   }
 
   logEvent("whatsapp_send_started", {
@@ -6538,7 +6787,8 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
       simulated: false,
       respuesta: respuestaFinal,
       message: savedMessage,
-      whatsappMessageId
+      whatsappMessageId,
+      audioDelivery: audioResult
     };
   } catch (error) {
     logEvent("whatsapp_send_error", {
@@ -6549,12 +6799,13 @@ async function responderAlCliente({ telefono, respuesta, simulated = false, orde
     }, "error");
 
     return {
-      sent: false,
+      sent: Boolean(audioResult),
       simulated: false,
       respuesta: respuestaFinal,
-      message: null,
-      whatsappMessageId: null,
-      error: error.response?.data || error.message
+      message: audioResult?.message || null,
+      whatsappMessageId: audioResult?.whatsappMessageId || null,
+      error: error.response?.data || error.message,
+      audioDelivery: audioResult
     };
   }
 }
@@ -6625,6 +6876,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
   state.customerType = customerProfile.customerType;
   state.registeredCustomerId = customerProfile.customer?.id || null;
+  state.nextReplyAsAudio = messageType === "audio";
 
   const inboundMessage = skipInboundPersist
     ? existingInboundMessage
@@ -6848,12 +7100,15 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     }, "warn");
   }
 
-  const routingIntent = resolveRoutingIntentWithGpt({
-    heuristicIntent,
-    gptIntent,
-    hasDraftContext,
-    hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used)
-  });
+  const shouldProtectCasualConfirmation = esConfirmacionCasual(mensaje) && !tieneContextoAccionableConfirmable(state);
+  const routingIntent = shouldProtectCasualConfirmation
+    ? heuristicIntent
+    : resolveRoutingIntentWithGpt({
+        heuristicIntent,
+        gptIntent,
+        hasDraftContext,
+        hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used)
+      });
   const shouldForceOrderFlow = contextualizedMessage.used
     || esReferenciaAmbigua(mensaje, state)
     || gptIntent.intent === "add_item"

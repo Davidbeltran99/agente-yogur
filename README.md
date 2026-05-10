@@ -30,6 +30,11 @@ Copia `.env.example` a `.env` y completa:
 - `OPENAI_MAX_TOKENS=160`
 - `OPENAI_TEMPERATURE=0.1`
 - `OPENAI_TIMEOUT_MS=30000`
+- `OPENAI_TTS_MODEL=tts-1`
+- `OPENAI_TTS_VOICE=alloy`
+- `OPENAI_TTS_FORMAT=mp3`
+- `WHATSAPP_AUDIO_RESPONSES_ENABLED=false`
+- `WHATSAPP_AUDIO_REPLY_SEND_TEXT=false`
 
 > No hay soporte para Ollama ni otros modelos locales. Si OpenAI falla, el flujo cae a parser heurístico para no romper pedidos.
 
@@ -353,11 +358,33 @@ Cuando Railway ya esté arriba:
 - [ ] enviar un mensaje real al número configurado
 - [ ] revisar que entre respuesta y guardado en Google Sheets
 
-## 12. Siguiente mejora recomendada
+## 12. Respuestas en audio por WhatsApp
+
+Abi ya puede transcribir audios entrantes y ahora también puede responder con audio generado por TTS.
+
+Variables nuevas:
+
+```env
+OPENAI_TTS_MODEL=tts-1
+OPENAI_TTS_VOICE=alloy
+OPENAI_TTS_FORMAT=mp3
+WHATSAPP_AUDIO_RESPONSES_ENABLED=true
+WHATSAPP_AUDIO_REPLY_SEND_TEXT=false
+```
+
+Comportamiento:
+
+- si el cliente envía un audio, Abi puede responder con audio
+- el texto de la respuesta sigue quedando guardado en CRM/SQLite
+- si `WHATSAPP_AUDIO_REPLY_SEND_TEXT=true`, además del audio también envía el texto
+- si el TTS falla, Abi cae automáticamente a respuesta en texto
+
+## 13. Siguiente mejora recomendada
 
 Lo siguiente que yo haría es:
 
-- manejo de audios y notas de voz
+- personalidad de voz de Abi (tono, ritmo, instrucciones de TTS)
+- respuestas más cortas para audio natural
 - logs de errores y reintentos
 - protección básica contra mensajes vacíos o formatos no soportados
 

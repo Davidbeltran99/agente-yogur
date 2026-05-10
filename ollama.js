@@ -11,6 +11,9 @@ const OPENAI_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS || 160);
 const OPENAI_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE || 0.1);
 const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
+const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "tts-1";
+const OPENAI_TTS_VOICE = process.env.OPENAI_TTS_VOICE || "alloy";
+const OPENAI_TTS_FORMAT = process.env.OPENAI_TTS_FORMAT || "mp3";
 const DEEPGRAM_BASE_URL = (process.env.DEEPGRAM_BASE_URL || "https://api.deepgram.com").replace(/\/$/, "");
 
 function logEvent(event, details = {}, level = "info") {
@@ -375,12 +378,80 @@ async function transcribirAudio(params = {}) {
   }
 }
 
+function inferAudioMimeType(format = "mp3") {
+  const normalized = String(format || "mp3").trim().toLowerCase();
+  if (normalized === "opus") return "audio/ogg";
+  if (normalized === "wav") return "audio/wav";
+  if (normalized === "aac") return "audio/aac";
+  if (normalized === "flac") return "audio/flac";
+  return "audio/mpeg";
+}
+
+async function sintetizarAudio({ text, voice = OPENAI_TTS_VOICE, format = OPENAI_TTS_FORMAT, instructions = null } = {}) {
+  const apiKey = (process.env.OPENAI_API_KEY || "").trim();
+  if (!apiKey || apiKey === "tu_api_key") {
+    throw new Error("Falta OPENAI_API_KEY válida en .env");
+  }
+
+  const input = String(text || "").trim();
+  if (!input) {
+    throw new Error("Texto obligatorio para sintetizar audio");
+  }
+
+  const payload = {
+    model: OPENAI_TTS_MODEL,
+    voice,
+    input,
+    response_format: format
+  };
+
+  if (instructions) {
+    payload.instructions = String(instructions).trim().slice(0, 1000);
+  }
+
+  const response = await fetch(`${OPENAI_BASE_URL}/audio/speech`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS)
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => "");
+    let detail = errorBody || `OpenAI speech error ${response.status}`;
+    try {
+      const parsed = JSON.parse(errorBody);
+      detail = parsed?.error?.message || parsed?.error || detail;
+    } catch (_error) {
+      // no-op
+    }
+    throw new Error(detail);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const normalizedFormat = String(format || OPENAI_TTS_FORMAT || "mp3").trim().toLowerCase();
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    mimeType: inferAudioMimeType(normalizedFormat),
+    filename: `abi-${Date.now()}.${normalizedFormat === "opus" ? "ogg" : normalizedFormat}`,
+    provider: "openai",
+    model: OPENAI_TTS_MODEL,
+    voice,
+    format: normalizedFormat,
+    text: input
+  };
+}
+
 module.exports = {
   analizarImagenPedido,
   inferConversationIntent,
   procesarMensaje,
   generarRespuestaAbi,
   transcribirAudio,
+  sintetizarAudio,
   OPENAI_PROVIDER,
   OPENAI_MODEL,
   OPENAI_BASE_URL
