@@ -18,6 +18,8 @@ function createDefaultConversationState({ customerName = null, customerType = "p
     lastImageCaption: null,
     lastImageLocalPath: null,
     lastImageContext: null,
+    flowState: "awaiting_products",
+    flowUpdatedAt: Date.now(),
     recentHistory: [],
     lastResolvedOrder: null
   };

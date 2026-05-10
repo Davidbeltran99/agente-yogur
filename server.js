@@ -436,7 +436,7 @@ function esConfirmacionCasual(texto) {
     return false;
   }
 
-  return /^(si|sí|correcto|correcta|confirmo|confirmado|listo|ok|dale|perfecto|esta bien|está bien|bueno)$/.test(normalized);
+  return /^(si|sí|correcto|correcta|confirmo|confirmado|listo|ok|dale|perfecto|esta bien|está bien|bueno|si confirmado|sí confirmado|si confirmo|sí confirmo|si esta bien|sí está bien)$/.test(normalized);
 }
 
 function esIntencionAyudaHumana(texto) {
@@ -4481,6 +4481,7 @@ function buildImageOrderConfidence(imageAnalysis = {}) {
 }
 
 function buildStoredImageContext({ telefono, sourceMessageId, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null, persistedMedia = null, analysis = null, status = "pending" } = {}) {
+  const timestamp = Date.now();
   return {
     phone: telefono,
     sourceMessageId,
@@ -4490,9 +4491,14 @@ function buildStoredImageContext({ telefono, sourceMessageId, mediaId = null, me
     caption: limpiarTexto(caption) || null,
     path: persistedMedia?.path || null,
     absolutePath: persistedMedia?.absolutePath || null,
-    timestamp: Date.now(),
+    timestamp,
+    expires_at: timestamp + IMAGE_CONTEXT_TTL_MS,
     status,
-    analysis: analysis || null
+    analysis: analysis || null,
+    lastImageProducts: [],
+    ocrRaw: limpiarTexto(analysis?.extracted_text) || null,
+    confidence: buildImageOrderConfidence(analysis || {}),
+    pendingConfirmation: false
   };
 }
 
@@ -4512,7 +4518,8 @@ function getLastImageContext(state, now = Date.now()) {
     return null;
   }
 
-  if (Number(state.lastImageContext.timestamp || 0) + IMAGE_CONTEXT_TTL_MS <= now) {
+  const expiresAt = Number(state.lastImageContext.expires_at || (Number(state.lastImageContext.timestamp || 0) + IMAGE_CONTEXT_TTL_MS));
+  if (expiresAt <= now) {
     clearLastImageContext(state);
     return null;
   }
@@ -4525,12 +4532,26 @@ function setLastImageContext(state, imageContext = null) {
     return;
   }
 
+  const timestamp = Number(imageContext.timestamp || Date.now());
+  const expiresAt = Number(imageContext.expires_at || (timestamp + IMAGE_CONTEXT_TTL_MS));
+  const lastImageProducts = Array.isArray(imageContext.lastImageProducts)
+    ? imageContext.lastImageProducts.filter((item) => item?.producto)
+    : [];
+
   state.lastImageMediaId = imageContext.mediaId || null;
-  state.lastImageTimestamp = imageContext.timestamp || Date.now();
+  state.lastImageTimestamp = timestamp;
   state.lastImageStatus = imageContext.status || null;
   state.lastImageCaption = imageContext.caption || null;
   state.lastImageLocalPath = imageContext.absolutePath || imageContext.path || null;
-  state.lastImageContext = imageContext;
+  state.lastImageContext = {
+    ...imageContext,
+    timestamp,
+    expires_at: expiresAt,
+    lastImageProducts,
+    ocrRaw: limpiarTexto(imageContext.ocrRaw || imageContext.analysis?.extracted_text) || null,
+    confidence: Number.isFinite(Number(imageContext.confidence)) ? Number(imageContext.confidence) : buildImageOrderConfidence(imageContext.analysis || {}),
+    pendingConfirmation: Boolean(imageContext.pendingConfirmation)
+  };
   logEvent("LAST_IMAGE_CONTEXT_SET", {
     telefono: imageContext.phone || null,
     sourceMessageId: imageContext.sourceMessageId || null,
@@ -4538,22 +4559,38 @@ function setLastImageContext(state, imageContext = null) {
     status: imageContext.status || null,
     hasPath: Boolean(imageContext.path || imageContext.absolutePath),
     hasAnalysis: Boolean(imageContext.analysis),
-    timestamp: imageContext.timestamp || Date.now()
+    products: lastImageProducts.length,
+    pendingConfirmation: Boolean(imageContext.pendingConfirmation),
+    timestamp,
+    expiresAt
   });
+}
+
+function touchLastImageContext(state, imageContext = null) {
+  const current = imageContext || getLastImageContext(state);
+  if (!state || !current) {
+    return null;
+  }
+
+  const timestamp = Date.now();
+  setLastImageContext(state, {
+    ...current,
+    timestamp,
+    expires_at: timestamp + IMAGE_CONTEXT_TTL_MS
+  });
+
+  return state.lastImageContext;
 }
 
 function hasPendingImageConfirmation(state = null) {
   const imageContext = getLastImageContext(state);
   return Boolean(
     imageContext?.status === "ocr_completed"
-    && Array.isArray(state?.pendingPedido?.productos)
-    && state.pendingPedido.productos.length
-    && state.pendingPedido?.direccion
-    && state.pendingPedido?.metodo_pago
+    && imageContext?.pendingConfirmation
   );
 }
 
-function isImageReferencePhrase(texto = "") {
+function isImageReviewPhrase(texto = "") {
   const normalized = normalizarTextoAnalisis(texto);
   if (!normalized) {
     return false;
@@ -4562,21 +4599,184 @@ function isImageReferencePhrase(texto = "") {
   return [
     /\b(puedes|puede|podrias|podrías)\s+(leer|revisar)\s+(mi\s+)?(imagen|foto)\b/i,
     /\b(lee|revisa)\s+(la\s+)?(imagen|foto)\b/i,
-    /\b(los|lo)\s+de\s+la\s+imagen\b/i,
-    /\bel\s+pedido\s+de\s+la\s+foto\b/i,
-    /^la\s+(foto|imagen)$/i,
-    /^eso$/i,
     /\b(esa|eso)\s+es\s+un\s+pedido\b/i,
     /\bes\s+un\s+pedido\b/i,
-    /\bnecesito\s+eso\b/i,
     /\bsi[,\s]+es\s+un\s+pedido\b/i,
     /\bs[ií]\s*,?\s+es\s+un\s+pedido\b/i,
     /\brevisa\s+mi\s+imagen\b/i
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isImageRestoreReferencePhrase(texto = "") {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    /\b(los|lo)\s+de\s+la\s+(imagen|foto)\b/i,
+    /\bel\s+pedido\s+de\s+la\s+foto\b/i,
+    /\bese\s+pedido\b/i,
+    /\bel\s+carrito\b/i,
+    /\blo\s+que\s+mande\b/i,
+    /^la\s+(foto|imagen)$/i,
+    /^ese$/i,
+    /^eso$/i,
+    /\bnecesito\s+eso\b/i
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function isImageReferencePhrase(texto = "") {
+  return isImageReviewPhrase(texto) || isImageRestoreReferencePhrase(texto);
+}
+
 function isImageReviewRequest(texto = "", state = null) {
-  return Boolean(getLastImageContext(state)) && isImageReferencePhrase(texto);
+  return Boolean(getLastImageContext(state)) && isImageReviewPhrase(texto);
+}
+
+function buildImageProductsSnapshot(productos = []) {
+  return (Array.isArray(productos) ? productos : [])
+    .filter((item) => item?.producto)
+    .map((item) => ({
+      producto: item.producto,
+      cantidad: Number(item.cantidad) || 1,
+      precio_unitario: parseOptionalNumber(item.precio_unitario),
+      subtotal: parseOptionalNumber(item.subtotal),
+      price_source: item.price_source || null,
+      product_notes: item.product_notes || null,
+      customizations: mergeCustomizations([], item.customizations)
+    }));
+}
+
+function syncLastImageContextFromResult(state, imageContext = null, { pedido = null, evaluacion = null, imageAnalysis = null } = {}) {
+  if (!state) {
+    return null;
+  }
+
+  const current = imageContext || getLastImageContext(state);
+  if (!current) {
+    return null;
+  }
+
+  const timestamp = Date.now();
+  const pendingConfirmation = Boolean((evaluacion?.faltantes || []).some((item) => ["confirmacion_imagen", "confirmacion_catalogo"].includes(item)));
+  const updated = {
+    ...current,
+    analysis: imageAnalysis || current.analysis || null,
+    ocrRaw: limpiarTexto(imageAnalysis?.extracted_text || current.ocrRaw || current.analysis?.extracted_text) || null,
+    confidence: imageAnalysis ? buildImageOrderConfidence(imageAnalysis) : (Number(current.confidence) || 0),
+    lastImageProducts: buildImageProductsSnapshot(pedido?.productos || current.lastImageProducts || []),
+    pendingConfirmation,
+    status: imageAnalysis ? "ocr_completed" : (current.status || null),
+    timestamp,
+    expires_at: timestamp + IMAGE_CONTEXT_TTL_MS
+  };
+
+  setLastImageContext(state, updated);
+  return state.lastImageContext;
+}
+
+function restorePedidoDesdeLastImageContext(state, customerType = "public") {
+  const imageContext = getLastImageContext(state);
+  const imageProducts = Array.isArray(imageContext?.lastImageProducts) ? imageContext.lastImageProducts.filter((item) => item?.producto) : [];
+  if (!imageProducts.length) {
+    return null;
+  }
+
+  const activeContext = obtenerActiveOrderContext(state);
+  return calcularTotalesPedido({
+    cliente: state?.pendingPedido?.cliente || state?.customerName || activeContext?.customerName || null,
+    customer_type_applied: customerType,
+    price_tier_applied: customerType,
+    productos: imageProducts,
+    direccion: state?.pendingPedido?.direccion || activeContext?.direccion || null,
+    metodo_pago: state?.pendingPedido?.metodo_pago || state?.lastPaymentMethod || activeContext?.metodo_pago || null,
+    notes: state?.pendingPedido?.notes || null,
+    customizations: mergeCustomizations([], state?.pendingPedido?.customizations),
+    estado: "pendiente"
+  });
+}
+
+function inferConversationFlowState(state, { pedido = null, evaluacion = null, override = null } = {}) {
+  if (override) {
+    return override;
+  }
+
+  const currentPedido = pedido || state?.pendingPedido || construirPedidoDesdeEstado(state);
+  const imageContext = getLastImageContext(state);
+  const productos = Array.isArray(currentPedido?.productos) ? currentPedido.productos.filter((item) => item?.producto) : [];
+  const faltantes = Array.isArray(evaluacion?.faltantes) ? evaluacion.faltantes : [];
+
+  if (imageContext?.pendingConfirmation || faltantes.includes("confirmacion_imagen") || faltantes.includes("confirmacion_catalogo")) {
+    return "awaiting_image_confirmation";
+  }
+
+  if (!productos.length && imageContext?.lastImageProducts?.length) {
+    return currentPedido?.direccion ? (currentPedido?.metodo_pago ? "awaiting_final_confirmation" : "awaiting_payment") : "awaiting_address";
+  }
+
+  if (!productos.length) {
+    return "awaiting_products";
+  }
+
+  if (!currentPedido?.direccion) {
+    return "awaiting_address";
+  }
+
+  if (!currentPedido?.metodo_pago) {
+    return "awaiting_payment";
+  }
+
+  return "awaiting_final_confirmation";
+}
+
+function hasPendingFinalConfirmation(state) {
+  if (!state?.pendingPedido || hasPendingImageConfirmation(state)) {
+    return false;
+  }
+
+  const pedidoPendiente = calcularTotalesPedido(state.pendingPedido);
+  const evaluacionPendiente = evaluarPedido(pedidoPendiente, { ambiguities: [], unmatched: [] });
+  return evaluacionPendiente.esValido && inferConversationFlowState(state, {
+    pedido: pedidoPendiente,
+    evaluacion: evaluacionPendiente
+  }) === "awaiting_final_confirmation";
+}
+
+function shouldDeferOrderPersistence({ state, pedido, evaluacion, mensaje = "", messageType = "text", intent = null, imageAnalysis = null }) {
+  if (!pedido?.productos?.length || !evaluacion?.esValido || esConfirmacionCasual(mensaje) || hasPendingImageConfirmation(state)) {
+    return false;
+  }
+
+  const imageContext = getLastImageContext(state);
+  const hasDraftContext = Boolean(state?.pendingPedido?.productos?.length || state?.activeOrderContext?.products?.length);
+  return Boolean(
+    imageContext?.lastImageProducts?.length
+    || imageAnalysis
+    || hasDraftContext
+    || ["address_provided", "payment_method", "modify_quantity", "remove_item", "order_missing_data"].includes(intent)
+    || messageType === "audio"
+  );
+}
+
+function setConversationFlowState(state, nextState, meta = {}) {
+  if (!state || !nextState) {
+    return null;
+  }
+
+  state.flowState = nextState;
+  state.flowUpdatedAt = Date.now();
+  logEvent("FLOW_STATE_UPDATED", {
+    state: nextState,
+    reason: meta.reason || null,
+    telefono: meta.telefono || null,
+    sourceMessageId: meta.sourceMessageId || null,
+    hasImageContext: Boolean(getLastImageContext(state)),
+    pendingItems: Array.isArray(state.pendingPedido?.productos) ? state.pendingPedido.productos.length : 0,
+    hasAddress: Boolean(state.pendingPedido?.direccion || state.activeOrderContext?.direccion),
+    hasPayment: Boolean(state.pendingPedido?.metodo_pago || state.lastPaymentMethod || state.activeOrderContext?.metodo_pago)
+  });
+  return nextState;
 }
 
 function logLastImageContextFound(imageContext = null, telefono = null, sourceMessageId = null) {
@@ -4746,7 +4946,7 @@ async function executeRecentImageReview({ telefono, sourceMessageId, origen = "w
     };
   }
 
-  return ejecutarFlujoMensaje({
+  const result = await ejecutarFlujoMensaje({
     mensaje: normalizedText,
     telefono,
     sourceMessageId,
@@ -4765,6 +4965,16 @@ async function executeRecentImageReview({ telefono, sourceMessageId, origen = "w
     imageRequiresConfirmation: requireConfirmation,
     imageCaption: imageContext?.caption || null
   });
+
+  if (state && imageContext) {
+    syncLastImageContextFromResult(state, imageContext, {
+      pedido: result?.pedido,
+      evaluacion: result?.evaluacion,
+      imageAnalysis
+    });
+  }
+
+  return result;
 }
 
 function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalysis = null }) {
@@ -4827,6 +5037,25 @@ function buildImageOrderFallback({ pedido = null, evaluacion = null, imageAnalys
   return lines.join("\n");
 }
 
+function buildFinalConfirmationFallback(pedido = null) {
+  const productLines = Array.isArray(pedido?.productos)
+    ? pedido.productos.filter((item) => item?.producto).map((item) => `• ${item.cantidad || 1} ${item.producto}`)
+    : [];
+  const lines = ["Perfecto 😊 Así va tu pedido:"];
+
+  if (productLines.length) {
+    lines.push("", ...productLines);
+  }
+  if (pedido?.direccion) {
+    lines.push("", `Dirección: ${pedido.direccion}`);
+  }
+  if (pedido?.metodo_pago) {
+    lines.push(`Pago: ${pedido.metodo_pago}`);
+  }
+  lines.push("", "Si está bien, respóndeme “sí” y lo dejo registrado.");
+  return lines.join("\n");
+}
+
 async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = "webhook", simulated = false, mediaId = null, mediaBuffer = null, mediaMimeType = null, mediaFilename = null, caption = null, imageAnalysisOverride = null }) {
   logEvent("IMAGE_MESSAGE_RECEIVED", {
     telefono,
@@ -4881,9 +5110,11 @@ async function handleIncomingImageMessage({ telefono, sourceMessageId, origen = 
   });
 
   const normalizedCaption = normalizarTextoAnalisis(caption);
-  const shouldProcessImmediately = Boolean(normalizedCaption)
-    && !["imagen recibida", "imagen", "foto"].includes(normalizedCaption)
-    && !/\b(puedes|puede|podrias|podrías)\s+(leer|revisar)\b/i.test(normalizedCaption);
+  const shouldProcessImmediately = Boolean(imageAnalysisOverride)
+    || Boolean(storedImageContext.absolutePath || storedImageContext.path || mediaBuffer?.length)
+    || (Boolean(normalizedCaption)
+      && !["imagen recibida", "imagen", "foto"].includes(normalizedCaption)
+      && !/\b(puedes|puede|podrias|podrías)\s+(leer|revisar)\b/i.test(normalizedCaption));
 
   if (!shouldProcessImmediately) {
     const respuesta = "Listo 😊 recibí la imagen. La estoy revisando para sacar el pedido.";
@@ -5310,10 +5541,12 @@ function actualizarMemoriaConversacional(state, { pedido = null, evaluacion = nu
   }
 
   actualizarActiveOrderContext(state, { pedido, intent });
+  setConversationFlowState(state, inferConversationFlowState(state, { pedido, evaluacion }), { reason: intent || "memory_update" });
 
   logEvent("CONVERSATION_STATE", {
     customerName: state.customerName || null,
     lastIntent: state.lastIntent || null,
+    flowState: state.flowState || null,
     awaitingName: state.awaitingName || false,
     hasShownOrderGuide: state.hasShownOrderGuide || false,
     lastImageStatus: state.lastImageContext?.status || null,
@@ -6050,17 +6283,6 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   }
   state.customerType = customerProfile.customerType;
   state.registeredCustomerId = customerProfile.customer?.id || null;
-  const contextualizedMessage = aplicarContextoProductoAMensaje(mensaje, state);
-  const hasDraftContext = tieneBorradorPedido(state);
-  const hasSuggestionContext = Boolean(obtenerSuggestionMemoryActiva(state));
-  const hasActiveOrderContext = Boolean(obtenerActiveOrderContext(state));
-  const heuristicIntent = detectarIntencionConversacional(mensaje, {
-    hasDraftContext,
-    hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used),
-    customerName: state.customerName || null,
-    awaitingName: state.awaitingName || false,
-    state
-  });
 
   const inboundMessage = skipInboundPersist
     ? existingInboundMessage
@@ -6075,6 +6297,38 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       });
 
   const lastImageContext = getLastImageContext(state);
+  if (lastImageContext && (messageType === "audio" || state.pendingPedido || obtenerActiveOrderContext(state) || isImageReferencePhrase(mensaje))) {
+    touchLastImageContext(state, lastImageContext);
+  }
+  if (messageType === "text" && esConfirmacionCasual(mensaje) && hasPendingFinalConfirmation(state)) {
+    const pedidoConfirmado = calcularTotalesPedido({
+      ...state.pendingPedido,
+      customer_type_applied: customerProfile.customerType,
+      price_tier_applied: customerProfile.customerType
+    });
+    const evaluacionConfirmada = evaluarPedido(pedidoConfirmado, { ambiguities: [], unmatched: [] });
+    const persisted = await persistirPedidoFinal({
+      pedido: pedidoConfirmado,
+      telefono,
+      mensajeOriginal: mensaje,
+      sourceMessageId
+    });
+    state.pendingPedido = null;
+    limpiarAclaracionPendiente(state);
+    actualizarMemoriaConversacional(state, { pedido: pedidoConfirmado, evaluacion: evaluacionConfirmada, intent: "order_request" });
+    const respuesta = construirRespuestaPedido(pedidoConfirmado, evaluacionConfirmada, { availableProducts: buildCatalogShortList(5) });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: persisted.order?.id || null });
+    return {
+      pedido: pedidoConfirmado,
+      evaluacion: evaluacionConfirmada,
+      order: persisted.order,
+      inboundMessage,
+      respuesta: delivery?.respuesta || respuesta,
+      delivery,
+      intent: "order_request",
+      sheets: persisted.sheets
+    };
+  }
   if (messageType === "text" && esConfirmacionCasual(mensaje) && hasPendingImageConfirmation(state)) {
     logLastImageContextFound(lastImageContext, telefono, sourceMessageId);
     const pedidoConfirmado = calcularTotalesPedido({
@@ -6127,6 +6381,44 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       sheets: { saved: false, skipped: true, reason: "missing_recent_image" }
     };
   }
+  if (messageType === "text" && isImageRestoreReferencePhrase(mensaje) && lastImageContext) {
+    logLastImageContextFound(lastImageContext, telefono, sourceMessageId);
+    const restoredPedido = restorePedidoDesdeLastImageContext(state, customerProfile.customerType);
+    if (restoredPedido?.productos?.length) {
+      state.pendingPedido = restoredPedido;
+      let evaluacionRestaurada = evaluarPedido(restoredPedido, { ambiguities: [], unmatched: [] });
+      if (lastImageContext.pendingConfirmation) {
+        evaluacionRestaurada.esValido = false;
+        evaluacionRestaurada.faltantes = [...new Set([...(evaluacionRestaurada.faltantes || []), lastImageContext.analysis?.uncertain_lines?.length ? "confirmacion_catalogo" : "confirmacion_imagen"] )];
+      }
+      syncLastImageContextFromResult(state, lastImageContext, {
+        pedido: restoredPedido,
+        evaluacion: evaluacionRestaurada,
+        imageAnalysis: lastImageContext.analysis || null
+      });
+      actualizarMemoriaConversacional(state, {
+        pedido: restoredPedido,
+        evaluacion: evaluacionRestaurada,
+        intent: evaluacionRestaurada.esValido ? "order_request" : "order_missing_data"
+      });
+      const respuesta = buildImageOrderFallback({
+        pedido: restoredPedido,
+        evaluacion: evaluacionRestaurada,
+        imageAnalysis: lastImageContext.analysis || null
+      });
+      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+      return {
+        pedido: restoredPedido,
+        evaluacion: evaluacionRestaurada,
+        order: null,
+        inboundMessage,
+        respuesta,
+        delivery,
+        intent: "image_reference_restore",
+        sheets: { saved: false, skipped: true, reason: "restored_from_last_image_context" }
+      };
+    }
+  }
   if (messageType === "text" && isImageReviewRequest(mensaje, state) && lastImageContext) {
     logLastImageContextFound(lastImageContext, telefono, sourceMessageId);
     return executeRecentImageReview({
@@ -6141,6 +6433,18 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       requireConfirmation: true
     });
   }
+
+  const contextualizedMessage = aplicarContextoProductoAMensaje(mensaje, state);
+  const hasDraftContext = tieneBorradorPedido(state);
+  const hasSuggestionContext = Boolean(obtenerSuggestionMemoryActiva(state));
+  const hasActiveOrderContext = Boolean(obtenerActiveOrderContext(state));
+  const heuristicIntent = detectarIntencionConversacional(mensaje, {
+    hasDraftContext,
+    hasActiveContext: hasSuggestionContext || hasActiveOrderContext || Boolean(contextualizedMessage.used),
+    customerName: state.customerName || null,
+    awaitingName: state.awaitingName || false,
+    state
+  });
 
   const orchestratorPayload = buildConversationOrchestratorContext({
     currentMessage: mensaje,
@@ -6289,6 +6593,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   logEvent("CONVERSATION_STATE", {
     telefono,
     intent: routingIntentFinal,
+    flowState: state.flowState || null,
     hasDraftContext,
     hasSuggestionContext,
     hasActiveOrderContext,
@@ -6504,9 +6809,21 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
     state.pendingPedido = pedidoActual;
     const evaluacionContextual = evaluarPedido(pedidoActual, { ambiguities: [], unmatched: [] });
-    actualizarMemoriaConversacional(state, { pedido: pedidoActual, evaluacion: evaluacionContextual, intent: "order_missing_data" });
+    const shouldAwaitContextualFinalConfirmation = shouldDeferOrderPersistence({
+      state,
+      pedido: pedidoActual,
+      evaluacion: evaluacionContextual,
+      mensaje,
+      messageType,
+      intent: routingIntentFinal
+    });
+    actualizarMemoriaConversacional(state, {
+      pedido: pedidoActual,
+      evaluacion: evaluacionContextual,
+      intent: shouldAwaitContextualFinalConfirmation ? "order_request" : "order_missing_data"
+    });
 
-    if (evaluacionContextual.esValido && ["payment_method", "address_provided"].includes(routingIntentFinal)) {
+    if (evaluacionContextual.esValido && ["payment_method", "address_provided"].includes(routingIntentFinal) && !shouldAwaitContextualFinalConfirmation) {
       const persisted = await persistirPedidoFinal({
         pedido: pedidoActual,
         telefono,
@@ -6538,27 +6855,31 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: persisted.order, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: "order_request" };
     }
 
-    const fallback = construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
-      const respuesta = await generarRespuestaConversacional({
-        telefono,
-        sourceMessageId,
-        routingIntent: routingIntentFinal,
-      fallback,
-      context: buildValidatedResponseContext({
-        orchestratorContext: orchestratorPayload.context,
-        gptIntent,
-        pedido: pedidoActual,
-        evaluacion: evaluacionContextual,
-        fallback,
-        customerName: state.customerName || null,
-        userMessage: mensaje,
-        availableProducts: buildCatalogShortList(5),
-        catalogUrl: CATALOG_URL,
-          activeIntent: routingIntentFinal
-        })
-      });
-      const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
-    return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: null, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
+    const fallback = shouldAwaitContextualFinalConfirmation
+      ? buildFinalConfirmationFallback(pedidoActual)
+      : construirRespuestaPedido(pedidoActual, evaluacionContextual, { availableProducts: buildCatalogShortList(5) });
+    const respuesta = shouldAwaitContextualFinalConfirmation
+      ? fallback
+      : await generarRespuestaConversacional({
+          telefono,
+          sourceMessageId,
+          routingIntent: routingIntentFinal,
+          fallback,
+          context: buildValidatedResponseContext({
+            orchestratorContext: orchestratorPayload.context,
+            gptIntent,
+            pedido: pedidoActual,
+            evaluacion: evaluacionContextual,
+            fallback,
+            customerName: state.customerName || null,
+            userMessage: mensaje,
+            availableProducts: buildCatalogShortList(5),
+            catalogUrl: CATALOG_URL,
+            activeIntent: routingIntentFinal
+          })
+        });
+    const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
+    return { pedido: pedidoActual, evaluacion: evaluacionContextual, order: null, inboundMessage, respuesta: delivery?.respuesta || respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: shouldAwaitContextualFinalConfirmation ? "order_request" : routingIntentFinal };
   }
 
   if (isExplicitOrderGuideRequest(contextualizedMessage.text || mensaje)) {
@@ -6811,17 +7132,30 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     });
   }
 
+  const shouldAwaitFinalConfirmation = shouldDeferOrderPersistence({
+    state,
+    pedido: pedidoCombinado,
+    evaluacion: evaluacionCombinada,
+    mensaje,
+    messageType,
+    intent: evaluacionCombinada.esValido ? "order_request" : "order_missing_data",
+    imageAnalysis
+  });
+
   let resultado = {
     pedido: pedidoCombinado,
     evaluacion: evaluacionCombinada,
     order: null,
     sheets: { saved: false, skipped: true, reason: "order_not_persisted" },
-    intent: evaluacionCombinada.catalogStatus === "ambiguous" ? "ambiguous_product" : (evaluacionCombinada.esValido ? "order_request" : "order_missing_data")
+    intent: evaluacionCombinada.catalogStatus === "ambiguous"
+      ? "ambiguous_product"
+      : ((evaluacionCombinada.esValido || shouldAwaitFinalConfirmation) ? "order_request" : "order_missing_data"),
+    awaitingFinalConfirmation: shouldAwaitFinalConfirmation
   };
 
   actualizarMemoriaConversacional(state, { pedido: pedidoCombinado, evaluacion: evaluacionCombinada, intent: resultado.intent });
 
-  if (evaluacionCombinada.esValido) {
+  if (evaluacionCombinada.esValido && !shouldAwaitFinalConfirmation) {
     try {
       const persisted = await persistirPedidoFinal({
         pedido: pedidoCombinado,
@@ -6879,15 +7213,17 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     inboundMessage.orderId = resultado.order.id;
   }
 
-  const orderGuideMode = imageAnalysis
+  const orderGuideMode = imageAnalysis || resultado.awaitingFinalConfirmation
     ? "none"
     : getOrderGuideMode({ texto: mensaje, routingIntent: resultado.intent, state, evaluacion: resultado.evaluacion });
-  const fallbackRespuesta = imageAnalysis
-    ? buildImageOrderFallback({ pedido: resultado.pedido, evaluacion: resultado.evaluacion, imageAnalysis })
-    : construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
-        availableProducts: buildCatalogShortList(5),
-        guideMode: orderGuideMode
-      });
+  const fallbackRespuesta = resultado.awaitingFinalConfirmation
+    ? buildFinalConfirmationFallback(resultado.pedido)
+    : (imageAnalysis
+      ? buildImageOrderFallback({ pedido: resultado.pedido, evaluacion: resultado.evaluacion, imageAnalysis })
+      : construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
+          availableProducts: buildCatalogShortList(5),
+          guideMode: orderGuideMode
+        }));
   rememberOrderGuideShown(state, orderGuideMode);
   const shouldBypassAiForImage = Boolean(
     imageAnalysis
@@ -6896,7 +7232,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
       || resultado?.evaluacion?.faltantes?.includes("confirmacion_imagen")
       || resultado?.evaluacion?.faltantes?.includes("confirmacion_catalogo"))
   );
-  const respuesta = orderGuideMode !== "none" || shouldBypassAiForImage
+  const respuesta = orderGuideMode !== "none" || shouldBypassAiForImage || resultado.awaitingFinalConfirmation
     ? fallbackRespuesta
     : await generarRespuestaConversacional({
         telefono,
@@ -7377,13 +7713,77 @@ async function extraerContenidoMensajeWhatsApp(mensaje) {
   }
 
   if (mensaje?.type === "audio" && mensaje?.audio?.id) {
+    logEvent("AUDIO_MESSAGE_RECEIVED", {
+      sourceMessageId: mensaje?.id || null,
+      mediaId: mensaje.audio.id,
+      mimeType: mensaje?.audio?.mime_type || null
+    });
+    logEvent("AUDIO_DOWNLOAD_STARTED", {
+      sourceMessageId: mensaje?.id || null,
+      mediaId: mensaje.audio.id
+    });
     const media = await obtenerMediaWhatsApp(mensaje.audio.id);
-    const transcription = await transcribirAudio({
-      buffer: media.buffer,
+    logEvent("AUDIO_DOWNLOAD_FINISHED", {
+      sourceMessageId: mensaje?.id || null,
+      mediaId: media.mediaId,
       mimeType: media.mimeType,
       filename: media.filename,
-      language: "es"
+      bytes: media.buffer?.length || 0,
+      fileSize: media.fileSize || null
     });
+
+    logEvent("AUDIO_TRANSCRIPTION_STARTED", {
+      sourceMessageId: mensaje?.id || null,
+      mediaId: media.mediaId,
+      mimeType: media.mimeType,
+      filename: media.filename,
+      bytes: media.buffer?.length || 0
+    });
+
+    let transcriptionResult;
+    try {
+      transcriptionResult = await transcribirAudio({
+        buffer: media.buffer,
+        mimeType: media.mimeType,
+        filename: media.filename,
+        language: "es"
+      });
+    } catch (error) {
+      logEvent("AUDIO_TRANSCRIPTION_FAILED", {
+        sourceMessageId: mensaje?.id || null,
+        mediaId: media.mediaId,
+        provider: error?.primaryProvider || null,
+        fallbackProvider: error?.fallbackProvider || null,
+        error: error.message
+      }, "warn");
+      logEvent("AUDIO_PIPELINE_ERROR", {
+        sourceMessageId: mensaje?.id || null,
+        mediaId: media.mediaId,
+        stage: "transcription",
+        error: error.message
+      }, "error");
+      throw error;
+    }
+
+    const transcription = limpiarTexto(transcriptionResult?.text);
+    if (!transcription) {
+      logEvent("AUDIO_TRANSCRIPTION_FAILED", {
+        sourceMessageId: mensaje?.id || null,
+        mediaId: media.mediaId,
+        provider: transcriptionResult?.provider || null,
+        fallbackFrom: transcriptionResult?.fallbackFrom || null,
+        error: "empty_transcription"
+      }, "warn");
+    } else {
+      logEvent("AUDIO_TRANSCRIPTION_SUCCESS", {
+        sourceMessageId: mensaje?.id || null,
+        mediaId: media.mediaId,
+        provider: transcriptionResult?.provider || null,
+        fallbackFrom: transcriptionResult?.fallbackFrom || null,
+        textLength: transcription.length,
+        preview: transcription.slice(0, 120)
+      });
+    }
 
     return {
       messageType: "audio",
@@ -7464,6 +7864,15 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (mensaje?.type === "audio") {
+      const audioState = obtenerEstadoConversacion(numeroCliente);
+      setConversationFlowState(audioState, "awaiting_audio_processing", {
+        reason: "audio_message_received",
+        telefono: numeroCliente,
+        sourceMessageId: mensaje?.id || null
+      });
+    }
+
     let extracted;
     try {
       extracted = await extraerContenidoMensajeWhatsApp(mensaje);
@@ -7476,9 +7885,18 @@ app.post("/webhook", async (req, res) => {
       }, "error");
 
       if (mensaje?.type === "audio") {
+        logEvent("AUDIO_PIPELINE_ERROR", {
+          sourceMessageId: mensaje?.id || null,
+          mediaId: mensaje?.audio?.id || null,
+          stage: "webhook_media_processing",
+          error: error.message
+        }, "error");
+      }
+
+      if (mensaje?.type === "audio") {
         await responderAlCliente({
           telefono: numeroCliente,
-          respuesta: "No pude procesar tu audio. ¿Me lo envías en texto, por favor?",
+          respuesta: "Tu audio llegó 😊 Estoy teniendo un problema momentáneo para escucharlo. ¿Puedes reenviarlo o escribirlo?",
           simulated: false,
           orderId: null
         });
@@ -7501,7 +7919,7 @@ app.post("/webhook", async (req, res) => {
       if (extracted.messageType === "audio") {
         await responderAlCliente({
           telefono: numeroCliente,
-          respuesta: "No pude transcribir tu audio. ¿Me lo envías en texto, por favor?",
+          respuesta: "Tu audio llegó 😊 Estoy teniendo un problema momentáneo para escucharlo. ¿Puedes reenviarlo o escribirlo?",
           simulated: false,
           orderId: null
         });

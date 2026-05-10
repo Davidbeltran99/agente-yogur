@@ -1,7 +1,8 @@
 const {
   ejecutarFlujoMensaje,
   resolverProductoCatalogo,
-  setCatalogProductsCache
+  setCatalogProductsCache,
+  obtenerEstadoConversacion
 } = require("../server");
 const { syncCatalogProducts, listCatalogProducts } = require("../db");
 
@@ -95,6 +96,16 @@ async function seedCatalog() {
       categoria: "Griego",
       presentacion: "250 g",
       aliases: ["griego 250", "griego pequeno"],
+      activo: true
+    },
+    {
+      id: "scan-cafe-litro-1000",
+      nombre: "Café Litro 1000 ml",
+      precio_publico: 15000,
+      precio_distribuidor: 13200,
+      categoria: "Bebida",
+      presentacion: "1000 ml",
+      aliases: ["cafe litro", "cafe 1000", "cafe litro 1000 ml"],
       activo: true
     }
   ], { sourceUrl: "test://full-catalog-scan" });
@@ -234,6 +245,70 @@ async function run() {
   assert(hasProduct(case8Items, "frutos rojos garrafa 1800 ml") || responseIncludes(case8, "frutos rojos garrafa 1800 ml"), "8. mix imagen+audio debe sumar frutos rojos", case8);
   assert(hasProduct(case8Items, "fresa galon 4 litros") || responseIncludes(case8, "fresa galon 4 litros"), "8. mix imagen+audio debe sumar galón 4 litros", case8);
   checks.push({ case: 8, ok: true, result: case8Items.map((item) => item.producto) });
+
+  const phone9 = `57320009${Date.now().toString().slice(-4)}`;
+  const exactFlowImage = {
+    items: [
+      { raw_text: "Aloe Garrafa 1800 ml", product_query: "aloe garrafa 1800 ml", quantity: 1, confidence: 0.98 },
+      { raw_text: "Fresa Fit Litro 1000 ml", product_query: "fresa fit litro 1000 ml", quantity: 1, confidence: 0.97 },
+      { raw_text: "Fresa Galón 4 Litros", product_query: "fresa galon 4 litros", quantity: 1, confidence: 0.96 },
+      { raw_text: "Frutos Rojos Garrafa 1800 ml", product_query: "frutos rojos garrafa 1800 ml", quantity: 1, confidence: 0.97 }
+    ],
+    uncertain_lines: [],
+    extracted_text: "Aloe Garrafa 1800 ml\nFresa Fit Litro 1000 ml\nFresa Galón 4 Litros\nFrutos Rojos Garrafa 1800 ml",
+    address: null,
+    payment_method: "Nequi",
+    overall_confidence: 0.97
+  };
+
+  const exactStep1 = await send(phone9, "", {
+    messageType: "image",
+    mediaId: `img_${Date.now()}_exact`,
+    mediaBuffer: Buffer.from("exact-flow-cart"),
+    mediaMimeType: "image/jpeg",
+    mediaFilename: "carrito-exacto.jpg",
+    imageAnalysisOverride: exactFlowImage
+  });
+  const stateAfterStep1 = obtenerEstadoConversacion(phone9);
+  assert(stateAfterStep1.flowState === "awaiting_address", "9.1 imagen debe dejar el flujo esperando dirección", stateAfterStep1);
+  assert((stateAfterStep1.lastImageContext?.lastImageProducts || []).length === 4, "9.1 imagen debe persistir los 4 productos del carrito", stateAfterStep1.lastImageContext);
+
+  const exactStep2 = await send(phone9, "cra 9 # 12-34 barrio centro");
+  const stateAfterStep2 = obtenerEstadoConversacion(phone9);
+  assert(stateAfterStep2.flowState === "awaiting_final_confirmation", "9.2 dirección debe mantener contexto y pasar a confirmación final", stateAfterStep2);
+  assert(hasProduct(getProducts(exactStep2), "aloe garrafa 1800 ml"), "9.2 dirección no debe perder aloe", exactStep2);
+
+  const exactStep3 = await send(phone9, "los de la foto");
+  const stateAfterStep3 = obtenerEstadoConversacion(phone9);
+  assert(stateAfterStep3.flowState === "awaiting_final_confirmation", "9.3 'los de la foto' debe restaurar sin resetear el flujo", stateAfterStep3);
+  assert(hasProduct(getProducts(exactStep3), "frutos rojos garrafa 1800 ml"), "9.3 'los de la foto' debe restaurar productos de imagen", exactStep3);
+  assert(!responseIncludes(exactStep3, "No encontré ese producto"), "9.3 'los de la foto' no debe disparar búsqueda literal", exactStep3);
+
+  const exactStep4 = await send(phone9, "agrega cafe litro 1000 ml", {
+    messageType: "audio",
+    transcription: "agrega cafe litro 1000 ml",
+    mediaId: `aud_${Date.now()}_exact`
+  });
+  const stateAfterStep4 = obtenerEstadoConversacion(phone9);
+  assert(stateAfterStep4.flowState === "awaiting_final_confirmation", "9.4 audio debe volver al mismo flujo conversacional", stateAfterStep4);
+  assert(hasProduct(getProducts(exactStep4), "café litro 1000 ml") || hasProduct(getProducts(exactStep4), "cafe litro 1000 ml"), "9.4 audio debe agregar café litro", exactStep4);
+  assert((stateAfterStep4.lastImageContext?.lastImageProducts || []).length === 4, "9.4 audio no debe borrar contexto imagen", stateAfterStep4.lastImageContext);
+
+  const exactStep5 = await send(phone9, "sí, confirmado");
+  assert(Boolean(exactStep5.order?.id), "9.5 confirmación final debe guardar el pedido", exactStep5);
+  assert(hasProduct(getProducts(exactStep5), "café litro 1000 ml") || hasProduct(getProducts(exactStep5), "cafe litro 1000 ml"), "9.5 pedido final debe conservar el producto agregado por audio", exactStep5);
+  checks.push({
+    case: 9,
+    ok: true,
+    result: {
+      flowStateAfterImage: stateAfterStep1.flowState,
+      flowStateAfterAddress: stateAfterStep2.flowState,
+      flowStateAfterReference: stateAfterStep3.flowState,
+      flowStateAfterAudio: stateAfterStep4.flowState,
+      orderId: exactStep5.order?.id || null,
+      products: getProducts(exactStep5).map((item) => item.producto)
+    }
+  });
 
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 }

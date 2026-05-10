@@ -312,7 +312,13 @@ async function transcribirAudioOpenAI({ buffer, mimeType = "audio/ogg", filename
     throw new Error(data?.error?.message || data?.error || `OpenAI transcription error ${response.status}`);
   }
 
-  return String(data?.text || "").trim();
+  return {
+    text: String(data?.text || "").trim(),
+    provider: "openai",
+    mimeType,
+    filename,
+    timeoutMs: OPENAI_TIMEOUT_MS
+  };
 }
 
 async function transcribirAudioDeepgram({ buffer, mimeType = "audio/ogg", language = "es" }) {
@@ -332,7 +338,12 @@ async function transcribirAudioDeepgram({ buffer, mimeType = "audio/ogg", langua
     }
   );
 
-  return String(response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "").trim();
+  return {
+    text: String(response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "").trim(),
+    provider: "deepgram",
+    mimeType,
+    timeoutMs: OPENAI_TIMEOUT_MS
+  };
 }
 
 async function transcribirAudio(params = {}) {
@@ -345,9 +356,21 @@ async function transcribirAudio(params = {}) {
       : await transcribirAudioOpenAI(params);
   } catch (error) {
     if (!useDeepgram && (process.env.DEEPGRAM_API_KEY || "").trim()) {
-      return transcribirAudioDeepgram(params);
+      try {
+        const fallbackResult = await transcribirAudioDeepgram(params);
+        return {
+          ...fallbackResult,
+          fallbackFrom: "openai"
+        };
+      } catch (fallbackError) {
+        fallbackError.primaryProvider = "openai";
+        fallbackError.fallbackProvider = "deepgram";
+        fallbackError.cause = error;
+        throw fallbackError;
+      }
     }
 
+    error.primaryProvider = useDeepgram ? "deepgram" : "openai";
     throw error;
   }
 }
