@@ -55,6 +55,30 @@ function parseOptionalNumber(value) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+function parseOptionalBoolean(value, fallback = null) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "si", "sí", "yes", "on", "activo", "publico", "público", "distribuidor"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off", "inactivo"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 function parseJsonText(value, fallback = null) {
   if (!value) {
     return fallback;
@@ -232,6 +256,12 @@ ensureColumn("catalog_products", "precio_publico", "REAL");
 ensureColumn("catalog_products", "precio_distribuidor", "REAL");
 ensureColumn("catalog_products", "presentacion", "TEXT");
 ensureColumn("catalog_products", "stock", "REAL");
+ensureColumn("catalog_products", "descripcion_web", "TEXT");
+ensureColumn("catalog_products", "image_url", "TEXT");
+ensureColumn("catalog_products", "orden", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("catalog_products", "visible_publico", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("catalog_products", "visible_distribuidor", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("catalog_products", "web_activo", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("messages", "message_type", "TEXT NOT NULL DEFAULT 'text'");
 ensureColumn("messages", "transcription_text", "TEXT");
 ensureColumn("messages", "media_id", "TEXT");
@@ -360,16 +390,54 @@ const upsertCatalogProductStatement = db.prepare(`
     source_url = excluded.source_url,
     updated_at = excluded.updated_at
 `);
-const listCatalogProductsStatement = db.prepare(`
-  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at
+const getCatalogProductByIdStatement = db.prepare(`
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at,
+         descripcion_web, image_url, orden, visible_publico, visible_distribuidor, web_activo
   FROM catalog_products
-  ORDER BY LOWER(nombre) ASC, rowid ASC
+  WHERE id = ?
+`);
+const listCatalogProductsStatement = db.prepare(`
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at,
+         descripcion_web, image_url, orden, visible_publico, visible_distribuidor, web_activo
+  FROM catalog_products
+  ORDER BY COALESCE(orden, 0) ASC, LOWER(nombre) ASC, rowid ASC
 `);
 const listActiveCatalogProductsStatement = db.prepare(`
-  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at
+  SELECT id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at,
+         descripcion_web, image_url, orden, visible_publico, visible_distribuidor, web_activo
   FROM catalog_products
   WHERE activo = 1
-  ORDER BY LOWER(nombre) ASC, rowid ASC
+  ORDER BY COALESCE(orden, 0) ASC, LOWER(nombre) ASC, rowid ASC
+`);
+const upsertCatalogWebProductStatement = db.prepare(`
+  INSERT INTO catalog_products (
+    id, nombre, precio, precio_publico, precio_distribuidor, categoria, presentacion, aliases, activo, stock, source_url, updated_at,
+    descripcion_web, image_url, orden, visible_publico, visible_distribuidor, web_activo
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    nombre = excluded.nombre,
+    precio = excluded.precio,
+    precio_publico = excluded.precio_publico,
+    precio_distribuidor = excluded.precio_distribuidor,
+    categoria = excluded.categoria,
+    presentacion = excluded.presentacion,
+    aliases = excluded.aliases,
+    activo = excluded.activo,
+    stock = excluded.stock,
+    source_url = excluded.source_url,
+    updated_at = excluded.updated_at,
+    descripcion_web = excluded.descripcion_web,
+    image_url = excluded.image_url,
+    orden = excluded.orden,
+    visible_publico = excluded.visible_publico,
+    visible_distribuidor = excluded.visible_distribuidor,
+    web_activo = excluded.web_activo
+`);
+const updateCatalogWebProductStatusStatement = db.prepare(`
+  UPDATE catalog_products
+  SET web_activo = ?, activo = ?, updated_at = ?
+  WHERE id = ?
 `);
 const countCatalogProductsStatement = db.prepare(`SELECT COUNT(*) AS total FROM catalog_products WHERE activo = 1`);
 const countAllCatalogProductsStatement = db.prepare(`SELECT COUNT(*) AS total FROM catalog_products`);
@@ -961,7 +1029,85 @@ function hydrateCatalogProduct(row) {
     activo: Boolean(row.activo),
     stock: parseOptionalNumber(row.stock),
     sourceUrl: normalizeText(row.source_url),
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    descripcion: normalizeText(row.descripcion_web),
+    imageUrl: normalizeText(row.image_url),
+    orden: Number.isFinite(Number(row.orden)) ? Number(row.orden) : 0,
+    visiblePublico: row.visible_publico === undefined || row.visible_publico === null ? true : Boolean(row.visible_publico),
+    visibleDistribuidor: row.visible_distribuidor === undefined || row.visible_distribuidor === null ? true : Boolean(row.visible_distribuidor),
+    webActivo: row.web_activo === undefined || row.web_activo === null ? Boolean(row.activo) : Boolean(row.web_activo)
+  };
+}
+
+function buildCatalogProductDescription(product = {}) {
+  const explicitDescription = normalizeText(product?.descripcion ?? product?.descripcion_web);
+  if (explicitDescription) {
+    return explicitDescription;
+  }
+
+  const fragments = [
+    normalizeText(product?.categoria),
+    normalizeText(product?.presentacion),
+    parseOptionalNumber(product?.stock) !== null ? `Stock: ${Number(product.stock)}` : null
+  ].filter(Boolean);
+
+  return fragments.length ? fragments.join(" · ") : "Producto disponible en Tellolac";
+}
+
+function validateCatalogWebProductPayload(payload = {}, { allowMissing = false } = {}) {
+  const id = normalizeText(payload?.id);
+  const nombre = normalizeText(payload?.nombre);
+  const precioPublico = parseOptionalNumber(payload?.precio_publico ?? payload?.precioPublico ?? payload?.precio);
+  const precioDistribuidor = parseOptionalNumber(payload?.precio_distribuidor ?? payload?.precioDistribuidor);
+  const categoria = normalizeText(payload?.categoria);
+  const presentacion = normalizeText(payload?.presentacion);
+  const aliases = Array.isArray(payload?.aliases)
+    ? payload.aliases.map((value) => normalizeText(value)).filter(Boolean)
+    : String(payload?.aliases || "")
+        .split(",")
+        .map((value) => normalizeText(value))
+        .filter(Boolean);
+  const activo = parseOptionalBoolean(payload?.activo, null);
+  const stock = parseOptionalNumber(payload?.stock);
+  const descripcion = normalizeText(payload?.descripcion ?? payload?.descripcion_web);
+  const imageUrl = normalizeText(payload?.imageUrl ?? payload?.image_url);
+  const orden = payload?.orden === undefined ? null : (Number.isFinite(Number(payload?.orden)) ? Number(payload.orden) : 0);
+  const visiblePublico = parseOptionalBoolean(payload?.visiblePublico ?? payload?.visible_publico, null);
+  const visibleDistribuidor = parseOptionalBoolean(payload?.visibleDistribuidor ?? payload?.visible_distribuidor, null);
+  const webActivo = parseOptionalBoolean(payload?.webActivo ?? payload?.web_activo, null);
+
+  if (!allowMissing || payload?.nombre !== undefined) {
+    if (!nombre) {
+      const error = new Error("Nombre de producto obligatorio");
+      error.code = "INVALID_CATALOG_PRODUCT_NAME";
+      throw error;
+    }
+  }
+
+  if (!allowMissing || payload?.precio_publico !== undefined || payload?.precioPublico !== undefined || payload?.precio !== undefined) {
+    if (precioPublico === null) {
+      const error = new Error("Precio público obligatorio");
+      error.code = "INVALID_CATALOG_PRODUCT_PUBLIC_PRICE";
+      throw error;
+    }
+  }
+
+  return {
+    id: id || null,
+    nombre: nombre || null,
+    precioPublico,
+    precioDistribuidor,
+    categoria,
+    presentacion,
+    aliases,
+    activo,
+    stock,
+    descripcion,
+    imageUrl,
+    orden,
+    visiblePublico,
+    visibleDistribuidor,
+    webActivo
   };
 }
 
@@ -1152,6 +1298,101 @@ function deleteCustomer(id) {
 function listCatalogProducts({ activeOnly = true } = {}) {
   const rows = activeOnly ? listActiveCatalogProductsStatement.all() : listCatalogProductsStatement.all();
   return rows.map(hydrateCatalogProduct);
+}
+
+function getCatalogProductById(id) {
+  return hydrateCatalogProduct(getCatalogProductByIdStatement.get(normalizeText(id)));
+}
+
+function saveCatalogWebProduct(payload = {}) {
+  const normalized = validateCatalogWebProductPayload(payload);
+  const current = normalized.id ? getCatalogProductById(normalized.id) : null;
+  const id = current?.id || normalized.id || randomUUID();
+  const now = new Date().toISOString();
+  const finalAliases = [...new Set([
+    ...(current?.aliases || []),
+    ...(normalized.aliases || [])
+  ].filter(Boolean))];
+  const sourceUrl = current?.sourceUrl || "local://catalog-web";
+
+  upsertCatalogWebProductStatement.run(
+    id,
+    normalized.nombre || current?.nombre,
+    normalized.precioPublico,
+    normalized.precioPublico,
+    normalized.precioDistribuidor,
+    normalized.categoria,
+    normalized.presentacion,
+    stringifyJson(finalAliases) || "[]",
+    normalized.activo === null ? (current?.activo === false ? 0 : 1) : (normalized.activo ? 1 : 0),
+    normalized.stock,
+    sourceUrl,
+    now,
+    normalized.descripcion || buildCatalogProductDescription({
+      categoria: normalized.categoria,
+      presentacion: normalized.presentacion,
+      stock: normalized.stock
+    }),
+    normalized.imageUrl,
+    normalized.orden ?? (current?.orden ?? 0),
+    normalized.visiblePublico === null ? 1 : (normalized.visiblePublico ? 1 : 0),
+    normalized.visibleDistribuidor === null ? 1 : (normalized.visibleDistribuidor ? 1 : 0),
+    normalized.webActivo === null ? 1 : (normalized.webActivo ? 1 : 0)
+  );
+
+  return getCatalogProductById(id);
+}
+
+function updateCatalogWebProduct(id, payload = {}) {
+  const current = getCatalogProductById(id);
+  if (!current) {
+    const error = new Error("Producto no encontrado");
+    error.code = "CATALOG_PRODUCT_NOT_FOUND";
+    throw error;
+  }
+
+  const normalized = validateCatalogWebProductPayload(payload, { allowMissing: true });
+  const now = new Date().toISOString();
+  const nextAliases = normalized.aliases.length
+    ? [...new Set(normalized.aliases)]
+    : (current.aliases || []);
+
+  upsertCatalogWebProductStatement.run(
+    current.id,
+    normalized.nombre ?? current.nombre,
+    normalized.precioPublico ?? current.precio_publico ?? current.precio,
+    normalized.precioPublico ?? current.precio_publico ?? current.precio,
+    normalized.precioDistribuidor !== null ? normalized.precioDistribuidor : current.precio_distribuidor,
+    normalized.categoria ?? current.categoria,
+    normalized.presentacion ?? current.presentacion,
+    stringifyJson(nextAliases) || "[]",
+    normalized.activo === null ? (current.activo ? 1 : 0) : (normalized.activo ? 1 : 0),
+    normalized.stock !== null ? normalized.stock : current.stock,
+    current.sourceUrl || "local://catalog-web",
+    now,
+    normalized.descripcion ?? current.descripcion ?? buildCatalogProductDescription(current),
+    normalized.imageUrl ?? current.imageUrl,
+    normalized.orden ?? current.orden ?? 0,
+    normalized.visiblePublico === null ? (current.visiblePublico ? 1 : 0) : (normalized.visiblePublico ? 1 : 0),
+    normalized.visibleDistribuidor === null ? (current.visibleDistribuidor ? 1 : 0) : (normalized.visibleDistribuidor ? 1 : 0),
+    normalized.webActivo === null ? (current.webActivo ? 1 : 0) : (normalized.webActivo ? 1 : 0)
+  );
+
+  return getCatalogProductById(current.id);
+}
+
+function setCatalogWebProductStatus(id, { webActivo = null, activo = null } = {}) {
+  const current = getCatalogProductById(id);
+  if (!current) {
+    const error = new Error("Producto no encontrado");
+    error.code = "CATALOG_PRODUCT_NOT_FOUND";
+    throw error;
+  }
+
+  const nextWebActivo = webActivo === null ? current.webActivo : Boolean(webActivo);
+  const nextActivo = activo === null ? current.activo : Boolean(activo);
+  updateCatalogWebProductStatusStatement.run(nextWebActivo ? 1 : 0, nextActivo ? 1 : 0, new Date().toISOString(), current.id);
+  return getCatalogProductById(current.id);
 }
 
 function countCatalogProducts() {
@@ -1368,6 +1609,10 @@ module.exports = {
   updateMessageOrder,
   syncCatalogProducts,
   listCatalogProducts,
+  getCatalogProductById,
+  saveCatalogWebProduct,
+  updateCatalogWebProduct,
+  setCatalogWebProductStatus,
   countCatalogProducts,
   countAllCatalogProducts,
   countInactiveCatalogProducts,

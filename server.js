@@ -29,6 +29,10 @@ const {
   updateMessageOrder,
   syncCatalogProducts,
   listCatalogProducts,
+  getCatalogProductById,
+  saveCatalogWebProduct,
+  updateCatalogWebProduct,
+  setCatalogWebProductStatus,
   countCatalogProducts,
   countAllCatalogProducts,
   countInactiveCatalogProducts,
@@ -97,10 +101,13 @@ const PANEL_LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.PANEL_LOGIN_RATE_
 const PANEL_AUTH_COOKIE_SECURE = parseBooleanEnv(process.env.PANEL_AUTH_COOKIE_SECURE, String(process.env.NODE_ENV || "").trim().toLowerCase() === "production");
 const PRODUCT_DISAMBIGUATION_TTL_MS = Number(process.env.PRODUCT_DISAMBIGUATION_TTL_MS || 15 * 60 * 1000);
 const ORDER_MEDIA_DIR = path.join(__dirname, "data", "order-media");
+const CATALOG_MEDIA_DIR = path.join(publicDir, "assets", "catalog");
+const CATALOG_PREPARATION_OPTIONS = ["Normal", "Bajo en azúcar", "Poco colorante", "Sin azúcar", "Sin colorante"];
 const ADMIN_WHATSAPP_NUMBERS = new Set(String(process.env.ADMIN_WHATSAPP_NUMBERS || "")
   .split(",")
   .map((value) => normalizePhone(value))
   .filter(Boolean));
+const CATALOG_WHATSAPP_NUMBER = normalizePhone(process.env.CATALOG_WHATSAPP_NUMBER || process.env.PUBLIC_WHATSAPP_NUMBER || "") || Array.from(ADMIN_WHATSAPP_NUMBERS)[0] || null;
 const ADMIN_NOTIFY_ENABLED = parseBooleanEnv(process.env.ADMIN_NOTIFY_ENABLED, false);
 const WHATSAPP_AUDIO_RESPONSES_ENABLED = parseBooleanEnv(process.env.WHATSAPP_AUDIO_RESPONSES_ENABLED, false);
 const WHATSAPP_AUDIO_REPLY_SEND_TEXT = parseBooleanEnv(process.env.WHATSAPP_AUDIO_REPLY_SEND_TEXT, false);
@@ -111,9 +118,10 @@ const BUSINESS_TIMEZONE = String(process.env.BUSINESS_TIMEZONE || "America/Bogot
 const panelLoginAttemptState = new Map();
 
 fs.mkdirSync(ORDER_MEDIA_DIR, { recursive: true });
+fs.mkdirSync(CATALOG_MEDIA_DIR, { recursive: true });
 
 app.set("trust proxy", 1);
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 app.use("/assets", express.static(path.join(publicDir, "assets")));
 app.use("/order-media", express.static(ORDER_MEDIA_DIR));
 app.get("/styles.css", (_req, res) => res.sendFile(path.join(publicDir, "styles.css")));
@@ -8157,6 +8165,115 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   };
 }
 
+function buildCatalogImagePlaceholder(productName = "Tellolac") {
+  const label = String(productName || "Tellolac").slice(0, 32);
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#fff8ec"/><stop offset="1" stop-color="#fde68a"/></linearGradient></defs><rect width="600" height="600" rx="48" fill="url(#g)"/><circle cx="300" cy="240" r="94" fill="#f59e0b" opacity=".18"/><rect x="110" y="360" width="380" height="84" rx="24" fill="#ffffff" opacity=".92"/><text x="300" y="262" text-anchor="middle" font-size="42" font-family="Arial, sans-serif" fill="#92400e">Tellolac</text><text x="300" y="412" text-anchor="middle" font-size="28" font-family="Arial, sans-serif" fill="#78350f">${label}</text></svg>`)}`;
+}
+
+function formatCatalogPrice(value) {
+  if (!Number.isFinite(Number(value))) {
+    return null;
+  }
+  return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(Number(value));
+}
+
+function buildCatalogWebDescription(product = {}) {
+  return limpiarTexto(product?.descripcion)
+    || [limpiarTexto(product?.categoria), limpiarTexto(product?.presentacion)].filter(Boolean).join(" · ")
+    || "Disponible en Tellolac";
+}
+
+function serializeCatalogProductForWeb(product = {}, customerType = "public") {
+  const resolvedCustomerType = normalizeCustomerType(customerType, "public");
+  const distributorPrice = Number(product?.precio_distribuidor);
+  const publicPrice = Number(product?.precio_publico ?? product?.precio);
+  const activePrice = resolvedCustomerType === "distributor" && Number.isFinite(distributorPrice)
+    ? distributorPrice
+    : publicPrice;
+
+  return {
+    id: product.id,
+    nombre: product.nombre,
+    descripcion: buildCatalogWebDescription(product),
+    categoria: limpiarTexto(product?.categoria) || "Sin categoría",
+    presentacion: limpiarTexto(product?.presentacion) || null,
+    aliases: Array.isArray(product?.aliases) ? product.aliases : [],
+    imageUrl: limpiarTexto(product?.imageUrl) || buildCatalogImagePlaceholder(product?.nombre),
+    price: Number.isFinite(activePrice) ? activePrice : null,
+    priceFormatted: formatCatalogPrice(activePrice),
+    prices: {
+      public: Number.isFinite(publicPrice) ? publicPrice : null,
+      publicFormatted: formatCatalogPrice(publicPrice),
+      distributor: Number.isFinite(distributorPrice) ? distributorPrice : null,
+      distributorFormatted: formatCatalogPrice(distributorPrice)
+    },
+    stock: Number.isFinite(Number(product?.stock)) ? Number(product.stock) : null,
+    activo: Boolean(product?.activo),
+    webActivo: product?.webActivo !== false,
+    visiblePublico: product?.visiblePublico !== false,
+    visibleDistribuidor: product?.visibleDistribuidor !== false,
+    orden: Number.isFinite(Number(product?.orden)) ? Number(product.orden) : 0
+  };
+}
+
+function listCatalogWebProducts({ customerType = "public", includeInactive = false } = {}) {
+  const resolvedCustomerType = normalizeCustomerType(customerType, "public");
+  const products = listCatalogProducts({ activeOnly: false })
+    .filter((product) => includeInactive || (product.activo && product.webActivo !== false))
+    .filter((product) => {
+      if (includeInactive) {
+        return true;
+      }
+      return resolvedCustomerType === "distributor"
+        ? product.visibleDistribuidor !== false
+        : product.visiblePublico !== false;
+    })
+    .map((product) => serializeCatalogProductForWeb(product, resolvedCustomerType));
+
+  const categories = [...new Set(products.map((product) => product.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es"));
+
+  return {
+    customerType: resolvedCustomerType,
+    categories,
+    products
+  };
+}
+
+function identifyCatalogClientByPhone(phone) {
+  const normalizedPhone = normalizePhone(phone);
+  const customer = normalizedPhone ? getCustomerByPhone(normalizedPhone) : null;
+  const customerType = customer?.isActive ? customer.customerType : "public";
+
+  return {
+    phone: normalizedPhone,
+    found: Boolean(customer),
+    customerType,
+    customerName: customer?.name || null,
+    isActive: customer?.isActive ?? false
+  };
+}
+
+function saveCatalogImageDataUrl({ filename = "catalog-image.png", dataUrl = "" } = {}) {
+  const match = String(dataUrl || "").match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!match) {
+    const error = new Error("Imagen inválida");
+    error.code = "INVALID_CATALOG_IMAGE";
+    throw error;
+  }
+
+  const mimeType = match[1];
+  const extension = mimeType.split("/")[1]?.replace("jpeg", "jpg") || "png";
+  const safeBaseName = String(filename || "catalog-image")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "catalog-image";
+  const finalName = `${Date.now()}-${safeBaseName}.${extension}`;
+  const absolutePath = path.join(CATALOG_MEDIA_DIR, finalName);
+  fs.writeFileSync(absolutePath, Buffer.from(match[2], "base64"));
+  return `/assets/catalog/${finalName}`;
+}
+
 app.get(PANEL_LOGIN_PATH, (req, res) => {
   if (!PANEL_AUTH_ENABLED) {
     return res.redirect("/");
@@ -8217,6 +8334,54 @@ app.post("/auth/logout", (_req, res) => {
   return res.json({ ok: true });
 });
 
+app.get("/catalogo", (_req, res) => {
+  return res.sendFile(path.join(publicDir, "catalogo", "index.html"));
+});
+
+app.get("/catalogo.js", (_req, res) => {
+  const runtimeConfig = [
+    `window.__CATALOG_WHATSAPP_NUMBER__ = ${JSON.stringify(CATALOG_WHATSAPP_NUMBER)};`,
+    `window.__CATALOG_PREPARATION_OPTIONS__ = ${JSON.stringify(CATALOG_PREPARATION_OPTIONS)};`
+  ].join("\n");
+  const script = fs.readFileSync(path.join(publicDir, "catalogo", "catalogo.js"), "utf8");
+  res.type("application/javascript").send(`${runtimeConfig}\n${script}`);
+});
+
+app.get("/catalogo-admin", requirePanelAuth, (_req, res) => {
+  return res.sendFile(path.join(publicDir, "catalogo-admin", "index.html"));
+});
+
+app.get("/catalogo-admin.js", requirePanelAuth, (_req, res) => {
+  const script = fs.readFileSync(path.join(publicDir, "catalogo-admin", "catalogo-admin.js"), "utf8");
+  res.type("application/javascript").send(script);
+});
+
+app.get("/catalog/products", (req, res) => {
+  try {
+    const customerType = normalizeCustomerType(req.query?.customerType, "public");
+    const includeInactive = parseBooleanEnv(req.query?.includeInactive, false);
+    const payload = listCatalogWebProducts({ customerType, includeInactive });
+    return res.json({
+      ok: true,
+      ...payload,
+      preparationOptions: CATALOG_PREPARATION_OPTIONS,
+      whatsappNumber: CATALOG_WHATSAPP_NUMBER
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: "No se pudo cargar el catálogo", detail: error.message });
+  }
+});
+
+app.post("/catalog/identify-client", (req, res) => {
+  try {
+    const phone = req.body?.phone || req.body?.telefono || null;
+    const payload = identifyCatalogClientByPhone(phone);
+    return res.json({ ok: true, ...payload });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: "No se pudo identificar el cliente", detail: error.message });
+  }
+});
+
 app.get("/", requirePanelAuth, (_req, res) => {
   return res.sendFile(path.join(publicDir, "index.html"));
 });
@@ -8229,6 +8394,7 @@ app.get("/health", (_req, res) => {
     storage: "sqlite",
     dbPath: databasePath,
     catalogProducts: countCatalogProducts(),
+    catalogWhatsappNumberConfigured: Boolean(CATALOG_WHATSAPP_NUMBER),
     whatsappEnabled: WHATSAPP_ENABLED,
     adminNotifyEnabled: ADMIN_NOTIFY_ENABLED,
     adminWhatsappCount: getAdminWhatsappNumbers().length,
@@ -8409,6 +8575,61 @@ app.post("/admin/catalog/sync", requirePanelAuth, async (_req, res) => {
   } catch (error) {
     logEvent("catalogo_sync_error", { error: error.response?.data || error.message }, "error");
     return res.status(500).json({ ok: false, error: "No se pudo sincronizar el catálogo", detalle: error.message });
+  }
+});
+
+app.get("/admin/catalog-web/products", requirePanelAuth, (_req, res) => {
+  try {
+    const products = listCatalogProducts({ activeOnly: false }).map((product) => serializeCatalogProductForWeb(product, "public"));
+    return res.json({ ok: true, products, preparationOptions: CATALOG_PREPARATION_OPTIONS, whatsappNumber: CATALOG_WHATSAPP_NUMBER });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: "No se pudo cargar el catálogo web", detalle: error.message });
+  }
+});
+
+app.post("/admin/catalog-web/products", requirePanelAuth, (req, res) => {
+  try {
+    const product = saveCatalogWebProduct(req.body || {});
+    return res.status(201).json({ ok: true, product: serializeCatalogProductForWeb(product, "public") });
+  } catch (error) {
+    const status = String(error.code || "").startsWith("INVALID_") ? 400 : 500;
+    return res.status(status).json({ ok: false, error: error.message, code: error.code || null });
+  }
+});
+
+app.patch("/admin/catalog-web/products/:id", requirePanelAuth, (req, res) => {
+  try {
+    const product = updateCatalogWebProduct(req.params.id, req.body || {});
+    return res.json({ ok: true, product: serializeCatalogProductForWeb(product, "public") });
+  } catch (error) {
+    const status = error.code === "CATALOG_PRODUCT_NOT_FOUND" ? 404 : (String(error.code || "").startsWith("INVALID_") ? 400 : 500);
+    return res.status(status).json({ ok: false, error: error.message, code: error.code || null });
+  }
+});
+
+app.patch("/admin/catalog-web/products/:id/status", requirePanelAuth, (req, res) => {
+  try {
+    const product = setCatalogWebProductStatus(req.params.id, {
+      webActivo: req.body?.webActivo,
+      activo: req.body?.activo
+    });
+    return res.json({ ok: true, product: serializeCatalogProductForWeb(product, "public") });
+  } catch (error) {
+    const status = error.code === "CATALOG_PRODUCT_NOT_FOUND" ? 404 : 500;
+    return res.status(status).json({ ok: false, error: error.message, code: error.code || null });
+  }
+});
+
+app.post("/admin/catalog-web/upload-image", requirePanelAuth, (req, res) => {
+  try {
+    const imageUrl = saveCatalogImageDataUrl({
+      filename: req.body?.filename,
+      dataUrl: req.body?.dataUrl
+    });
+    return res.status(201).json({ ok: true, imageUrl });
+  } catch (error) {
+    const status = error.code === "INVALID_CATALOG_IMAGE" ? 400 : 500;
+    return res.status(status).json({ ok: false, error: error.message, code: error.code || null });
   }
 });
 

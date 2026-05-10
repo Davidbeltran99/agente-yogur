@@ -1115,6 +1115,20 @@ function renderSettings() {
       <h3>Pedidos visibles</h3>
       <p class="setting-copy">${summary.totalOrders || 0} pedido(s) activos hoy</p>
     </article>
+    <article class="setting-card setting-card-action">
+      <div>
+        <h3>Catálogo web público</h3>
+        <p class="setting-copy">Abre la experiencia nueva de catálogo + carrito conectada a WhatsApp.</p>
+      </div>
+      <a href="/catalogo" target="_blank" rel="noopener" class="secondary small-action">Abrir catálogo</a>
+    </article>
+    <article class="setting-card setting-card-action">
+      <div>
+        <h3>Gestión catálogo web</h3>
+        <p class="setting-copy">Administra productos, precios, imágenes, categorías y visibilidad del módulo nuevo.</p>
+      </div>
+      <a href="/catalogo-admin" class="secondary small-action">Gestionar</a>
+    </article>
   `;
 }
 
