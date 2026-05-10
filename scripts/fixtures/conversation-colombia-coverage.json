@@ -1,0 +1,95 @@
+{
+  "meta": {
+    "purpose": "Cobertura conversacional real para Abi en contexto colombiano",
+    "notes": [
+      "No usar estereotipos ofensivos.",
+      "Cubrir registros popular, neutro y formal.",
+      "Estos casos sirven para diseño, pruebas manuales y futuras validaciones automáticas."
+    ]
+  },
+  "coverage": {
+    "greetings": [
+      "hola",
+      "buenas",
+      "buen día",
+      "veci",
+      "amiga",
+      "disculpa",
+      "una pregunta",
+      "información por favor"
+    ],
+    "catalog_requests": [
+      "qué venden",
+      "me regalas el catálogo",
+      "qué sabores tienen",
+      "muéstrame los productos",
+      "qué manejan",
+      "pásame precios"
+    ],
+    "direct_orders": [
+      "quiero 2 aloe litro",
+      "me manda 3 griegos",
+      "regálame un kefir natural",
+      "apúntame 4 aloe grandes",
+      "necesito 1 yogurt con poca azúcar"
+    ],
+    "human_references": [
+      "el mismo de siempre",
+      "el otro",
+      "ese mismo",
+      "el grande",
+      "el barato",
+      "el primero",
+      "agrega otro",
+      "2 más",
+      "quita ese",
+      "déjame solo 2"
+    ],
+    "address_inputs": [
+      "centro",
+      "por la iglesia",
+      "al lado del parque",
+      "calle 10 #20-30",
+      "la misma dirección",
+      "donde siempre"
+    ],
+    "payment_inputs": [
+      "nequi",
+      "daviplata",
+      "transferencia",
+      "efectivo",
+      "contraentrega",
+      "te mando comprobante"
+    ],
+    "corrections": [
+      "no entendiste",
+      "así no era",
+      "te dije 2 no 3",
+      "no ese no",
+      "borra eso",
+      "arranquemos otra vez"
+    ],
+    "closings": [
+      "listo",
+      "dale",
+      "perfecto",
+      "gracias",
+      "quedo atento",
+      "bye",
+      "hablamos"
+    ],
+    "customer_type": {
+      "public": [
+        "precio normal",
+        "precio al detal",
+        "cuánto vale una unidad"
+      ],
+      "distributor": [
+        "precio distribuidor",
+        "precio por mayor",
+        "soy distribuidor",
+        "manejas precio para negocio"
+      ]
+    }
+  }
+}

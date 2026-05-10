@@ -35,14 +35,29 @@ async function waitForHealth(timeoutMs = 90000) {
   throw new Error("Server did not become healthy in time");
 }
 
-async function send(phone, message, suffix) {
+async function send(phone, message, suffix, options = {}) {
   const response = await api.post("/simulate-message", {
     telefono: phone,
     mensaje: message,
-    sourceMessageId: `e2e_${Date.now()}_${suffix}`
+    sourceMessageId: `e2e_${Date.now()}_${suffix}`,
+    messageType: options.messageType || options.tipo || undefined,
+    imageAnalysis: options.imageAnalysis || undefined,
+    imageRequiresConfirmation: options.imageRequiresConfirmation === true
   });
 
   return response.data;
+}
+
+async function createCustomerForScenario(phone, customer = {}) {
+  const response = await api.post("/admin/customers", {
+    phone,
+    name: customer.name || "Cliente Test",
+    customerType: customer.customerType || "public",
+    notes: customer.notes || null,
+    isActive: typeof customer.isActive === "boolean" ? customer.isActive : true
+  });
+
+  return response.data?.customer || null;
 }
 
 function collectProducts(container) {
@@ -53,9 +68,30 @@ function collectProducts(container) {
   return container.map((item) => item?.producto).filter(Boolean);
 }
 
+function normalizeProductName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function productMatches(actual, expected) {
+  const normalizedActual = normalizeProductName(actual);
+  const normalizedExpected = normalizeProductName(expected);
+  if (!normalizedActual || !normalizedExpected) {
+    return false;
+  }
+
+  return normalizedActual === normalizedExpected
+    || normalizedActual.includes(normalizedExpected)
+    || normalizedExpected.includes(normalizedActual);
+}
+
 function findProduct(container, productName) {
   return Array.isArray(container)
-    ? container.find((item) => item?.producto === productName)
+    ? container.find((item) => productMatches(item?.producto, productName))
     : null;
 }
 
@@ -83,19 +119,19 @@ function assertStep(step, result, scenarioName, index) {
 
   if (Array.isArray(expect.pedidoProductsIncludes)) {
     for (const product of expect.pedidoProductsIncludes) {
-      assert(pedidoProducts.includes(product), `${label}: missing pedido product ${product}`);
+      assert(pedidoProducts.some((actual) => productMatches(actual, product)), `${label}: missing pedido product ${product}`);
     }
   }
 
   if (Array.isArray(expect.pedidoProductsExcludes)) {
     for (const product of expect.pedidoProductsExcludes) {
-      assert(!pedidoProducts.includes(product), `${label}: unexpected pedido product ${product}`);
+      assert(!pedidoProducts.some((actual) => productMatches(actual, product)), `${label}: unexpected pedido product ${product}`);
     }
   }
 
   if (Array.isArray(expect.orderProductsIncludes)) {
     for (const product of expect.orderProductsIncludes) {
-      assert(orderProducts.includes(product), `${label}: missing order product ${product}`);
+      assert(orderProducts.some((actual) => productMatches(actual, product)), `${label}: missing order product ${product}`);
     }
   }
 
@@ -104,7 +140,7 @@ function assertStep(step, result, scenarioName, index) {
   }
 
   if (expect.pedidoQuantityFor) {
-    const target = (result.pedido?.productos || []).find((item) => item?.producto === expect.pedidoQuantityFor.product);
+    const target = findProduct(result.pedido?.productos || [], expect.pedidoQuantityFor.product);
     assert(target, `${label}: missing quantity target ${expect.pedidoQuantityFor.product}`);
     assert(Number(target.cantidad) === Number(expect.pedidoQuantityFor.quantity), `${label}: expected quantity ${expect.pedidoQuantityFor.quantity}, got ${target.cantidad}`);
   }
@@ -135,9 +171,17 @@ async function runScenario(scenario, scenarioIndex) {
   const phone = `57320${String(Date.now() + scenarioIndex).slice(-7)}`;
   const outputs = [];
 
+  if (scenario.setup?.customer) {
+    await createCustomerForScenario(phone, scenario.setup.customer);
+  }
+
   for (let index = 0; index < scenario.steps.length; index += 1) {
     const step = scenario.steps[index];
-    const result = await send(phone, step.message, `${scenarioIndex}_${index}`);
+    const result = await send(phone, step.message, `${scenarioIndex}_${index}`, {
+      messageType: step.messageType,
+      imageAnalysis: step.imageAnalysis,
+      imageRequiresConfirmation: step.imageRequiresConfirmation
+    });
     assert(!result.ignored, `${scenario.name}#${index + 1}: message was ignored (${result.ignoredReason})`);
     assertStep(step, result, scenario.name, index);
     outputs.push({

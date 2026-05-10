@@ -249,6 +249,23 @@ function pickVariant(seed, variants = []) {
   return variants[hash % variants.length];
 }
 
+function inferirSegmentoConversacional({ variantSeed = "", isDistributor = false } = {}) {
+  const seed = String(variantSeed || "").toLowerCase();
+  if (isDistributor || /\b(distribuidor|negocio|tienda|surtir|revender|por mayor|mayorista)\b/.test(seed)) {
+    return isDistributor ? "distributor" : "store";
+  }
+
+  if (/\b(senor|señor|senora|señora|cordial|por favor|buenas tardes|buenas noches|usted)\b/.test(seed)) {
+    return "formal";
+  }
+
+  if (/\b(veci|amiga|mi amor|reina|hola abi|alo|hey)\b/.test(seed)) {
+    return "barrio";
+  }
+
+  return "general";
+}
+
 function construirSaludoNatural(nombreCliente = "") {
   const normalized = String(nombreCliente || "").trim();
   return normalized
@@ -256,12 +273,77 @@ function construirSaludoNatural(nombreCliente = "") {
     : pickVariant("sin-nombre", ["Perfecto 😊", "Claro 😊", "Listo 😊"]);
 }
 
-function construirRespuestaCatalogoInicial({ customerName = null, isDistributor = false } = {}) {
-  return customerName
-    ? (isDistributor
-      ? `¡Hola ${customerName}! 😊\nSoy Abi. Si quieres, te muestro precios de distribuidor o te ayudo con tu pedido.`
-      : `¡Hola ${customerName}! 😊\nMi nombre es Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`)
-    : "Hola 😊\nMi nombre es Abi, la asistente virtual de Tellolac.\nSi quieres, te ayudo con productos, precios y pedidos.\n\n¿Me compartes tu nombre para atenderte mejor?";
+function construirPromptDireccion(nombreCliente = "") {
+  const saludo = construirSaludoNatural(nombreCliente);
+  return pickVariant(`direccion-${String(nombreCliente || "sin-nombre").trim().toLowerCase()}`, [
+    `${saludo} ¿A qué dirección te lo enviamos?`,
+    `${saludo} ¿Me compartes la dirección de entrega?`,
+    `${saludo} ¿Cuál es la dirección de entrega?`
+  ]);
+}
+
+function construirPromptDireccionParcial(nombreCliente = "") {
+  const saludo = construirSaludoNatural(nombreCliente);
+  return pickVariant(`direccion-parcial-${String(nombreCliente || "sin-nombre").trim().toLowerCase()}`, [
+    `${saludo} ¿me confirmas el número de casa o una referencia?`,
+    `${saludo} ¿me regalas el número de casa o una referencia?`,
+    `${saludo} ¿qué número de casa o referencia le agregamos para ubicarte mejor?`
+  ]);
+}
+
+function construirPromptMetodoPago(nombreCliente = "") {
+  const saludo = construirSaludoNatural(nombreCliente);
+  return pickVariant(`pago-${String(nombreCliente || "sin-nombre").trim().toLowerCase()}`, [
+    `${saludo} ¿pagas por Nequi, efectivo o transferencia?`,
+    `${saludo} ¿pagas por Nequi, efectivo o transferencia?`,
+    `${saludo} ¿me confirmas si pagas por Nequi, efectivo o transferencia?`
+  ]);
+}
+
+function construirRespuestaCatalogoInicial({ customerName = null, isDistributor = false, variantSeed = "catalogo-inicial" } = {}) {
+  const segmento = inferirSegmentoConversacional({ variantSeed, isDistributor });
+  if (customerName) {
+    if (isDistributor) {
+      return pickVariant(`${variantSeed}-${customerName}-dist`, [
+        `¡Hola ${customerName}! 😊\nSoy Abi. Si quieres, te muestro tus precios de distribuidor o te ayudo con el pedido.`,
+        `Hola ${customerName} 😊\nSoy Abi. Te apoyo con precios de distribuidor, productos y pedidos.`,
+        `Qué bueno tenerte por aquí, ${customerName} 😊\nSi quieres, revisamos precios de distribuidor o armamos el pedido de una.`
+      ]);
+    }
+
+    if (segmento === "barrio") {
+      return pickVariant(`${variantSeed}-${customerName}-barrio`, [
+        `¡Hola ${customerName}! 😊\nSoy Abi. Dime qué quieres pedir y te lo dejo armado de una.`,
+        `Hola ${customerName} 😊\nEstoy pendiente por aquí. Si quieres catálogo, precios o pedido, te ayudo.`,
+        `Qué más ${customerName} 😊\nCuéntame qué quieres llevar y te colaboro.`
+      ]);
+    }
+
+    if (segmento === "formal") {
+      return pickVariant(`${variantSeed}-${customerName}-formal`, [
+        `Hola ${customerName} 😊\nSoy Abi. Con gusto le ayudo con productos, precios y pedidos.`,
+        `Bienvenido, ${customerName} 😊\nEstoy pendiente para ayudarle con su pedido o con cualquier producto que quiera revisar.`,
+        `Hola ${customerName} 😊\nCon mucho gusto le comparto catálogo, precios o le ayudo a dejar el pedido listo.`
+      ]);
+    }
+
+    return pickVariant(`${variantSeed}-${customerName}-pub`, [
+      `¡Hola ${customerName}! 😊\nMi nombre es Abi. Estoy pendiente de tu pedido o de cualquier producto que quieras revisar.`,
+      `Hola ${customerName} 😊\nSoy Abi. Te ayudo con productos, precios y pedidos de Tellolac.`,
+      `¡Hola ${customerName}! 😊\nCuéntame qué quieres pedir o qué producto quieres revisar y te ayudo.`
+    ]);
+  }
+
+  return segmento === "formal"
+    ? pickVariant(`${variantSeed}-sin-nombre-formal`, [
+        "Hola 😊\nSoy Abi, de Tellolac. Con gusto le ayudo con catálogo, precios y pedidos.\n\n¿Me comparte su nombre para atenderle mejor?",
+        "Bienvenido 😊\nLe atiende Abi. Puedo ayudarle con productos, precios y pedidos.\n\n¿Con qué nombre le atiendo?"
+      ])
+    : pickVariant(`${variantSeed}-sin-nombre`, [
+        "Hola 😊\nMi nombre es Abi, la asistente virtual de Tellolac.\nSi quieres, te ayudo con productos, precios y pedidos.\n\n¿Me compartes tu nombre para atenderte mejor?",
+        "Hola 😊\nSoy Abi, de Tellolac.\nPuedo ayudarte con catálogo, precios y pedidos.\n\n¿Con qué nombre te atiendo?",
+        "Hola 😊\nTe atiende Abi.\nSi quieres, vemos productos, precios o dejamos tu pedido listo.\n\n¿Cómo te llamas?"
+      ]);
 }
 
 function construirLineasCatalogo(featuredProducts = []) {
@@ -335,8 +417,13 @@ function construirAyudaPedidoPuntual({ title = "ese producto", options = [] } = 
     : `Puedes decirme: “1 ${first}”.`;
 }
 
-function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [], priceLabel = "público", isDistributor = false, guideMode = "mini" } = {}) {
-  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+function construirRespuestaCatalogoInformativo({ customerName = null, featuredProducts = [], priceLabel = "público", isDistributor = false, guideMode = "mini", variantSeed = "catalogo-info" } = {}) {
+  const segmento = inferirSegmentoConversacional({ variantSeed, isDistributor });
+  const saludo = customerName
+    ? pickVariant(`${variantSeed}-${customerName}`, segmento === "formal"
+      ? [`Claro ${customerName} 😊`, `Con gusto ${customerName} 😊`, `Perfecto ${customerName} 😊`]
+      : [`Claro ${customerName} 😊`, `Listo ${customerName} 😊`, `Perfecto ${customerName} 😊`])
+    : pickVariant(`${variantSeed}-sin-nombre`, segmento === "formal" ? ["Con gusto 😊", "Claro 😊", "Perfecto 😊"] : ["Claro 😊", "Listo 😊", "Perfecto 😊"]);
   const lines = construirLineasCatalogo(featuredProducts);
   const guide = guideMode === "full"
     ? [
@@ -351,34 +438,65 @@ function construirRespuestaCatalogoInformativo({ customerName = null, featuredPr
   return [
     saludo,
     isDistributor ? `Te muestro precios de ${priceLabel}.` : `Te comparto algunos productos con precio ${priceLabel}.`,
-    "Algunos productos son:",
+    segmento === "store" ? "Estas opciones te pueden servir para surtir:" : "Algunos productos son:",
     lines.join("\n") || null,
     guide,
     `También puedes ver el catálogo completo aquí:\n${CATALOG_URL}`,
-    "¿Cuál te gustaría pedir?"
+    segmento === "formal"
+      ? "Si quiere, se lo dejo armado de una. ¿Cuál le gustaría pedir?"
+      : "Si quieres, te lo dejo armado de una. ¿Cuál te gustaría pedir?"
   ].filter(Boolean).join("\n\n");
 }
 
-function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [], priceLabel = "público", isDistributor = false } = {}) {
+function construirRespuestaNombreRegistrado({ customerName, featuredProducts = [], priceLabel = "público", isDistributor = false, variantSeed = "nombre-registrado" } = {}) {
+  const segmento = inferirSegmentoConversacional({ variantSeed, isDistributor });
   const lines = construirLineasCatalogo(featuredProducts);
   return [
-    `Mucho gusto, ${customerName} 😊`,
+    pickVariant(`${variantSeed}-${customerName}`, segmento === "formal"
+      ? [`Mucho gusto, ${customerName} 😊`, `Con gusto, ${customerName} 😊`, `Perfecto, ${customerName} 😊`]
+      : [`Mucho gusto, ${customerName} 😊`, `Encantada, ${customerName} 😊`, `Perfecto, ${customerName} 😊`]),
     isDistributor ? `Te muestro tus precios de ${priceLabel}.` : `Te comparto algunos productos con precio ${priceLabel}.`,
-    "En Tellolac manejamos productos lácteos, aloe, café y anchetas.",
+    segmento === "store" ? "Manejamos productos que te pueden servir para surtir o vender." : "En Tellolac manejamos productos lácteos, aloe, café y anchetas.",
     "Algunos productos son:",
     lines.join("\n") || null,
     `Catálogo completo:\n${CATALOG_URL}`,
-    "¿Te gustaría pedir alguno?"
+    segmento === "formal"
+      ? "Si quiere, le dejo el pedido armado de una. ¿Le gustaría pedir alguno?"
+      : "Si quieres, te dejo el pedido armado de una. ¿Te gustaría pedir alguno?"
   ].filter(Boolean).join("\n\n");
 }
 
-function construirRespuestaPreciosInformativo({ customerName = null, featuredProducts = [], queryLabel = "ese producto", priceLabel = "público", isDistributor = false } = {}) {
-  const saludo = customerName ? `Claro ${customerName} 😊` : "Claro 😊";
+function construirRespuestaPreciosInformativo({ customerName = null, featuredProducts = [], queryLabel = "ese producto", priceLabel = "público", isDistributor = false, variantSeed = "precios-info" } = {}) {
+  const segmento = inferirSegmentoConversacional({ variantSeed, isDistributor });
+  const saludo = customerName
+    ? pickVariant(`${variantSeed}-${customerName}`, segmento === "formal"
+      ? [`Claro ${customerName} 😊`, `Con gusto ${customerName} 😊`, `Perfecto ${customerName} 😊`]
+      : [`Claro ${customerName} 😊`, `Listo ${customerName} 😊`, `Perfecto ${customerName} 😊`])
+    : pickVariant(`${variantSeed}-sin-nombre`, segmento === "formal" ? ["Con gusto 😊", "Claro 😊", "Perfecto 😊"] : ["Claro 😊", "Listo 😊", "Perfecto 😊"]);
   const lines = construirLineasCatalogo(featuredProducts);
   return [
     saludo,
-    isDistributor ? `Estos son los precios de ${priceLabel} que encontré para ${queryLabel}:` : `Estos son los precios que encontré para ${queryLabel}:`,
+    `Estos son los precios de ${priceLabel} que encontré para ${queryLabel}:`,
     lines.join("\n") || null,
+    segmento === "formal"
+      ? "Si quiere, se lo dejo agregado de una con la cantidad que necesite."
+      : "Si quieres, te lo dejo agregado de una con la cantidad que necesites.",
+    `Catálogo completo:\n${CATALOG_URL}`
+  ].filter(Boolean).join("\n\n");
+}
+
+function construirRespuestaPrecioDistribuidorRestringido({ customerName = null, featuredProducts = [], queryLabel = "ese producto", variantSeed = "precio-distribuidor-restringido" } = {}) {
+  const saludo = customerName
+    ? pickVariant(`${variantSeed}-${customerName}`, [`Claro ${customerName} 😊`, `Listo ${customerName} 😊`, `Perfecto ${customerName} 😊`])
+    : pickVariant(`${variantSeed}-sin-nombre`, ["Claro 😊", "Listo 😊", "Perfecto 😊"]);
+  const lines = construirLineasCatalogo(featuredProducts);
+  return [
+    saludo,
+    "Los precios de distribuidor los compartimos solo a clientes registrados.",
+    lines.length ? `Mientras tanto te dejo precio público para ${queryLabel}:` : "Si quieres, te comparto precio público o te ayudo a dejar el pedido listo.",
+    lines.join("\n") || null,
+    "Si quieres, también te lo cotizo con precio público y te dejo el pedido armado.",
+    "Si ya estás registrado con otro número, me lo indicas y lo revisamos.",
     `Catálogo completo:\n${CATALOG_URL}`
   ].filter(Boolean).join("\n\n");
 }
@@ -471,62 +589,173 @@ function construirRespuestaIdentidad() {
   return "Soy Abi 😊, la asistente virtual de Tellolac. Mi nombre es Abi y te ayudo con productos, precios y pedidos.";
 }
 
-function construirRespuestaDespedida({ customerName = null } = {}) {
+function construirRespuestaDespedida({ customerName = null, variantSeed = "despedida" } = {}) {
   const nombre = String(customerName || "").trim();
+  const segmento = inferirSegmentoConversacional({ variantSeed });
   return nombre
-    ? `Con gusto ${nombre} 😊\nQuedamos atentos. ¡Que tengas un excelente día!`
-    : "Con gusto 😊\nQuedamos atentos. ¡Que tengas un excelente día!";
+    ? pickVariant(`${variantSeed}-${nombre}`, segmento === "formal"
+      ? [
+          `Con gusto ${nombre} 😊\nQuedamos atentos. Que tenga un excelente día.`,
+          `Listo ${nombre} 😊\nQuedamos pendientes. Que le vaya muy bien.`,
+          `Perfecto ${nombre} 😊\nAquí quedamos atentos. Feliz día.`
+        ]
+      : [
+          `Con gusto ${nombre} 😊\nQuedamos atentos. ¡Que tengas un excelente día!`,
+          `Listo ${nombre} 😊\nQuedamos pendientes. Que te vaya súper bien.`,
+          `Perfecto ${nombre} 😊\nAquí quedamos atentos. Que tengas un lindo día.`
+        ])
+    : pickVariant(`${variantSeed}-sin-nombre`, segmento === "formal"
+      ? [
+          "Con gusto 😊\nQuedamos atentos. Que tenga un excelente día.",
+          "Listo 😊\nQuedamos pendientes. Que le vaya muy bien.",
+          "Perfecto 😊\nAquí quedamos atentos. Feliz día."
+        ]
+      : [
+          "Con gusto 😊\nQuedamos atentos. ¡Que tengas un excelente día!",
+          "Listo 😊\nQuedamos pendientes. Que te vaya muy bien.",
+          "Perfecto 😊\nAquí quedamos atentos. Que tengas un lindo día."
+        ]);
 }
 
-function construirRespuestaConfirmacion({ hasDraftContext = false, isDistributor = false } = {}) {
+function construirRespuestaConfirmacion({ hasDraftContext = false, isDistributor = false, variantSeed = "confirmacion" } = {}) {
   if (hasDraftContext) {
     return isDistributor
-      ? pickVariant("draft-distributor", ["Perfecto 😊 Seguimos con tu pedido y te aplico precio distribuidor.", "Listo 😊 Aquí sigo para terminar tu pedido con precio distribuidor."])
-      : pickVariant("draft", ["Perfecto 😊 Seguimos con tu pedido cuando quieras.", "Listo 😊 Aquí sigo para terminar tu pedido."]);
+      ? pickVariant(`${variantSeed}-draft-distributor`, ["Perfecto 😊 Seguimos con tu pedido y te aplico precio distribuidor.", "Listo 😊 Aquí sigo para terminar tu pedido con precio distribuidor.", "De una 😊 Continuamos con tu pedido y te dejo precio distribuidor."])
+      : pickVariant(`${variantSeed}-draft`, ["Perfecto 😊 Seguimos con tu pedido cuando quieras.", "Listo 😊 Aquí sigo para terminar tu pedido.", "De una 😊 Continuamos con tu pedido cuando quieras."]);
   }
 
   return isDistributor
-    ? pickVariant("general-distributor", ["Perfecto 😊 Si quieres te muestro precios de distribuidor o te ayudo a pedir.", "Claro 😊 Te ayudo con productos y precios de distribuidor."])
-    : pickVariant("general", ["Perfecto 😊 Cuando quieras te ayudo con productos o pedidos.", "Claro 😊 Si quieres te muestro productos o te ayudo a pedir."]);
+    ? pickVariant(`${variantSeed}-general-distributor`, ["Perfecto 😊 Si quieres te muestro precios de distribuidor o te ayudo a pedir.", "Claro 😊 Te ayudo con productos y precios de distribuidor.", "Listo 😊 Si quieres revisamos precios de distribuidor o armamos tu pedido."])
+    : pickVariant(`${variantSeed}-general`, ["Perfecto 😊 Cuando quieras te ayudo con productos o pedidos.", "Claro 😊 Si quieres te muestro productos o te ayudo a pedir.", "Listo 😊 Si quieres vemos precios, productos o armamos tu pedido."]);
 }
 
-function construirRespuestaCasual() {
-  return pickVariant("casual", [
+function construirRespuestaCasual({ variantSeed = "casual" } = {}) {
+  const segmento = inferirSegmentoConversacional({ variantSeed });
+  if (segmento === "formal") {
+    return pickVariant(variantSeed, [
+      "Claro 😊 Puedo ayudarle con catálogo, precios o pedidos.",
+      "Con gusto 😊 Si quiere, le muestro productos, precios o le ayudo a armar el pedido.",
+      "Perfecto 😊 Le ayudo con catálogo, precios y pedidos."
+    ]);
+  }
+
+  if (segmento === "barrio") {
+    return pickVariant(variantSeed, [
+      "Claro 😊 Te ayudo con catálogo, precios o pedidos.",
+      "De una 😊 Si quieres, te muestro productos, precios o armamos el pedido.",
+      "Listo 😊 Dime qué quieres y te colaboro."
+    ]);
+  }
+
+  return pickVariant(variantSeed, [
     "Claro 😊 Puedo ayudarte con catálogo, precios o pedidos.",
     "De una 😊 Si quieres, te muestro productos, precios o armamos el pedido.",
-    "Perfecto 😊 Te ayudo con catálogo, precios y pedidos."
+    "Perfecto 😊 Te ayudo con catálogo, precios y pedidos.",
+    "Listo 😊 Dime si quieres catálogo, precios o dejar un pedido armado."
   ]);
 }
 
-function construirRespuestaCorreccion({ pedido = null } = {}) {
+function construirRespuestaCorreccion({ pedido = null, variantSeed = "correccion" } = {}) {
   const detalle = construirDetalleProductosAmable(Array.isArray(pedido?.productos) ? pedido.productos : []);
   return [
-    "Tienes razón 😊",
+    pickVariant(variantSeed, ["Tienes razón 😊", "Sí, tienes toda la razón 😊", "De una, corrijámoslo 😊"]),
     detalle ? `Por ahora te entendí esto:\n${detalle}` : null,
-    "Dime qué ajustamos y lo corrijo."
+    "Dime qué ajustamos y lo corrijo de una."
   ].filter(Boolean).join("\n\n");
 }
 
-function construirRespuestaAyudaHumana() {
-  return "Claro 😊 Si prefieres atención humana, déjame tu duda o tu pedido y lo dejamos listo para pasarlo al asesor.";
+function construirRespuestaAyudaHumana({ variantSeed = "ayuda-humana" } = {}) {
+  const segmento = inferirSegmentoConversacional({ variantSeed });
+  return pickVariant(variantSeed, segmento === "formal"
+    ? [
+        "Claro 😊 Si prefiere atención humana, déjeme su duda o su pedido y lo dejamos listo para pasarlo al asesor.",
+        "Con gusto 😊 Si quiere apoyo de un asesor, me deja el detalle y lo escalamos."
+      ]
+    : [
+        "Claro 😊 Si prefieres atención humana, déjame tu duda o tu pedido y lo dejamos listo para pasarlo al asesor.",
+        "De una 😊 Si quieres apoyo de un asesor, me dejas tu duda o tu pedido y lo escalamos.",
+        "Listo 😊 Si prefieres que lo vea una persona, déjame el detalle y lo pasamos al asesor."
+      ]);
 }
 
 function construirUpsellSuave(productos = []) {
   const first = String(productos?.[0]?.producto || "").toLowerCase();
+  const hasMultiple = Array.isArray(productos) && productos.length > 1;
+
+  if (hasMultiple) {
+    return pickVariant(`upsell-multi-${first}`, [
+      "Si quieres, también te sumo otra unidad o algo más del catálogo 😊",
+      "Si te hace falta algo más, te lo agrego de una al pedido 😊"
+    ]);
+  }
 
   if (/aloe/.test(first)) {
-    return "Si quieres también te dejo la presentación grande 😊";
+    return pickVariant(`upsell-aloe-${first}`, [
+      "Si quieres, también te dejo la presentación grande 😊",
+      "Si quieres rendir más el pedido, también te puedo dejar la garrafa 😊"
+    ]);
+  }
+
+  if (/griego/.test(first)) {
+    return pickVariant(`upsell-griego-${first}`, [
+      "Si quieres, también te lo dejo con fruta o en otra presentación 😊",
+      "Si quieres, también te agrego otra presentación de griego para que compares 😊"
+    ]);
+  }
+
+  if (/yogur|yogurt|kumis|kefir/.test(first)) {
+    return pickVariant(`upsell-lacteo-${first}`, [
+      "Si quieres, también te agrego otra unidad o otra presentación 😊",
+      "Si quieres, te puedo sumar otro lácteo para aprovechar el envío 😊"
+    ]);
   }
 
   if (/ancheta/.test(first)) {
-    return "También tengo otra opción de ancheta por si quieres comparar ✨";
+    return pickVariant(`upsell-ancheta-${first}`, [
+      "También tengo otra opción de ancheta por si quieres comparar ✨",
+      "Si quieres, te muestro otra ancheta un poquito más completa ✨"
+    ]);
   }
 
   if (/cafe|café/.test(first)) {
-    return "Ese sale bastante 😊 Si quieres también te agrego otra unidad.";
+    return pickVariant(`upsell-cafe-${first}`, [
+      "Ese sale bastante 😊 Si quieres, también te agrego otra unidad.",
+      "Si quieres, también te dejo otra unidad para que aproveches el pedido 😊"
+    ]);
   }
 
-  return productos.length === 1 ? "Si quieres también puedo agregarte otra unidad o otra presentación 😊" : null;
+  return productos.length === 1
+    ? pickVariant(`upsell-generic-${first}`, [
+        "Si quieres, también puedo agregarte otra unidad o otra presentación 😊",
+        "Si quieres complementar el pedido, te agrego algo más de una 😊"
+      ])
+    : null;
+}
+
+function construirCierreVenta({ nombreCliente = "", productos = [] } = {}) {
+  const first = String(productos?.[0]?.producto || "").toLowerCase();
+  const baseKey = `${nombreCliente}-${first || "general"}`;
+
+  if (/ancheta/.test(first)) {
+    return pickVariant(`cierre-ancheta-${baseKey}`, [
+      "Te lo dejamos en curso y te confirmamos el despacho en un momento 🎁",
+      "Ya queda programado y te confirmamos el despacho 🎁"
+    ]);
+  }
+
+  if (/aloe/.test(first)) {
+    return pickVariant(`cierre-aloe-${baseKey}`, [
+      "En un momento te confirmamos el despacho 🚚",
+      "Te confirmamos el despacho en un momento 🚚",
+      "Queda en curso y te confirmamos el despacho en un momento 🚚"
+    ]);
+  }
+
+  return pickVariant(`cierre-general-${baseKey}`, [
+    "En un momento te confirmamos el despacho 🚚",
+    "Ya te dejamos esto en curso 🚚",
+    "Te confirmamos el despacho en un momento 🚚"
+  ]);
 }
 
 function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltantes: [], productosInvalidos: [] }, options = {}) {
@@ -626,7 +855,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         detalle,
         pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
         `Tengo esta dirección: ${pedido.direccion}`,
-        "Perfecto 😊 ¿me confirmas el número de casa o una referencia?"
+        construirPromptDireccionParcial(nombreCliente)
       ].filter(Boolean).join("\n\n");
     }
 
@@ -637,7 +866,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         detalle,
         pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
         construirUpsellSuave(productos),
-        "Perfecto 😊 ¿A qué dirección te lo enviamos?",
+        construirPromptDireccion(nombreCliente),
         "Ejemplo: Calle 10 #20-30, Barrio Centro"
       ].filter(Boolean).join("\n\n");
     }
@@ -648,7 +877,7 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
         detalle,
         pedido.total ? `Subtotal: ${formatearMoneda(pedido.total)}` : null,
         construirUpsellSuave(productos),
-        "Listo, ¿pagas por Nequi, efectivo o transferencia?"
+        construirPromptMetodoPago(nombreCliente)
       ].filter(Boolean).join("\n\n");
     }
 
@@ -684,7 +913,8 @@ function construirRespuestaPedido(pedido, evaluacion = { esValido: true, faltant
     isDistributor ? "Te aplico precio distribuidor." : null,
     pedido.total ? `Total: ${formatearMoneda(pedido.total)}` : null,
     null,
-    pickVariant(`${nombreCliente}-${pedido.total}`, ["En un momento te confirmamos el despacho 🚚", "Ya te dejamos esto en curso 🚚", "Te confirmamos el despacho en un momento 🚚"]),
+    construirCierreVenta({ nombreCliente, productos }),
+    "Si quieres sumar algo más, me dices y te lo agrego al pedido.",
     construirUpsellSuave(productos)
   ].filter((line) => line !== null).join("\n");
 }
@@ -701,6 +931,7 @@ module.exports = {
   construirRespuestaCatalogoInformativo,
   construirRespuestaNombreRegistrado,
   construirRespuestaPreciosInformativo,
+  construirRespuestaPrecioDistribuidorRestringido,
   construirRespuestaIdentidad,
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,

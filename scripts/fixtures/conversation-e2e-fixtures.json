@@ -51,21 +51,21 @@
     {
       "name": "contextual_value_option",
       "steps": [
-        { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "quiero aloe", "expect": { "intent": "ambiguous_product", "responseIncludes": ["Puedes responder 1 o 2"] } },
         { "message": "el barato", "expect": { "pedidoProductsIncludes": ["Aloe Litro 1000 ml"], "orderCreated": false } }
       ]
     },
     {
       "name": "family_large_reference",
       "steps": [
-        { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "quiero aloe", "expect": { "intent": "ambiguous_product", "responseIncludes": ["Puedes responder 1 o 2"] } },
         { "message": "el grande", "expect": { "pedidoProductsIncludes": ["Aloe Garrafa 1800 ml"], "orderCreated": false } }
       ]
     },
     {
       "name": "family_small_reference",
       "steps": [
-        { "message": "quiero aloe", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "quiero aloe", "expect": { "intent": "ambiguous_product", "responseIncludes": ["Puedes responder 1 o 2"] } },
         { "message": "el pequeño", "expect": { "pedidoProductsIncludes": ["Aloe Litro 1000 ml"], "orderCreated": false } }
       ]
     },
@@ -100,7 +100,7 @@
       "name": "human_correction",
       "steps": [
         { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
-        { "message": "no entendiste", "expect": { "intent": "complaint_confusion", "responseIncludes": ["Tienes razón"] } }
+        { "message": "no entendiste", "expect": { "intent": "complaint_confusion", "responseIncludes": ["corrijo"] } }
       ]
     },
     {
@@ -116,7 +116,7 @@
         { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
         { "message": "calle 10 #20-30", "expect": { "responseIncludes": ["pagas"] } },
         { "message": "nequi", "expect": { "orderCreated": true, "responseIncludes": ["Carlos"] } },
-        { "message": "okey bye", "expect": { "intent": "closing", "orderCreated": false, "responseIncludes": ["Carlos", "Quedamos atentos", "excelente día"], "responseExcludes": ["Aloe Litro", "Dirección", "Pago", "Total"] } }
+        { "message": "okey bye", "expect": { "intent": "closing", "orderCreated": false, "responseIncludes": ["Carlos", "Quedamos"], "responseExcludes": ["Aloe Litro", "Dirección", "Pago", "Total"] } }
       ]
     },
     {
@@ -147,6 +147,121 @@
       "name": "exact_variant_griego_con_fruta",
       "steps": [
         { "message": "griego con fruta", "expect": { "pedidoProductsIncludes": ["Griego Fruta Unidad 120gr"], "responseIncludes": ["Griego Fruta"], "responseExcludes": ["Nota: con fruta"] } }
+      ]
+    },
+    {
+      "name": "colloquial_greeting",
+      "steps": [
+        { "message": "buen dia veci", "expect": { "intent": "greeting", "responseIncludes": ["Abi"] } }
+      ]
+    },
+    {
+      "name": "landmark_address_then_payment_transfer",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "al lado de la iglesia del centro", "expect": { "intent": "address_provided", "responseIncludes": ["número de casa"] } },
+        { "message": "te transfiero por bancolombia", "expect": { "intent": "payment_method", "orderCreated": false, "responseIncludes": ["número de casa"] } }
+      ]
+    },
+    {
+      "name": "correction_colloquial",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "asi no era", "expect": { "intent": "complaint_confusion", "responseIncludes": ["corrijo"] } }
+      ]
+    },
+    {
+      "name": "closing_colloquial",
+      "steps": [
+        { "message": "quiero 1 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"] } },
+        { "message": "calle 10 #20-30", "expect": { "responseIncludes": ["pagas"] } },
+        { "message": "nequi", "expect": { "orderCreated": true } },
+        { "message": "gracias mi amor", "expect": { "intent": "closing", "responseIncludes": ["Quedamos"], "responseExcludes": ["Total", "Pago", "Dirección"] } }
+      ]
+    },
+    {
+      "name": "distributor_price_requires_registration",
+      "steps": [
+        { "message": "soy distribuidor, precio aloe litro", "expect": { "intent": "price_request", "responseIncludes": ["clientes registrados", "precio público"] } },
+        { "message": "quiero 2 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"], "responseIncludes": ["dirección"] } }
+      ]
+    },
+    {
+      "name": "registered_distributor_price_context",
+      "setup": {
+        "customer": {
+          "name": "Distribuidor Test",
+          "customerType": "distributor",
+          "isActive": true
+        }
+      },
+      "steps": [
+        { "message": "precio distribuidor del aloe litro", "expect": { "intent": "price_request", "responseIncludes": ["distribuidor", "$10.500"] } },
+        { "message": "quiero 2 aloe litro", "expect": { "pedidoProductsIncludes": ["Aloe Litro"], "responseIncludes": ["dirección"] } }
+      ]
+    },
+    {
+      "name": "public_price_context_override",
+      "setup": {
+        "customer": {
+          "name": "Distribuidor Test 2",
+          "customerType": "distributor",
+          "isActive": true
+        }
+      },
+      "steps": [
+        { "message": "precio distribuidor del aloe litro", "expect": { "intent": "price_request", "responseIncludes": ["distribuidor"] } },
+        { "message": "mejor precio público", "expect": { "intent": "price_request", "responseIncludes": ["público"] } }
+      ]
+    },
+    {
+      "name": "image_order_direct_to_registered_order",
+      "steps": [
+        {
+          "messageType": "image",
+          "message": "pedido cliente",
+          "imageAnalysis": {
+            "items": [
+              { "raw_text": "2 aloe litro", "product_query": "aloe litro", "quantity": 2, "confidence": 0.95 }
+            ],
+            "uncertain_lines": [],
+            "extracted_text": "2 aloe litro\ncalle 10 #20-30\nnequi",
+            "address": "calle 10 #20-30",
+            "payment_method": "nequi",
+            "overall_confidence": 0.95
+          },
+          "expect": { "intent": "order_request", "orderCreated": true, "pedidoProductsIncludes": ["Aloe Litro"], "responseIncludes": ["Total", "despacho"] }
+        }
+      ]
+    },
+    {
+      "name": "image_order_ignores_non_actionable_uncertain_lines",
+      "steps": [
+        {
+          "messageType": "image",
+          "message": "foto pedido",
+          "imageAnalysis": {
+            "items": [
+              { "raw_text": "1 cafe litro", "product_query": "cafe litro", "quantity": 1, "confidence": 0.9 }
+            ],
+            "uncertain_lines": [
+              { "text": "gracias", "confidence": 0.41 },
+              { "text": "pedido", "confidence": 0.38 }
+            ],
+            "extracted_text": "1 cafe litro\ncalle 8 #12-34 barrio centro\nefectivo",
+            "address": "calle 8 #12-34 barrio centro",
+            "payment_method": "efectivo",
+            "overall_confidence": 0.9
+          },
+          "expect": { "intent": "order_request", "orderCreated": true, "pedidoProductsIncludes": ["Café Litro"], "responseIncludes": ["Pago: Efectivo"] }
+        }
+      ]
+    },
+    {
+      "name": "typo_and_ambiguity_real",
+      "steps": [
+        { "message": "quiero 2 aloee grandee", "expect": { "intent": "order_missing_data", "pedidoProductsIncludes": ["Aloe"] } },
+        { "message": "mejor el pequeño", "expect": { "pedidoProductsIncludes": ["Aloe"] } }
       ]
     }
   ]

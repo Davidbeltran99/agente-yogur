@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { structuredLog } = require("./logger");
-const { analizarImagenPedido, inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, sintetizarAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
+const { analizarImagenPedido, normalizarResultadoImagenPedido, inferConversationIntent, procesarMensaje, generarRespuestaAbi, transcribirAudio, sintetizarAudio, OPENAI_PROVIDER, OPENAI_MODEL, OPENAI_BASE_URL } = require("./ollama");
 const {
   leerPedidosDesdeSheets,
   actualizarEstadoPedidoEnSheets,
@@ -64,6 +64,7 @@ const {
   construirRespuestaCatalogoInformativo,
   construirRespuestaNombreRegistrado,
   construirRespuestaPreciosInformativo,
+  construirRespuestaPrecioDistribuidorRestringido,
   construirRespuestaIdentidad,
   construirRespuestaDespedida,
   construirRespuestaConfirmacion,
@@ -147,10 +148,18 @@ const ALLOWED_PRODUCTS = new Set(["yogur", "kumis"]);
 const PAYMENT_ALIASES = new Map([
   ["nequi", "Transferencia"],
   ["daviplata", "Transferencia"],
-  ["efectivo", "Efectivo"],
   ["transferencia", "Transferencia"],
   ["transferencia bancaria", "Transferencia"],
-  ["contra entrega", "Efectivo"]
+  ["bancolombia", "Transferencia"],
+  ["davivienda", "Transferencia"],
+  ["pse", "Transferencia"],
+  ["qr", "Transferencia"],
+  ["consignacion", "Transferencia"],
+  ["consignación", "Transferencia"],
+  ["efectivo", "Efectivo"],
+  ["contra entrega", "Efectivo"],
+  ["contraentrega", "Efectivo"],
+  ["cuando llegue", "Efectivo"]
 ]);
 const processedMessageIds = new Map();
 const processedMessageContentHashes = new Map();
@@ -208,7 +217,7 @@ const MONTH_INDEX = new Map([
   ["noviembre", 10],
   ["diciembre", 11]
 ]);
-const ADDRESS_KEYWORDS = /(calle|cll|cl|carrera|cra|cr|avenida|av\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|conjunto|centro)/i;
+const ADDRESS_KEYWORDS = /(calle|cll|cl|carrera|cra|cr|avenida|av\.?|diagonal|diag|transversal|tv|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|conjunto|centro|sector|vereda|finca|local|frente|al lado|cerca|esquina|iglesia|parque)/i;
 const PRODUCT_ALIAS_INDEX = (() => {
   const index = new Map();
 
@@ -246,7 +255,7 @@ const LIST_ORDER_NON_IDENTITY_TOKENS = new Set([
 ].flatMap((value) => normalizeCatalogText(value).split(" ").filter(Boolean)));
 const PRICE_VALUE_TOKENS = ["barato", "barata", "baratos", "baratas", "economico", "económico", "economica", "económica", "economicos", "económicos", "economicas", "económicas", "asequible", "asequibles"];
 const SAME_PRODUCT_TOKENS = ["lo mismo", "el mismo", "la misma", "ese", "esa", "el de siempre", "la de siempre", "como siempre"];
-const PARTIAL_ADDRESS_REFERENCE_TOKENS = ["la misma direccion", "la misma dirección", "misma direccion", "misma dirección", "donde siempre"];
+const PARTIAL_ADDRESS_REFERENCE_TOKENS = ["la misma direccion", "la misma dirección", "misma direccion", "misma dirección", "donde siempre", "ahi mismo", "ahí mismo", "por donde siempre", "a la misma direccion", "a la misma dirección"];
 const RECEIPT_IMAGE_KEYWORDS = ["comprobante", "pago", "transferencia", "nequi", "daviplata", "consignacion", "consignación", "soporte", "recibo"];
 const SUGGESTION_MEMORY_TTL_MS = Number(process.env.SUGGESTION_MEMORY_TTL_MS || 20 * 60 * 1000);
 const ACTIVE_ORDER_CONTEXT_TTL_MS = Number(process.env.ACTIVE_ORDER_CONTEXT_TTL_MS || 45 * 60 * 1000);
@@ -398,7 +407,8 @@ function extraerNombreConversacional(texto) {
 
 function esMensajeBienvenida(texto) {
   const normalized = normalizarTextoAnalisis(texto);
-  return /^(hola|buenas|buenos dias|buenas tardes|buenas noches)$/.test(normalized);
+  return /^(hola|hola abi|buenas|buen dia|buenos dias|buenas tardes|buenas noches|hey|alo|informacion por favor|info por favor|veci|amiga)$/.test(normalized)
+    || /^(hola|buenas|buen dia|buenos dias|buenas tardes|buenas noches|hey|alo|veci|amiga)\b/.test(normalized);
 }
 
 function esIntencionInfoCatalogo(texto) {
@@ -432,7 +442,8 @@ function esDespedida(texto) {
     return false;
   }
 
-  return /^(gracias|muchas gracias|mil gracias|listo gracias|ok gracias|okey gracias|perfecto gracias|bye|chao|adios|hasta luego|hablamos|gracias bye|okey bye|ok bye)$/.test(normalized);
+  return /^(gracias|muchas gracias|mil gracias|listo gracias|ok gracias|okey gracias|perfecto gracias|bye|chao|adios|hasta luego|hablamos|gracias bye|okey bye|ok bye|listo mi amor|gracias mi amor|listo entonces|dale gracias|listo reina)$/.test(normalized)
+    || /\b(gracias|bye|chao|adios|hasta luego|hablamos|quedo atento|quedo atenta|quedamos asi|quedamos así)\b/.test(normalized);
 }
 
 function esConfirmacionCasual(texto) {
@@ -451,7 +462,7 @@ function esIntencionAyudaHumana(texto) {
 
 function esIntencionCorreccion(texto) {
   const normalized = normalizarTextoAnalisis(texto);
-  return /\b(no entendiste|eso no era|te equivocaste|no ese|no era ese|el otro|me equivoque|me equivoqué|corrige|corregir)\b/.test(normalized);
+  return /\b(no entendiste|no me entendiste|eso no era|asi no era|así no era|te equivocaste|no ese|no era ese|el otro|me equivoque|me equivoqué|corrige|corregir|cambialo|cámbialo|borra eso|arranquemos otra vez|empecemos de nuevo|antes no|mejor no ese)\b/.test(normalized);
 }
 
 function esIntencionReorden(texto) {
@@ -482,6 +493,23 @@ function esIntencionMetodoPago(texto) {
 
 function esIntencionDireccion(texto) {
   return Boolean(extraerDireccionDesdeTexto(texto));
+}
+
+function inferirRequestedPriceTierDesdeTexto(texto) {
+  const normalized = normalizarTextoAnalisis(texto);
+  if (!normalized) {
+    return null;
+  }
+
+  if (/\b(distribuidor|distribucion|distribución|por mayor|mayorista|para negocio|para mi negocio|tengo tienda|soy tienda|revendo|para revender|precio distribuidor)\b/.test(normalized)) {
+    return "distributor";
+  }
+
+  if (/\b(publico|público|al detal|unidad|precio normal|precio publico|precio público|para la casa|consumo personal)\b/.test(normalized)) {
+    return "public";
+  }
+
+  return null;
 }
 
 function esReferenciaDireccionPersistida(texto, state) {
@@ -561,6 +589,10 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
     return "address_provided";
   }
 
+  if (esIntencionPrecio(texto)) {
+    return "price_request";
+  }
+
   if (esIntencionRemoverItem(texto) && (hasDraftContext || hasActiveContext)) {
     return "remove_item";
   }
@@ -613,6 +645,9 @@ function detectarIntencionConversacional(texto, { hasDraftContext = false, hasAc
   }
 
   if (esMensajeBienvenida(texto)) {
+    if (hasDraftContext || hasActiveContext) {
+      return "general_chat";
+    }
     return customerName ? "general_chat" : "greeting";
   }
 
@@ -2034,6 +2069,22 @@ function consolidarItemsPedido(items = []) {
 function extraerMetodoPagoDesdeTexto(texto) {
   const normalized = normalizarTextoAnalisis(texto);
 
+  if (!normalized) {
+    return null;
+  }
+
+  if (/\b(pago|pagaria|pagaría|seria por|sería por|te pago|pagamos)\b.*\b(nequi|daviplata|transferencia|bancolombia|davivienda|pse|qr)\b/.test(normalized)) {
+    return "Transferencia";
+  }
+
+  if (/\b(te transfiero|transferimos|te consigno|te mando transferencia|te hago transferencia|por transferencia)\b/.test(normalized)) {
+    return "Transferencia";
+  }
+
+  if (/\b(pago|pagaria|pagaría|te pago|pagamos)\b.*\b(efectivo|contra entrega|contraentrega|cuando llegue)\b/.test(normalized)) {
+    return "Efectivo";
+  }
+
   for (const [alias, canonical] of PAYMENT_ALIASES.entries()) {
     if (normalized.includes(normalizarTextoAnalisis(alias))) {
       return canonical;
@@ -2078,6 +2129,11 @@ function extraerDireccionDesdeTexto(texto, { lastAddress = null } = {}) {
 
   if (labeledMatch?.[1]) {
     return limpiarTexto(labeledMatch[1]);
+  }
+
+  const landmarkMatch = raw.match(/((?:vereda|sector|finca|local|frente a|al lado de|cerca a|por la|por el|junto a|diagonal a|esquina de|iglesia|parque)[^,.]*)/i);
+  if (landmarkMatch?.[1]) {
+    return limpiarTexto(String(landmarkMatch[1]).replace(/\s+(?:pago|nequi|daviplata|efectivo|transferencia|bancolombia|davivienda)\b.*$/i, ""));
   }
 
   const keywordMatch = raw.match(new RegExp(`((?:calle|cll|cl|carrera|cra|cr|avenida|av\\.?|barrio|manzana|mz|casa|apartamento|apto|torre|bloque|centro)[^,.]*)`, "i"));
@@ -3131,7 +3187,13 @@ function buildValidatedResponseContext({ orchestratorContext, gptIntent, pedido 
           hasVisionResult: Boolean(recentImage.analysis)
         }
       : null,
-    tone: "Abi cálida, natural, comercial, corta y estilo WhatsApp"
+    responseConstraints: {
+      avoidRepetition: true,
+      askOnlyOneMissingThingAtATime: true,
+      keepColombianNaturalTone: true,
+      doNotRepeatWholeOrderIfOnlyOneFieldChanged: true
+    },
+    tone: "Abi cálida, natural, comercial, corta, colombiana y estilo WhatsApp"
   };
 }
 
@@ -4629,29 +4691,176 @@ function extractImageAnalysisCatalogLines(imageAnalysis = {}) {
   return deduped;
 }
 
-function buildImageOrderNormalizedText(imageAnalysis = {}, caption = null) {
-  const quantityByLine = new Map((Array.isArray(imageAnalysis.items) ? imageAnalysis.items : [])
-    .map((item) => {
-      const normalized = normalizarTextoAnalisis(limpiarTexto(item?.product_query || item?.raw_text || ""));
-      const quantity = Math.max(1, Number(item?.quantity) || 1);
-      return normalized ? [normalized, quantity] : null;
-    })
-    .filter(Boolean));
-  const itemLines = extractImageAnalysisCatalogLines(imageAnalysis)
+function isLikelyImageOrderLine(line = "") {
+  const cleaned = limpiarTexto(line);
+  const normalized = normalizarTextoAnalisis(cleaned);
+  if (!normalized) {
+    return false;
+  }
+
+  if (RECEIPT_IMAGE_KEYWORDS.some((keyword) => normalized.includes(normalizarTextoAnalisis(keyword)))) {
+    return false;
+  }
+
+  if (/\b(total|subtotal|pedido|cliente|telefono|tel|cel|fecha|hora|nota|observacion|observación|direccion|dirección|pago|metodo|método|gracias|domicilio|envio|envío)\b/.test(normalized)) {
+    return false;
+  }
+
+  if (extraerMetodoPagoDesdeTexto(cleaned) || extraerDireccionDesdeTexto(cleaned)) {
+    return false;
+  }
+
+  const analysis = analizarProductosCatalogoDesdeTexto(cleaned);
+  return Boolean(
+    analysis.items.length
+    || analysis.ambiguities.length
+    || analysis.possibleMatch
+    || encontrarCoincidenciasCatalogo(cleaned, { minScore: 65, limit: 1 }).length
+  );
+}
+
+function normalizeImageLineToItem(line = "", confidence = 0.76) {
+  const cleaned = limpiarTexto(line);
+  if (!cleaned) {
+    return null;
+  }
+
+  const parsedLine = parseListOrderLine(cleaned);
+  const rawProductText = limpiarTexto(parsedLine?.productText || cleaned) || cleaned;
+  const productQuery = limpiarTextoProductoSolicitado(rawProductText) || rawProductText;
+  const quantity = Math.max(1, Number(parsedLine?.cantidad) || encontrarCantidadEnSegmento(cleaned) || 1);
+  return {
+    raw_text: cleaned,
+    product_query: productQuery,
+    quantity,
+    confidence: Math.max(0, Math.min(1, Number(confidence) || 0.76))
+  };
+}
+
+function enrichImageAnalysisForOrder(imageAnalysis = {}, caption = null) {
+  const normalizedCaption = limpiarTexto(caption);
+  const baseItems = Array.isArray(imageAnalysis?.items) ? imageAnalysis.items : [];
+  const rawLines = extractImageAnalysisCatalogLines(imageAnalysis);
+  const seen = new Set();
+  const normalizedItemKeys = new Set();
+
+  const mergedItems = [];
+  for (const item of baseItems) {
+    const normalizedKey = normalizarTextoAnalisis(limpiarTexto(item?.product_query || item?.raw_text || ""));
+    const normalizedRaw = normalizarTextoAnalisis(limpiarTexto(item?.raw_text || ""));
+    if (normalizedKey) {
+      normalizedItemKeys.add(normalizedKey);
+    }
+    if (normalizedRaw) {
+      normalizedItemKeys.add(normalizedRaw);
+    }
+    const normalizedIdentity = normalizedKey || normalizedRaw;
+    if (normalizedIdentity && seen.has(normalizedIdentity)) {
+      continue;
+    }
+    if (normalizedIdentity) {
+      seen.add(normalizedIdentity);
+    }
+    mergedItems.push({
+      raw_text: limpiarTexto(item?.raw_text || item?.product_query || ""),
+      product_query: limpiarTexto(item?.product_query || item?.raw_text || ""),
+      quantity: Math.max(1, Number(item?.quantity) || 1),
+      confidence: Math.max(0, Math.min(1, Number(item?.confidence) || 0.78))
+    });
+  }
+
+  for (const line of rawLines) {
+    if (!isLikelyImageOrderLine(line)) {
+      continue;
+    }
+    const normalizedLine = normalizarTextoAnalisis(limpiarTextoProductoSolicitado(line) || line);
+    if (!normalizedLine || normalizedItemKeys.has(normalizedLine)) {
+      continue;
+    }
+
+    const inferredItem = normalizeImageLineToItem(line, 0.74);
+    if (!inferredItem) {
+      continue;
+    }
+
+    normalizedItemKeys.add(normalizedLine);
+    mergedItems.push(inferredItem);
+  }
+
+  const actionableUncertain = (Array.isArray(imageAnalysis?.uncertain_lines) ? imageAnalysis.uncertain_lines : [])
     .map((line) => {
-      const normalized = normalizarTextoAnalisis(line);
-      const quantity = quantityByLine.get(normalized);
-      const alreadyHasQuantity = /^\s*\d+\b/.test(line);
-      return quantity && !alreadyHasQuantity ? `${quantity} ${line}`.trim() : line;
+      const text = limpiarTexto(line?.text || line?.raw_text || line);
+      if (!text || !isLikelyImageOrderLine(text)) {
+        return null;
+      }
+      const normalizedText = normalizarTextoAnalisis(limpiarTextoProductoSolicitado(text) || text);
+      if (normalizedText && normalizedItemKeys.has(normalizedText)) {
+        return null;
+      }
+
+      const confidence = Number(line?.confidence);
+      return {
+        text,
+        confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null
+      };
     })
     .filter(Boolean);
-  const normalizedCaption = normalizarTextoAnalisis(caption);
-  const shouldIncludeCaption = Boolean(normalizedCaption)
-    && !["imagen recibida", "pedido de imagen", "imagen", "foto"].includes(normalizedCaption)
-    && !RECEIPT_IMAGE_KEYWORDS.some((keyword) => normalizedCaption.includes(normalizarTextoAnalisis(keyword)));
-  const extras = [shouldIncludeCaption ? limpiarTexto(caption) : null].filter(Boolean);
 
-  return [...itemLines, ...extras].join("\n").trim() || null;
+  const fallbackSource = [normalizedCaption, limpiarTexto(imageAnalysis?.extracted_text)].filter(Boolean).join("\n");
+  const address = limpiarTexto(imageAnalysis?.address) || extraerDireccionDesdeTexto(fallbackSource);
+  const paymentMethod = limpiarTexto(imageAnalysis?.payment_method)
+    || extraerMetodoPagoDesdeTexto(fallbackSource)
+    || null;
+
+  const overallConfidence = mergedItems.length
+    ? mergedItems.reduce((acc, item) => acc + (Number(item?.confidence) || 0), 0) / mergedItems.length
+    : Math.max(0, Math.min(1, Number(imageAnalysis?.overall_confidence) || 0));
+
+  return {
+    ...imageAnalysis,
+    items: mergedItems,
+    uncertain_lines: actionableUncertain,
+    address,
+    payment_method: paymentMethod,
+    overall_confidence: Math.max(0, Math.min(1, overallConfidence || 0))
+  };
+}
+
+function buildImageOrderNormalizedText(imageAnalysis = {}, caption = null) {
+  const items = Array.isArray(imageAnalysis.items) ? imageAnalysis.items : [];
+  const itemLines = items
+    .map((item) => {
+      const baseLine = limpiarTexto(item?.raw_text || item?.product_query || "");
+      if (!baseLine) {
+        return null;
+      }
+      const quantity = Math.max(1, Number(item?.quantity) || encontrarCantidadEnSegmento(baseLine) || 1);
+      const alreadyHasQuantity = /^\s*\d+\b/.test(baseLine);
+      return quantity && !alreadyHasQuantity ? `${quantity} ${baseLine}`.trim() : baseLine;
+    })
+    .filter(Boolean);
+
+  const seen = new Set(itemLines.map((line) => normalizarTextoAnalisis(limpiarTextoProductoSolicitado(line) || line)).filter(Boolean));
+  const supplementalLines = extractImageAnalysisCatalogLines(imageAnalysis)
+    .filter((line) => isLikelyImageOrderLine(line))
+    .filter((line) => {
+      const normalized = normalizarTextoAnalisis(limpiarTextoProductoSolicitado(line) || line);
+      if (!normalized || seen.has(normalized)) {
+        return false;
+      }
+      seen.add(normalized);
+      return true;
+    });
+
+  const cleanedCaption = limpiarTexto(caption);
+  const normalizedCaption = normalizarTextoAnalisis(cleanedCaption);
+  const shouldIncludeCaption = Boolean(normalizedCaption)
+    && !["imagen recibida", "pedido de imagen", "imagen", "foto", "pedido cliente", "pedido"].includes(normalizedCaption)
+    && !RECEIPT_IMAGE_KEYWORDS.some((keyword) => normalizedCaption.includes(normalizarTextoAnalisis(keyword)))
+    && isLikelyImageOrderLine(cleanedCaption);
+  const extras = [shouldIncludeCaption ? cleanedCaption : null].filter(Boolean);
+
+  return [...itemLines, ...supplementalLines, ...extras].join("\n").trim() || null;
 }
 
 function buildImageOrderConfidence(imageAnalysis = {}) {
@@ -4935,13 +5144,31 @@ function shouldDeferOrderPersistence({ state, pedido, evaluacion, mensaje = "", 
   }
 
   const imageContext = getLastImageContext(state);
-  const hasDraftContext = Boolean(state?.pendingPedido?.productos?.length || state?.activeOrderContext?.products?.length);
+  const pendingClarification = obtenerAclaracionPendienteActiva(state);
+  const pendingProduct = obtenerPendingProductActivo(state);
+  const suggestionMemory = obtenerSuggestionMemoryActiva(state);
+  const imageNeedsManualReview = Boolean(
+    imageAnalysis
+    && (
+      Boolean(imageAnalysis?.uncertain_lines?.length)
+      || buildImageOrderConfidence(imageAnalysis) < 0.88
+    )
+  );
+  const suggestionRequiresConfirmation = Boolean(
+    suggestionMemory
+    && ["ambiguity_suggestion", "soft_suggestion", "catalog_family"].includes(suggestionMemory.tipo)
+    && Array.isArray(suggestionMemory.options)
+    && suggestionMemory.options.length
+  );
+
   return Boolean(
-    imageContext?.lastImageProducts?.length
-    || imageAnalysis
-    || hasDraftContext
-    || ["address_provided", "payment_method", "modify_quantity", "remove_item", "order_missing_data"].includes(intent)
-    || messageType === "audio"
+    (messageType === "image" && imageContext?.lastImageProducts?.length && !pedido?.direccion)
+    || imageNeedsManualReview
+    || pendingClarification
+    || pendingProduct
+    || suggestionRequiresConfirmation
+    || ["modify_quantity", "remove_item", "ambiguous_reference"].includes(intent)
+    || (messageType === "audio" && evaluacion?.ambiguousProducts?.length)
   );
 }
 
@@ -5020,13 +5247,15 @@ async function processImageOrder(image = null) {
     filename: image.filename || null
   });
 
-  const imageAnalysis = await analizarImagenPedido({
+  const rawImageAnalysis = await analizarImagenPedido({
     buffer,
     mimeType: image.mimeType || "image/jpeg",
     filename: image.filename || "pedido.jpg",
     caption: image.caption,
     language: "es"
   });
+
+  const imageAnalysis = enrichImageAnalysisForOrder(rawImageAnalysis, image.caption);
 
   logEvent("IMAGE_OCR_RESULT", {
     telefono: image.phone || null,
@@ -5096,6 +5325,8 @@ async function executeRecentImageReview({ telefono, sourceMessageId, origen = "w
       fallback: "image_order_ocr"
     }, "warn");
   }
+
+  imageAnalysis = enrichImageAnalysisForOrder(imageAnalysis, imageContext?.caption || triggerText || null);
 
   if (state && imageContext) {
     setLastImageContext(state, {
@@ -6869,6 +7100,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   const previousMessageCount = countMessagesByPhone(telefono);
   const activeOrderBefore = getActiveOrderByPhone(telefono);
   const state = obtenerEstadoConversacion(telefono);
+  const responseVariantSeed = `${telefono || ""}-${sourceMessageId || ""}-${normalizarTextoAnalisis(mensaje || "")}`;
   const customerProfile = resolveCustomerProfile(telefono);
   if (customerProfile.customerName) {
     state.customerName = customerProfile.customerName;
@@ -7113,7 +7345,13 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     || esReferenciaAmbigua(mensaje, state)
     || gptIntent.intent === "add_item"
     || hasResolvableSpecialInstructionOrder(mensaje);
+  const shouldKeepPriceIntent = routingIntent === "price_request"
+    && esIntencionPrecio(mensaje)
+    && !hasDraftContext
+    && !contextualizedMessage.used
+    && !esReferenciaAmbigua(mensaje, state);
   const effectiveRoutingIntent = shouldForceOrderFlow && ["general_chat", "catalog_request", "price_request"].includes(routingIntent)
+    && !shouldKeepPriceIntent
     ? "order_missing_data"
     : routingIntent;
   const hasOrderIntent = effectiveRoutingIntent === "order_request" || effectiveRoutingIntent === "order_missing_data";
@@ -7226,7 +7464,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.lastIntent = routingIntentFinal;
     state.awaitingName = !state.customerName;
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
-    const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null, isDistributor: customerProfile.isDistributor });
+    const fallback = construirRespuestaCatalogoInicial({ customerName: state.customerName || null, isDistributor: customerProfile.isDistributor, variantSeed: responseVariantSeed });
     const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
@@ -7262,7 +7500,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     limpiarPendingProduct(state);
     limpiarSuggestionMemory(state);
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
-    const respuesta = construirRespuestaDespedida({ customerName: state.customerName || null });
+    const respuesta = construirRespuestaDespedida({ customerName: state.customerName || null, variantSeed: responseVariantSeed });
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
   }
@@ -7273,7 +7511,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     state.awaitingName = false;
     state.lastIntent = routingIntentFinal;
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
-    const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts(customerProfile.customerType), priceLabel: customerProfile.priceLabel, isDistributor: customerProfile.isDistributor });
+    const fallback = construirRespuestaNombreRegistrado({ customerName: explicitName, featuredProducts: buildCatalogFeaturedProducts(customerProfile.customerType), priceLabel: customerProfile.priceLabel, isDistributor: customerProfile.isDistributor, variantSeed: responseVariantSeed });
     const respuesta = fallback;
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
@@ -7281,7 +7519,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
   if (routingIntentFinal === "human_help") {
     state.lastIntent = routingIntentFinal;
-    const fallback = construirRespuestaAyudaHumana();
+    const fallback = construirRespuestaAyudaHumana({ variantSeed: responseVariantSeed });
     const respuesta = await generarRespuestaConversacional({
       telefono,
       sourceMessageId,
@@ -7303,7 +7541,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntentFinal === "complaint_confusion") {
     state.lastIntent = routingIntentFinal;
     const pedidoActual = construirPedidoDesdeEstado(state);
-    const fallback = construirRespuestaCorreccion({ pedido: pedidoActual });
+    const fallback = construirRespuestaCorreccion({ pedido: pedidoActual, variantSeed: responseVariantSeed });
     const respuesta = await generarRespuestaConversacional({
       telefono,
       sourceMessageId,
@@ -7553,7 +7791,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
 
     guardarSuggestionMemory(state, featuredCatalog.map((product) => ({ nombre: product?.catalogName || product?.label || product })), { type: "catalog_featured", reason: "catalog_request" });
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
-    const respuesta = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts: featuredCatalog, priceLabel: pricingContext.priceLabel, isDistributor: pricingContext.isDistributor, guideMode });
+    const respuesta = construirRespuestaCatalogoInformativo({ customerName: state.customerName || null, featuredProducts: featuredCatalog, priceLabel: pricingContext.priceLabel, isDistributor: pricingContext.isDistributor, guideMode, variantSeed: responseVariantSeed });
     rememberOrderGuideShown(state, guideMode);
     const delivery = await responderAlCliente({ telefono, respuesta, simulated, orderId: null });
     return { pedido: null, evaluacion: null, order: null, inboundMessage, respuesta, delivery, firstContact: previousMessageCount === 0, activeOrderBefore: null, intent: routingIntentFinal };
@@ -7562,19 +7800,33 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
   if (routingIntentFinal === "price_request") {
     state.lastIntent = routingIntentFinal;
     state.awaitingName = false;
-    const pricingContext = buildCatalogPricingContext(customerProfile.customerType);
-    const featuredProducts = buildPriceRequestProducts(contextualizedMessage.text || mensaje, 4, customerProfile.customerType);
-    const fallbackProducts = featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts(customerProfile.customerType);
+    const queryText = contextualizedMessage.text || mensaje;
+    const requestedPriceTier = inferirRequestedPriceTierDesdeTexto(queryText);
+    const canAccessDistributorPricing = customerProfile.isDistributor && Boolean(customerProfile.customer?.isActive);
+    const effectivePriceTier = requestedPriceTier === "public"
+      ? "public"
+      : (requestedPriceTier === "distributor" && !canAccessDistributorPricing ? "public" : customerProfile.customerType);
+    const pricingContext = buildCatalogPricingContext(effectivePriceTier);
+    const featuredProducts = buildPriceRequestProducts(queryText, 4, effectivePriceTier);
+    const fallbackProducts = featuredProducts.length ? featuredProducts : buildCatalogFeaturedProducts(effectivePriceTier);
     guardarSuggestionMemory(state, fallbackProducts.map((product) => ({ nombre: product.label || product })), { type: "price_suggestion", reason: "price_request" });
     actualizarActiveOrderContext(state, { intent: routingIntentFinal });
-    const queryLabel = limpiarTextoProductoSolicitado(contextualizedMessage.text || mensaje) || "ese producto";
-    const fallback = construirRespuestaPreciosInformativo({
-      customerName: state.customerName || null,
-      featuredProducts: fallbackProducts,
-      queryLabel,
-      priceLabel: pricingContext.priceLabel,
-      isDistributor: pricingContext.isDistributor
-    });
+    const queryLabel = limpiarTextoProductoSolicitado(queryText) || "ese producto";
+    const fallback = requestedPriceTier === "distributor" && !canAccessDistributorPricing
+      ? construirRespuestaPrecioDistribuidorRestringido({
+          customerName: state.customerName || null,
+          featuredProducts: fallbackProducts,
+          queryLabel,
+          variantSeed: responseVariantSeed
+        })
+      : construirRespuestaPreciosInformativo({
+          customerName: state.customerName || null,
+          featuredProducts: fallbackProducts,
+          queryLabel,
+          priceLabel: pricingContext.priceLabel,
+          isDistributor: pricingContext.isDistributor,
+          variantSeed: responseVariantSeed
+        });
     const respuesta = await generarRespuestaConversacional({
       telefono,
       sourceMessageId,
@@ -7623,7 +7875,9 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
           ambiguousProducts: [],
           unmatchedProducts: []
         }, { availableProducts: buildCatalogShortList(5) })
-      : construirRespuestaConfirmacion({ hasDraftContext, isDistributor: customerProfile.isDistributor });
+      : (hasDraftContext
+        ? construirRespuestaConfirmacion({ hasDraftContext, isDistributor: customerProfile.isDistributor, variantSeed: responseVariantSeed })
+        : construirRespuestaCasual({ variantSeed: responseVariantSeed }));
     const respuesta = activeContext?.products?.length
       ? await generarRespuestaConversacional({
           telefono,
@@ -7853,7 +8107,7 @@ async function ejecutarFlujoMensaje({ mensaje, telefono, sourceMessageId, origen
     : getOrderGuideMode({ texto: mensaje, routingIntent: resultado.intent, state, evaluacion: resultado.evaluacion });
   const fallbackRespuesta = resultado.awaitingFinalConfirmation
     ? buildFinalConfirmationFallback(resultado.pedido)
-    : (imageAnalysis
+    : (imageAnalysis && !resultado.order
       ? buildImageOrderFallback({ pedido: resultado.pedido, evaluacion: resultado.evaluacion, imageAnalysis })
       : construirRespuestaPedido(resultado.pedido, resultado.evaluacion, {
           availableProducts: buildCatalogShortList(5),
@@ -8662,6 +8916,10 @@ app.post("/simulate-message", async (req, res) => {
     }
 
     const sourceMessageId = limpiarTexto(req.body?.sourceMessageId) || buildSimulatedSourceMessageId();
+    const imageAnalysisOverride = messageType === "image" && req.body?.imageAnalysis
+      ? enrichImageAnalysisForOrder(normalizarResultadoImagenPedido(req.body.imageAnalysis), mensaje)
+      : null;
+    const imageRequiresConfirmation = Boolean(req.body?.imageRequiresConfirmation);
     const dedupe = registrarMensajeProcesado({
       messageId: sourceMessageId,
       telefono,
@@ -8696,7 +8954,9 @@ app.post("/simulate-message", async (req, res) => {
       mediaId,
       mediaBuffer,
       mediaMimeType,
-      mediaFilename
+      mediaFilename,
+      imageAnalysisOverride,
+      imageRequiresConfirmation
     });
 
     return res.json({
